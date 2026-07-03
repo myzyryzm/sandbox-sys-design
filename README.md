@@ -3,28 +3,32 @@
 Learn distributed-systems behavior **by running it**: spin up small but real
 systems, throw load at them, and watch real metrics move on a live diagram.
 
-The repo ships one seed system, `hello-lb` — an nginx load balancer → `service-1`
+The repo ships a minimal seed system, `hello-lb` — an nginx load balancer → `service-1`
 (a generic FastAPI service), with Prometheus scraping the service and a generic
 React frontend rendering the topology with live metrics overlaid. Each service is
 reached through the LB at its own `/<service-id>/` prefix, and the LB node lists
-those live, routable endpoints.
+those live, routable endpoints. (A richer worked example, `payment-service`, ships
+alongside it — see [Folder structure](#folder-structure-the-extensibility-contract).)
 
 From there you grow the system **entirely from the browser** — every component is
 real Docker, not a mock. From the header and per-node Edit panels you can add:
 
 - **Services** (generic FastAPI) and **HTTP endpoints** on them (Claude-authored),
 - **Databases** — Postgres, MongoDB, Redis, or a MinIO blob store (+ exporters),
-  and **read replicas** of them,
-- **Event streams** — a single-broker Kafka (KRaft) with topics/producers/consumers,
+  **read replicas**, durable **seed data**, and **CDC** (change-data-capture to Kafka),
+- **Event streams** — a single-broker Kafka (KRaft) with topics, producers, and
+  per-service **consumer functions**, plus optional model-backed topic schemas,
 - **gRPC contracts** between services (server/client roles, drawn as edges),
 - **Resilience policies** — circuit-breaker + retry on a connection,
+- **Clients** (multi-step callers) and **external services** (third-party deps),
 - **Custom service types** — typed services that scaffold real containers (the
   first is the peer-to-peer **Download Coordinator**),
 
-and exercise it all: generate load, trace an endpoint's request path, and take a
-node offline to watch failures propagate. The frontend stays generic — it renders
-whatever the selected system's `manifest.json` describes, so nothing above needs a
-frontend edit.
+and exercise it all: generate load, trace an endpoint's request path, take a node
+offline to watch failures propagate, and run **end-to-end test processes** that seed
+preconditions, drive clients, and probe for design defects (PASS/FAIL). The frontend
+stays generic — it renders whatever the selected system's `manifest.json` describes,
+so nothing above needs a frontend edit.
 
 ---
 
@@ -33,12 +37,18 @@ frontend edit.
 ```
 repo-root/
   systems/
-    hello-lb/                  # one self-contained system
+    hello-lb/                  # minimal seed system (lb -> service-1)
+    payment-service/           # richer worked example (~15 nodes; see below)
+    <id>/                      # one self-contained system:
       docker-compose.yml       # runs the whole system (one container per node)
-      manifest.json            # topology + per-node PromQL (the frontend reads this)
+      manifest.json            # topology + per-node PromQL + boundary (the frontend reads this)
       endpoints.json           # per-service endpoint registry (drives the trace)
-      streams.json             # Kafka topic ⊕ producer/consumer registry (if any)
+      models.json              # model bank: reusable TypeScript interfaces (if any)
+      clients.json             # client roster (multi-step callers, if any)
       scenarios.json           # per-client functions (multi-step call chains, keyed by client)
+      consumers.json           # per-service Kafka consumer functions (if any)
+      endtoend.json            # named end-to-end test processes (if any)
+      endtoend-runs/           # persisted PASS/FAIL run reports
       load.sh                  # load generator (honors URL + METHOD env)
       prometheus/prometheus.yml
       nginx/nginx.conf         # per-service /<id>/ routes (insertion markers)
@@ -47,11 +57,17 @@ repo-root/
         app.py
         requirements.txt
         Dockerfile
+      <db>/                    # a datastore: init script, seeds.json + seed.sql|seed.js, cdc.json
+      <db>-cdc/                # a CDC worker container (Dockerfile + app.py) if CDC is enabled
+      <cluster>/streams.json   # per-Kafka-cluster topic ⊕ producer/consumer registry
+      clients/                 # per-client Python (module.py) + shared lbclient.py
       <node>/data/             # durable bind-mounted state (db data, coordinator chunks, …)
   frontend/                    # generic React app, SHARED across all systems
+    src/                       # the generic diagram + modals (renders any manifest)
     src/customTypes/           # frontend rendering for custom service types
     server/                    # Vite dev-server plugins (the backend "control plane")
       templates/service/                # canonical generic service ("Add service" clones this)
+      templates/client/                 # generic client Python (clients scaffold from this)
       templates/download-coordinator/   # coordinator + worker templates
       customTypes/                       # backend recipes for custom service types
   README.md
@@ -61,6 +77,13 @@ repo-root/
 compose file + `manifest.json`. The frontend never needs editing — it renders
 whatever the selected system's manifest describes. Point the frontend at a
 different system by changing `VITE_SYSTEM_ID` in `frontend/.env`.
+
+The repo ships two systems: **`hello-lb`** (the minimal seed) and
+**`payment-service`** — a richer example (~15 nodes) that exercises most features at
+once: five FastAPI services behind the lb, two Postgres databases with
+model-bank-backed schemas, two Kafka clusters fed by a **CDC worker** off the ledger
+database, a Kafka **consumer function**, two external services, two clients with
+multi-step functions, and a saved **end-to-end test process**.
 
 ---
 
@@ -87,15 +110,18 @@ From the repo root, start/stop a system by id — this brings up its Docker stac
 - `./stop.sh hello-lb --keep-frontend` — tear down Docker but leave the frontend up.
 - Run with no args to list available systems.
 
-Create a **new system** by cloning the base (`hello-lb`) — it starts immediately:
+Create a **new system** from scratch — it starts immediately:
 
 ```bash
-./create_new.sh my-system     # systems/my-system/ from hello-lb, then ./start.sh my-system
+./create_new.sh my-system     # fresh minimal systems/my-system/, then ./start.sh my-system
 ```
 
-The id must be lowercase letters/digits/hyphens. It copies `systems/hello-lb/`,
-rewrites the manifest's `system_id`/`name`, and brings the new system up. Edit
-`systems/my-system/manifest.json` (and `service-1/`, compose) to make it yours.
+The id must be lowercase letters/digits/hyphens. It generates a **fresh minimal
+system** — an nginx LB → one generic `service-1` + Prometheus, no databases or edges —
+copying the service files (`app.py`, `requirements.txt`, `Dockerfile`) from the same
+`frontend/server/templates/service/` template the UI's "Add service" uses (it does
+**not** clone `hello-lb`), then brings it up. Grow it from the browser, or edit
+`systems/my-system/` by hand.
 
 Only one system holds the shared host ports (8080/8000/9090) at a time, so
 `start.sh` (and `create_new.sh`) automatically stops the previously active
@@ -150,6 +176,39 @@ Everything is same-origin through the **Vite dev server**:
 
 Because both go through the dev server, the **frontend must be started with
 `npm run dev`** for live metrics — a plain static build won't have the proxy.
+
+---
+
+## What you can do from the header
+
+The header shows the system name/id and a row of top-level actions. Left to right:
+
+| Button | What it opens / does |
+| --- | --- |
+| **Drag** | Toggle drag mode — reposition nodes and move/resize the system-boundary box; the layout is saved to the manifest (`POST /api/layout`), no rebuild. |
+| **🧪 Test** | Simulations modal — today "Generate load" against a chosen endpoint. |
+| **🔁 End-to-End** | End-to-end test processes — define + run seed→drive→probe processes with a PASS/FAIL verdict. |
+| **📖 Skills** | Browse the Claude Code skills a launched session can use (served live from `.claude/skills/`). |
+| **＋ Add service** | Add a generic FastAPI service — or a **custom service type** (e.g. Download Coordinator). |
+| **＋ Add external service** | Add a third-party dependency, drawn outside the system boundary. |
+| **＋ Add client** | Add a multi-step caller (no container), drawn left of the boundary. |
+| **＋ Add database** | Provision Postgres / MongoDB / Redis / MinIO (+ exporter). |
+| **＋ Add event stream** | Provision a single-broker Kafka cluster (+ exporter). |
+| **＋ gRPC contract** | Open the gRPC contract bank (define / upload `.proto` contracts). |
+| **＋ Models** | Open the model bank (reusable TypeScript interfaces). |
+| **🗒 Queue** | Show the edit queue — pending Claude sessions run one at a time. |
+| **Edit with Claude ▸** | Toggle the embedded Claude Code terminal. |
+
+Per-node actions live on each node's **Edit** panel (opened from the diagram): a
+service has Endpoints / gRPC / Shutdown / Delete; a database adds Seed / CDC / Add
+read replica / Schema; a Kafka cluster has Topics / Consumers; a client has Functions;
+and so on — each is covered in its section below.
+
+**The edit queue.** Most feature actions that need judgment (author an endpoint, a
+Kafka consumer loop, a client function, a CDC worker, …) launch a Claude Code session.
+To keep concurrent sessions from clobbering each other's rebuilds, each is **enqueued**
+and they run **one at a time** in the single embedded terminal; the **🗒 Queue** button
+shows how many are pending. "Resume" / "show this session" actions bypass the queue.
 
 ---
 
@@ -239,6 +298,50 @@ grouped by `namespace:`, MinIO → `ls /data` (one directory per bucket).
 - Same localhost-only security posture as the terminal: the endpoint runs inside
   the dev server, validates all input against strict whitelists, and only writes
   generated files — keep the dev port private.
+
+---
+
+## Seeding a database with fixture data
+
+A **Postgres or MongoDB** node's Edit panel has a **Seed** tab that fills the database
+with durable fixture rows that **survive rebuilds**. Pick a table/collection, fill in
+the fields (the form is driven by the database's *live* introspected schema, so a blank
+field falls back to the DB default), and **Add entry**. Backend: `frontend/server/dbseed.js`.
+
+Each add does two things: it applies the row **live** to the running container (so an
+FK/constraint violation surfaces immediately) and appends it to a source-of-truth
+`systems/<id>/<db>/seeds.json`, from which an **idempotent** `seed.sql` (Postgres) or
+`seed.js` (Mongo) is regenerated and mounted into the container's init directory
+**after** the schema script. So a from-scratch rebuild (`down -v` + up) runs the schema
+and then replays the seed data. A **Re-seed now** link re-applies everything after a
+test wipe. No Claude session and no image rebuild — it's mechanical and live. Read
+replicas and non-field stores (Redis / MinIO) are excluded.
+
+Routes: `GET /api/db-seed`, `POST /api/db-seed` (add), `POST /api/db-seed-remove`,
+`POST /api/db-seed-apply` (re-apply all).
+
+---
+
+## Change data capture (CDC → Kafka)
+
+A **Postgres or MongoDB** node's Edit panel has a **CDC** tab that streams a table's row
+changes to a Kafka topic. Add a rule — a table, which operations to capture
+(`INSERT` / `UPDATE` / `DELETE`), and a target event stream + topic — and the change
+feed becomes **real**: a per-database worker container `<db>-cdc` tails Postgres logical
+replication / Mongo change streams and produces to the broker. Backend:
+`frontend/server/cdc.js`; the worker code is authored by the `sandbox-database-cdc` skill.
+
+The first rule does the heavy lifting: it enables the engine's capture mode (Postgres
+`wal_level=logical`; a single-node Mongo replica set), scaffolds the worker (a
+`type:"cdc"`, `cdcOf:"<db>"` manifest node + `<db>` → `<db>-cdc` → topic edges + a scrape
+job), registers the worker as a producer on the topic, and launches a Claude session
+that writes `systems/<id>/<db>-cdc/{Dockerfile,app.py,requirements.txt}` and builds it.
+Later rule edits are pure JSON — they rewrite `systems/<id>/<db>/cdc.json` and `restart`
+the worker (which re-reads the mounted rules). Removing the last rule tears the worker
+down. The worker exports `cdc_events_captured_total` / `cdc_events_produced_total` /
+`cdc_errors_total`, shown on its node.
+
+Routes: `GET /api/db-cdc`, `POST /api/db-cdc` (add/update a rule), `POST /api/db-cdc-remove`.
 
 ---
 
@@ -436,35 +539,37 @@ endpoint on the LB extends the lifecycle trace back to it — `client → LB →
 downstream`.
 
 Its Edit panel has one tab, **Functions**. A *function* is a named, argument-taking
-sequence of HTTP calls the client makes through the load balancer. Each function is
-**owned by that one client** — there is no shared bank and no attach-by-name. External
-services have no functions (the trigger bank is client-only; an external service still
-calls into the system through its own endpoints' `downstream`). Define one with a
-name + argument signature + a plain-English description; that launches a Claude session
-(the `sandbox-client-scenario` skill) which authors the call **steps** into
-`systems/<id>/scenarios.json`. Each step is a method + an LB path (a discovered route) +
-an optional JSON body; tokens substitute at run time — `${args.<name>}` for the
-function's arguments and `${N.field}` (1-indexed) for an earlier step's response, so you
-can e.g. create an order then pay for it with `${1.id}`. **Run** executes the steps **for
-real** through the load balancer (`POST /api/scenarios/run`): each response is captured
-and fed into the next step, and the per-step status + response (and the substituted body)
-are shown — the same real request path the load generator uses (`localhost:8080`). Each
+routine the client runs against the load balancer. Each function is **owned by that one
+client** — there is no shared bank and no attach-by-name. External services have no
+functions (an external service still calls into the system through its own endpoints'
+`downstream`). Define one with a name + argument signature + a plain-English description;
+that launches a Claude session (the `sandbox-client-scenario` skill) which authors the
+function as **real Python** — a `def <name>(...)` in `systems/<id>/clients/<module>.py`
+that calls LB endpoints through a shared `lb` helper with real control flow (if/else,
+loops) and chains one call's response into the next. The registry entry (name, args,
+description, history) lives in `systems/<id>/scenarios.json`; the call **steps** drawn on
+the diagram are **statically re-inferred** from that Python on every read (a scan of
+`lb.<method>("/path")` literals), not hand-authored. **Run** executes the function **for
+real** — `POST /api/scenarios/run` spawns `python3 clients/<module>.py --<name> <args>`
+against the load balancer (`localhost:8080`) and shows the per-step status + response. Each
 of the client's functions also appears as a clickable `ƒ` row on its diagram node, which
-traces the whole call path. Functions persist in `systems/<id>/scenarios.json`, keyed by
-their owner client (`frontend/server/scenarios.js`).
+traces the whole call path. Backends: `frontend/server/clients.js` (the node),
+`scenarios.js` (registry + runner), and the `clientScript.js` helper (the on-disk Python +
+step inference).
 
 ---
 
 ## gRPC contracts between services
 
-Each **service** node's Edit panel has a **gRPC** tab. A gRPC *contract* is a
-`.proto` service authored once and kept in the per-system **bank** under
-`systems/<id>/grpc/` (its `_registry.json` records every method + provenance). You
-define a contract's RPC methods + message types — or upload a complete `.proto`,
-validated by the real `protoc` — then **attach** it to services as a **server**
-(imports the shared servicer + runs a gRPC server) and/or **client** (a stub
-pointed at editable targets). Roles live on the service nodes' manifest `grpc`
-block, so the diagram draws gRPC edges as soon as you attach.
+The header's **"＋ gRPC contract"** button opens the contract **bank**, and each
+**service** node's Edit panel has a **gRPC** tab for attaching. A gRPC *contract* is a
+`.proto` service authored once and kept in the per-system bank under `systems/<id>/grpc/`
+(its `_registry.json` records every method + provenance). You define a contract's RPC
+methods + message types in the bank — or upload a complete `.proto`, validated by the
+real `protoc` — then from a service's gRPC tab **attach** it as a **server** (imports the
+shared servicer + runs a gRPC server) and/or **client** (a stub pointed at editable
+targets). Roles live on the service nodes' manifest `grpc` block, so the diagram draws
+gRPC edges as soon as you attach.
 
 The registry edit is instant; the `.proto` / `_pb2` / `_servicer.py` codegen and
 the `app.py` wiring are done by a launched Claude session (the
@@ -490,12 +595,32 @@ manifest-only. Backend: `frontend/server/resilience.js`; the runtime wiring is t
 ## Event streams (Kafka)
 
 Click **"＋ Add event stream"** to provision a real single-broker **Kafka** (KRaft)
-+ a `kafka-exporter`, a Prometheus scrape job, a manifest node, and a
++ a `kafka-exporter`, a Prometheus scrape job, a manifest node, and a per-cluster
 `streams.json` **topic registry**. Kafka speaks a binary protocol, so there's no
 nginx route. Producers and consumers aren't something the broker tracks, so they
 live in the registry — and that's what the diagram's producer→cluster→consumer
 edges are drawn from. The topic view merges the registry with the broker's **live**
 topic list. Backend: `frontend/server/eventstreams.js`.
+
+The cluster node's Edit panel has two tabs:
+
+- **Topics** — the topic list. A topic can carry a **message schema** by referencing a
+  [model-bank](#models-bank-reusable-typescript-types) type (`schemaModel`); flip
+  **enforce** on (`enforceSchema`) and a launched session adds runtime validation to the
+  producing/consuming services. Producers are declared here as service ids.
+- **Consumers** — **consumer functions**: a named, per-service background poll loop
+  (identity `(service, name)`, stored in the system-level `consumers.json`). Adding one
+  is a live registry write (entry + consumer group + a `cluster → service` edge); the
+  actual `KafkaConsumer` loop is authored **into that service's `app.py`** as a daemon
+  thread by a launched Claude session (the `sandbox-event-stream` skill), which sets
+  `implemented: true`. Description-only edits are registry-only; changing the topic/poll
+  rate re-launches the session to rewrite the loop. Backend: `frontend/server/consumers.js`.
+
+A cluster also has a **pause** toggle (`consumersPaused`) that consumer loops read live
+(no rebuild) so you can freeze consumption and watch lag build. Routes:
+`GET/POST /api/consumers`, `PUT /api/consumers` (rename), `DELETE /api/consumers`;
+`GET /api/event-stream`, `POST /api/event-stream` (topic schema / pause),
+`POST /api/event-streams` (create cluster).
 
 ---
 
@@ -563,6 +688,34 @@ alongside.
 
 ---
 
+## End-to-end test processes (the "End-to-End" button)
+
+Click **"🔁 End-to-End"** to define and run **end-to-end test processes** — the sandbox's
+way of asking "does this system actually hold together under realistic use?" A process
+bundles three things (`systems/<id>/endtoend.json`, backend `frontend/server/endtoend.js`):
+
+- a **client list** — which client functions to drive, each at its own interval,
+- a **failure list** — bad states that must never occur in a valid world (a double charge,
+  an orphaned payment, ledger debits ≠ credits, …): the system's own **design defects**,
+- a **constraint list** — rules of the valid world the test must uphold (seed the
+  preconditions it assumes, use only legal inputs).
+
+Defining a process is pure data entry (no rebuild). **Running** one launches a Claude
+session (the `sandbox-end-to-end-process` skill) that does the real work: it **seeds** the
+out-of-scope preconditions the constraints imply straight into the datastores, synthesizes
+**legal arguments**, drives each client function through the load balancer at its rate for
+the chosen duration, then **probes** for each failure state (datastore queries, Prometheus,
+the call log). It reports an overall **PASS** — or **FAIL** if any failure state is
+observed — and persists a full run report to `systems/<id>/endtoend-runs/`, whose verdict
+shows as a badge on the process row.
+
+Start/stop is coordinated by an in-memory run flag (`POST /api/endtoend/start|stop`) that
+the session polls, so **Stop** (or starting a newer run) ends the current one early; a
+generous backstop timer clears a stuck flag if the session dies. Nothing here rebuilds a
+container — the process only seeds data and drives the already-running system.
+
+---
+
 ## Smoke test — prove the pipeline end to end
 
 The pipeline is: **service exposes metrics → Prometheus pulls them → frontend
@@ -606,12 +759,20 @@ queries. The frontend is a generic renderer of this file. Key fields:
 - `poll_interval_ms` — how often the frontend re-runs the queries (default 4000).
 - `nodes[]` — each has `id`, `label`, `type`, `position {x,y}` (top-left of the
   box), a list of `metrics[]` (each `{label, query, unit, scale?}`), and an
-  optional `health { query, rules[] }`.
+  optional `health { query, rules[] }`. `type` is `load_balancer | service |
+  external_service | client | postgres | mongodb | redis | object-store | kafka |
+  cdc` (or a custom service type). Nodes also carry keys the scaffolding writes:
+  `origin` (which flow created it), `external:true` (clients + external services,
+  drawn outside the boundary), `schemaModels[]` (model-bank names backing a DB's
+  schema), and the ownership links `replicaOf` / `cdcOf` + `grpc` / `resilience` blocks.
 - `health.rules[]` — `{ color, when }`; `when` is a tiny safe expression of the
   form `value <op> number` (e.g. `value < 1`). First matching rule wins; no
   value yet → gray. The seed system colors the `service-1` node off
   `up{job="service-1"}`.
-- `edges[]` — `{ from, to }` node ids, drawn as lines between box centers.
+- `edges[]` — `{ from, to }` node ids, drawn as lines between box centers; an
+  optional `origin` (e.g. `consumer-fn`) tags special edges.
+- `boundary { x, y, w, h }` — the dotted system-boundary rectangle; drag mode saves
+  it (and node positions) via `POST /api/layout` — pure render state, no rebuild.
 
 To extend the diagram, edit the manifest — not the React code.
 

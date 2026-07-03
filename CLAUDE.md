@@ -63,8 +63,18 @@ var today; no in-app selector yet).
 generic renderer of it — **to change what the user sees, edit the manifest, not the React code.**
 - `nodes[]`: `{ id, label, type, position{x,y}, metrics:[{label, query, unit, scale?}],
   health?:{ query, rules:[{color, when}] } }`. `when` is a tiny safe `value <op> number` expression
-  (e.g. `value < 1`); first matching rule wins; no value yet → gray.
-- `edges[]`: `{ from, to }` node ids.
+  (e.g. `value < 1`); first matching rule wins; no value yet → gray. `type` is the node's kind —
+  `load_balancer | service | external_service | client | postgres | mongodb | redis | object-store |
+  kafka | cdc` (or a custom service type like `download-coordinator`). Nodes also carry
+  provenance/relationship keys the scaffolding writes and the diagram reads: `origin`
+  (`create-service` / `create-database` / `create-event-stream` / `create-cdc` /
+  `create-external-service` / `create-client` / …), `external:true` (clients + external services,
+  drawn outside the boundary), `schemaModels:[]` (model-bank names backing a database's schema), the
+  ownership links `replicaOf` / `cdcOf`, and the `grpc` / `resilience` blocks.
+- `edges[]`: `{ from, to }` node ids, plus an optional `origin` (e.g. `consumer-fn` for a Kafka
+  consumer-function edge).
+- `boundary:{x,y,w,h}` is the dotted system-boundary rectangle; drag mode persists it (and node
+  positions) via `POST /api/layout` (`frontend/server/layout.js`) — pure render state, no rebuild.
 - `prometheus_base` is `/api/prometheus` (matches the Vite proxy); `poll_interval_ms` (default 4000).
 - A node's `query` PromQL and the metric it reads must stay consistent with what the service's
   `app.py` actually exports. Service metrics are **hand-written** with `prometheus_client` in a
@@ -101,12 +111,39 @@ rebuild** (the frontend re-reads them on a timer):
   `frontend/src/modelBank.js`. **`//` comments in a model's `ts` are authoritative schema directives**
   (PK/FK/unique/index/length/…) that the DB-authoring prompt honors and that override generic defaults;
   reference detection scans a comment-stripped copy so a model named only in a comment isn't a phantom FK.
-- `scenarios.json` — `{ functions:[{ client, name, args, description, steps, … }] }`, the multi-step
-  call sequences external **clients** run through the lb. Each function is **owned by one client**
-  (identity `(client, name)`; no shared bank, no attach — external services don't have functions);
-  the diagram groups this file by `client` to draw a client's function rows + lifecycle traces.
-- `streams.json` (Kafka topics + producers/consumers), `grpc/_registry.json` (gRPC contract bank +
-  provenance).
+- `scenarios.json` — `{ functions:[{ client, name, args, description, steps, conversationId, history }] }`,
+  the multi-step call sequences external **clients** run through the lb. Each function is **owned by one
+  client** (identity `(client, name)`; no shared bank, no attach — external services don't have
+  functions). The `steps` are **statically re-inferred** from the client's Python on every read
+  (`clientScript.js` regex-scans `lb.<method>("/path")` literals), not hand-authored. The diagram groups
+  this file by `client`; `POST /api/scenarios/run` actually executes the function by spawning
+  `python3 systems/<id>/clients/<module>.py --<name> <args>` and parsing its `__LB_RESULTS__` line.
+- `clients.json` — the per-system client roster the create/delete flow maintains (each client is also a
+  `type:"client"` manifest node with `external:true`, drawn left of the boundary; no container).
+- `consumers.json` — `{ consumers:[{ service, name, cluster, topic, pollRate, downstream,
+  downstreamDescriptions, description, implemented, conversationId, history }] }`, per-service **Kafka
+  consumer functions** (identity `(service, name)`). The registry entry + consumer-group + manifest edge
+  are written live; the actual background poll loop is authored into that service's `app.py` by a
+  launched session, which sets `implemented:true` (`frontend/server/consumers.js`).
+- `<db>/seeds.json` — `{ tables:[{ table, rows:[…] }] }`, durable fixture rows for a postgres/mongo DB.
+  Applied **live** to the running container and regenerated into an idempotent `<db>/seed.sql|seed.js`
+  that's mounted after the schema init script, so a from-scratch rebuild replays them
+  (`frontend/server/dbseed.js`).
+- `<db>/cdc.json` — `{ rules:[{ table, operations, stream, topic }] }`, a database's Change-Data-Capture
+  rules, mounted read-only into the `<db>-cdc` worker container (`type:"cdc"`, `cdcOf:"<db>"`). Rule
+  edits rewrite this file + `restart` the worker; the first rule builds the worker via a launched
+  session (`frontend/server/cdc.js`).
+- `endtoend.json` — `{ processes:[{ id, name, client_list:[{client,method,intervalSeconds}],
+  failure_list:[…], constraint_list:[…] }] }`, named **end-to-end test processes**. Defining is pure
+  data; **running** launches a session (the `sandbox-end-to-end-process` skill) that seeds preconditions,
+  drives the listed client methods on their intervals, probes for the `failure_list` states, and writes a
+  PASS/FAIL report to `systems/<id>/endtoend-runs/`. The `run` flag is an in-memory coordination marker
+  the session polls for early-stop (`frontend/server/endtoend.js`).
+- `streams.json` (per Kafka cluster) — `{ topics:[{ id, producers:[svc], consumers:[{groupId,members}],
+  schemaModel?, enforceSchema? }], consumersPaused? }`. `schemaModel` references a model-bank type as the
+  topic's message contract; `enforceSchema` makes producer/consumer code validate at runtime;
+  `consumersPaused` is a cluster-level pause toggle read live (no rebuild). `grpc/_registry.json` is the
+  gRPC contract bank + provenance.
 
 ### Mutations are done by launched Claude sessions + skills, not by the backend
 
@@ -124,28 +161,41 @@ skill in `.claude/skills/` — it has the canonical procedure and `Verify` steps
 | Add/edit/delete an HTTP route on a service | `sandbox-endpoint` |
 | Add/update/delete a datastore (postgres/mongo/redis/MinIO) **or a read replica** | `sandbox-database` |
 | Build a database's CDC worker (capture changes → Kafka) | `sandbox-database-cdc` |
-| Add/update/delete a Kafka cluster, topics, producers/consumers | `sandbox-event-stream` |
+| Add/update a Kafka cluster, topics, and per-service **consumer functions** | `sandbox-event-stream` |
+| Author a **client function** (a multi-step call sequence run through the lb) | `sandbox-client-scenario` |
 | Define a gRPC contract (`.proto` + protoc + shared servicer) | `sandbox-grpc-contract` |
 | Attach a contract to a service (server/client roles, targets) | `sandbox-grpc-attach` |
 | Circuit-breaker + retry on a connection (edge) | `sandbox-resilience` |
 | Register a new custom service type | `sandbox-custom-service-type` |
 | Work on the Download Coordinator (peer-to-peer chunk distribution) | `sandbox-download-coordinator` |
+| **Run** an end-to-end test process (seed → drive clients → probe for failures) | `sandbox-end-to-end-process` |
 
-`frontend/server/skills.js` serves these at `GET /api/skills`; because sessions spawn with cwd = repo
-root, they auto-load as project skills — adding a `SKILL.md` makes it available with no code change.
+`frontend/server/skills.js` serves these at `GET /api/skills` (the header's **📖 Skills** viewer);
+because sessions spawn with cwd = repo root, they auto-load as project skills — adding a `SKILL.md`
+makes it available with no code change.
+
+**Launched sessions run one at a time via the edit queue.** The frontend doesn't spawn a fresh
+`claude` per action and let them clobber each other's rebuilds — each feature flow calls
+`enqueueSession(cfg, meta)` (`App.jsx`), which appends to an in-app **edit queue** (`🗒 Queue` header
+button + `EditQueuePanel.jsx`) that runs pending sessions sequentially in the one terminal. Resume /
+"show me this session" actions skip the queue.
 
 ## Layout pointers
 
-- `systems/<id>/` — one self-contained system. `hello-lb` is the seed (lb → `service-1`); a service
-  template lives at `frontend/server/templates/service/` ("Add service" clones it). `deltest` is a
-  scratch system.
-- `frontend/server/<feature>.js` — one plugin per `/api/<feature>` route (databases, services,
-  endpoints, models, eventstreams, grpc, resilience, replicas, outage, clients, remove, dbschema,
-  simulate, …); `customTypes/` holds backend recipes for custom service types (frontend renderers in
-  `frontend/src/customTypes/`). `remove.js` also **blocks deleting a node another still depends on**
-  (`findDependents` reverse-scans endpoints `downstream`/gRPC targets/Kafka producers-consumers/scenario
-  steps; replicas + CDC workers are excluded as they cascade) — `GET /api/dependents` powers the Delete
-  tab's proactive warning and `POST /api/delete` enforces the same guard.
+- `systems/<id>/` — one self-contained system. `hello-lb` is the minimal seed (lb → `service-1`);
+  `payment-service` is a richer worked example (~15 nodes: services, two postgres DBs with model-backed
+  schemas, two Kafka clusters + a CDC worker feeding them, external services, clients, and an end-to-end
+  test process). A service template lives at `frontend/server/templates/service/` ("Add service" clones
+  it); `templates/client/` and `templates/download-coordinator/` back the client + coordinator flows.
+- `frontend/server/<feature>.js` — one plugin per `/api/<feature>` route, all wired in `vite.config.js`:
+  `services`, `databases` (+ `dbschema`, `dbseed`, `cdc`, `replicas`), `endpoints`, `models`,
+  `eventstreams` + `consumers`, `grpc` (+ `grpcInstall`), `resilience`, `outage`, `externalServices`,
+  `clients` + `scenarios` (+ `clientScript` helper), `customServices` (+ `customTypes/` recipes),
+  `endtoend`, `layout`, `simulate`, `skills`, `remove`, `terminal`. Shared primitives live in
+  `scaffold.js` + `systems.js`. `remove.js` **blocks deleting a node another still depends on**
+  (`findDependents` reverse-scans endpoints `downstream`/gRPC targets/Kafka producers-consumers/consumer
+  functions/scenario steps; replicas + CDC workers are excluded as they cascade) — `GET /api/dependents`
+  powers the Delete tab's proactive warning and `POST /api/delete` enforces the same guard.
 - `frontend/src/*.jsx` — the generic diagram (`SystemDiagram.jsx`) + modals; it renders whatever the
   selected manifest describes.
 - `instructions/` — original design briefs (background, not operational).
