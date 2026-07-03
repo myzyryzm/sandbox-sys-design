@@ -1,0 +1,130 @@
+{
+  "models": [
+    {
+      "name": "PaymentRegistrationRequest",
+      "ts": "interface PaymentRegistrationRequest {\n  idempotency_key: string;\n  amount: number;\n  currency: string;\n  return_url: string;\n  payment_order_id: string;\n  seller_id: string;\n}",
+      "description": "request to payment-api",
+      "createdAt": "2026-06-26T04:58:39.877Z",
+      "updatedAt": "2026-06-28T00:18:57.827Z"
+    },
+    {
+      "name": "PaymentRegistrationResponse",
+      "ts": "interface PaymentRegistrationResponse {\n  token: string;\n  currency: string;\n  amount: number;\n  payment_order_id: string;\n  seller_id: string;\n}",
+      "description": "response to payment-api",
+      "createdAt": "2026-06-26T04:59:00.404Z",
+      "updatedAt": "2026-06-28T00:18:57.827Z"
+    },
+    {
+      "name": "Account",
+      "ts": "// id => snowflake id; primary key; set when Account added to database\n// currency => max length of 3 characters\n// unique constraint on (owner_id, name)\ninterface Account {\n  id: number;\n  name: \"cash\" | \"escrow\" | \"income\" | null; // relevant to platform\n  type: \"income\" | \"asset\" | \"liability\";\n  owner_id: string; // can be a seller_id, 'platform', a psp (eg 'stripe'), or a payout service (eg 'tipalti')\n  currency: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-26T22:11:22.256Z",
+      "updatedAt": "2026-06-27T20:54:05.495Z"
+    },
+    {
+      "name": "Transaction",
+      "ts": "// id => snowflake id; primary key; set when Transaction added to database\n// payment_order_id => add an index\n// idempotency_key => unique\n// created_at => datetime; the time when Transaction is created\n// unique constraint on (payment_order_id, step)\ninterface Transaction {\n  id: number;\n  payment_order_id: string;\n  step:\n    | \"step1_payin\"\n    | \"step2a_payin-complete\"\n    | \"step2b_fufilled\"\n    | \"refund\"\n    | \"step3_payout\"\n    | \"step4_payout-received\";\n  created_at: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-26T22:11:38.372Z",
+      "updatedAt": "2026-06-28T23:37:49.366Z"
+    },
+    {
+      "name": "LedgerEntry",
+      "ts": "// id => snowflake id; primary key; set when LedgerEntry added to database\n// transaction => foreign key field to Transaction.id\n// account => foreign key field to Account.id\n// amount => integer only\n// currency => max length of 3 characters\n// created_at => datetime; the time when Transaction is created\ninterface LedgerEntry {\n  id: number;\n  transaction: Transaction;\n  account: Account;\n  direction: \"debit\" | \"credit\";\n  amount: number;\n  currency: string;\n  created_at: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-26T22:11:52.226Z",
+      "updatedAt": "2026-06-26T22:11:52.226Z"
+    },
+    {
+      "name": "Item",
+      "ts": "// id => primary key\n// price => integer\n// currency => max length of 3\ninterface Item {\n  id: string;\n  seller_id: string;\n  price: number;\n  currency: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-27T20:53:23.155Z",
+      "updatedAt": "2026-06-27T20:53:23.155Z"
+    },
+    {
+      "name": "Order",
+      "ts": "// id => primary key\ninterface Order {\n  id: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-27T20:53:32.850Z",
+      "updatedAt": "2026-06-27T20:53:32.850Z"
+    },
+    {
+      "name": "OrderItem",
+      "ts": "// many to many between Orders and Items\ninterface OrderItem {\n  item: Item;\n  order: Order;\n}",
+      "description": "",
+      "createdAt": "2026-06-27T20:53:43.475Z",
+      "updatedAt": "2026-06-27T20:53:43.475Z"
+    },
+    {
+      "name": "OrderPayment",
+      "ts": "// id => primary key; composite of order.id and attempt_idx\n// unique on (order, attempt_idx)\n// order => foreign key to Order; put index on column\n// seller_id => set from the seller_id of the Items belonging to the Order (assumed uniform across the order's items)\n// amount => integer; the amount registered with the PSP (sum of the order's Item prices), same value sent in PaymentRegistrationRequest\n// currency => max length of 3 characters; from the order's Items (uniform), same value sent in PaymentRegistrationRequest\n// created_at => set at first insertion time\ninterface OrderPayment {\n  id: string;\n  order: Order;\n  seller_id: string;\n  amount: number;\n  currency: string;\n  attempt_idx: number;\n  created_at: string;\n  status:\n    | \"pending\"\n    | \"register_success\"\n    | \"register_fail\"\n    | \"payment_success\"\n    | \"payment_fail\";\n  token?: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-27T20:54:01.712Z",
+      "updatedAt": "2026-06-29T00:10:00.000Z"
+    },
+    {
+      "name": "OrderCheckoutRequest",
+      "ts": "interface OrderCheckoutRequest {\n  order_id: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-27T21:14:50.420Z",
+      "updatedAt": "2026-06-29T22:17:27.973Z"
+    },
+    {
+      "name": "OrderCheckoutResponse",
+      "ts": "interface OrderCheckoutResponse {\n  token?: string;\n  status: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-27T21:14:59.453Z",
+      "updatedAt": "2026-06-27T21:52:57.694Z"
+    },
+    {
+      "name": "MakePaymentRequest",
+      "ts": "interface MakePaymentRequest {\n  token: string;\n  card_number: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-28T00:38:43.319Z",
+      "updatedAt": "2026-06-28T00:38:43.319Z"
+    },
+    {
+      "name": "MakePaymentResponse",
+      "ts": "interface MakePaymentResponse {\n  status: \"success\" | \"fail\";\n  return_url: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-28T00:38:55.489Z",
+      "updatedAt": "2026-06-28T00:38:55.489Z"
+    },
+    {
+      "name": "PaymentWebhookRequest",
+      "ts": "interface PaymentWebhookRequest {\n  status: \"success\" | \"fail\";\n  currency: string;\n  amount: number;\n  payment_order_id: string;\n  seller_id: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-28T00:39:06.449Z",
+      "updatedAt": "2026-06-28T00:39:06.449Z"
+    },
+    {
+      "name": "Refund",
+      "ts": "// id => snowflake id; primary key; set when Refund added to database\n// created_at => datetime; the time when refund is created\ninterface Refund {\n  id: number;\n  payment_order_id: string;\n  created_at: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-29T00:48:24.964Z",
+      "updatedAt": "2026-07-02T19:29:20.527Z"
+    },
+    {
+      "name": "Payout",
+      "ts": "// id => snowflake id; primary key; set when Payout added to database\ninterface Payout {\n  id: number;\n  payment_order_id: string;\n  created_at: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-29T05:50:44.278Z",
+      "updatedAt": "2026-06-30T17:13:53.981Z"
+    },
+    {
+      "name": "PayoutReadiness",
+      "ts": "// id => snowflake id; primary key\n// payment_order_id => add an index\ninterface PayoutReadiness {\n  id: number;\n  payment_order_id: string;\n  payin_complete: boolean;\n  fufilled: boolean;\n  created_at: string;\n}",
+      "description": "",
+      "createdAt": "2026-06-30T17:00:17.998Z",
+      "updatedAt": "2026-06-30T17:00:17.998Z"
+    },
+    {
+      "name": "MakePayoutRequest",
+      "ts": "interface MakePayoutRequest {\n  idempotency_key: string;\n  amount: number;\n  currency: string;\n  recipient: string;\n}\n",
+      "description": "",
+      "createdAt": "2026-06-30T17:39:26.470Z",
+      "updatedAt": "2026-06-30T17:39:26.470Z"
+    }
+  ]
+}

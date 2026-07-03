@@ -1,0 +1,20 @@
+{
+  "rules": [
+    {
+      "table": "refund",
+      "operations": [
+        "INSERT"
+      ],
+      "stream": "refund-stream",
+      "topic": "refunds"
+    },
+    {
+      "table": "payout",
+      "operations": [
+        "INSERT"
+      ],
+      "stream": "payout-stream",
+      "topic": "payout"
+    }
+  ]
+}

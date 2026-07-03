@@ -1,0 +1,154 @@
+{
+  "functions": [
+    {
+      "client": "mobile-app",
+      "name": "refund",
+      "args": [
+        {
+          "name": "order_id",
+          "type": "string"
+        }
+      ],
+      "description": "call service-1.paymentFlowRefund",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/service-1/payment-flow/refund",
+          "label": ""
+        }
+      ],
+      "conversationId": "cc078db6-b0e2-4589-89c5-728fd1be3925",
+      "createdAt": "2026-06-30T23:14:32.415Z",
+      "updatedAt": "2026-06-30T23:14:32.415Z",
+      "history": [
+        {
+          "at": "2026-06-30T23:14:32.415Z",
+          "description": "call service-1.paymentFlowRefund",
+          "args": [
+            {
+              "name": "order_id",
+              "type": "string"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "client": "mobile-app",
+      "name": "shipOrder",
+      "args": [
+        {
+          "name": "order_id",
+          "type": "string"
+        }
+      ],
+      "description": "call service-1.paymentFlowStep2b",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/service-1/payment-flow/2b",
+          "label": ""
+        }
+      ],
+      "conversationId": "6186fa06-dbdf-42cf-a3c2-142fd4127dbd",
+      "createdAt": "2026-06-30T23:15:59.407Z",
+      "updatedAt": "2026-06-30T23:15:59.407Z",
+      "history": [
+        {
+          "at": "2026-06-30T23:15:59.407Z",
+          "description": "call service-1.paymentFlowStep2b",
+          "args": [
+            {
+              "name": "order_id",
+              "type": "string"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "client": "externals-trigger",
+      "name": "trigger_processPayouts",
+      "args": [],
+      "description": "call payout-api.processPayouts",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/payout-api/process-payouts",
+          "label": ""
+        }
+      ],
+      "conversationId": "2f7581a7-3a2b-44f3-ab4f-c9baf2e60512",
+      "createdAt": "2026-06-30T23:26:08.530Z",
+      "updatedAt": "2026-06-30T23:26:08.530Z",
+      "history": [
+        {
+          "at": "2026-06-30T23:26:08.530Z",
+          "description": "call payout-api.processPayouts",
+          "args": []
+        }
+      ]
+    },
+    {
+      "client": "externals-trigger",
+      "name": "trigger_processPayments",
+      "args": [],
+      "description": "call payments-api.processPayments\n\n",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/payments-api/process-payment",
+          "label": ""
+        }
+      ],
+      "conversationId": "7dcbbf5d-3f81-40e4-b506-36cf34436938",
+      "createdAt": "2026-06-30T23:31:58.236Z",
+      "updatedAt": "2026-06-30T23:31:58.236Z",
+      "history": [
+        {
+          "at": "2026-06-30T23:31:58.236Z",
+          "description": "call payments-api.processPayments\n\n",
+          "args": []
+        }
+      ]
+    },
+    {
+      "client": "mobile-app",
+      "name": "checkout",
+      "args": [
+        {
+          "name": "order_id",
+          "type": "string"
+        }
+      ],
+      "description": "calls orders-service.checkout(args.order_id). if it returns a token and status of register_success then it calls payments-api.completePayment(token, card_number) where card_number is some arbitrary random sring",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/orders-service/checkout",
+          "label": ""
+        },
+        {
+          "method": "POST",
+          "path": "/payments-api/complete-payment",
+          "label": ""
+        }
+      ],
+      "conversationId": "0599a67e-6c0f-4b21-b69c-b3b35d2ee769",
+      "createdAt": "2026-07-01T16:43:34.705Z",
+      "updatedAt": "2026-07-01T16:43:34.705Z",
+      "history": [
+        {
+          "at": "2026-07-01T16:43:34.705Z",
+          "description": "calls orders-service.checkout(args.order_id). if it returns a token and status of register_success then it calls payments-api.completePayment(token, card_number) where card_number is some arbitrary random sring",
+          "args": [
+            {
+              "name": "order_id",
+              "type": "string"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

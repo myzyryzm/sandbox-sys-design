@@ -1,0 +1,60 @@
+{
+  "consumers": [
+    {
+      "service": "payout-consumer",
+      "name": "consumePayout",
+      "cluster": "payout-stream",
+      "topic": "payout",
+      "pollRate": 10000,
+      "downstream": [
+        "payout-api",
+        "ledger-db"
+      ],
+      "downstreamDescriptions": {
+        "payout-api": "POSTs /payout (idempotency_key = payment_order_id) to disburse the seller's amount/currency for each completed order.",
+        "ledger-db": "Reads the order's Transactions and the seller's step2b credit LedgerEntry/Account, then writes the step3_payout Transaction plus its debit/credit LedgerEntry pair."
+      },
+      "description": "sharedFunction: commitError() => publish to payout-stream(topic: payout-error, message: request), commit the offset and return from function\nquery all Transaction(payment_order_id == request.payment_order_id). there should be exactly 3 Transactions (step1_payin, step2a_payin-complete, step2b_fufilled\"). \nif there isnt then commitError()\nelse \n    grab the LedgerEntry(transaction: Transaction(step: step2b_fufilled, direction: credit, Account(owner_id != platform))). \n    call payout-api.payout(MakePayoutRequest(idempotency_key: request.payment_order_id, amount: LedgerEntry.amount, currency: LedgerEntry.currency, recipient: LedgerEntry.account)). \n    if this api call returns an error then commitError()\n    else\n        create a Transaction/LedgerEntry combo:\n        Transaction(payment_order_id: id, step: step3_payout)\n            LedgerEntry(account: Account(op.seller_id, null), direction: debit, amount, currency)\n            LedgerEntry(account: Account(payout, null), direction: credit, amount, currency)\n        if that fails then commitError()\n        else commit the offset and return from function",
+      "implemented": true,
+      "conversationId": "ad478c66-4acf-4db2-96e1-45c815a439b3",
+      "createdAt": "2026-06-30T20:51:01.674Z",
+      "updatedAt": "2026-06-30T20:51:01.674Z",
+      "history": [
+        {
+          "at": "2026-06-30T20:51:01.674Z",
+          "description": "sharedFunction: commitError() => publish to payout-stream(topic: payout-error, message: request), commit the offset and return from function\nquery all Transaction(payment_order_id == request.payment_order_id). there should be exactly 3 Transactions (step1_payin, step2a_payin-complete, step2b_fufilled\"). \nif there isnt then commitError()\nelse \n    grab the LedgerEntry(transaction: Transaction(step: step2b_fufilled, direction: credit, Account(owner_id != platform))). \n    call payout-api.payout(MakePayoutRequest(idempotency_key: request.payment_order_id, amount: LedgerEntry.amount, currency: LedgerEntry.currency, recipient: LedgerEntry.account)). \n    if this api call returns an error then commitError()\n    else\n        create a Transaction/LedgerEntry combo:\n        Transaction(payment_order_id: id, step: step3_payout)\n            LedgerEntry(account: Account(op.seller_id, null), direction: debit, amount, currency)\n            LedgerEntry(account: Account(payout, null), direction: credit, amount, currency)\n        if that fails then commitError()\n        else commit the offset and return from function",
+          "topic": "payout",
+          "pollRate": 10000
+        }
+      ]
+    },
+    {
+      "service": "refund-service",
+      "name": "processRefund",
+      "cluster": "refund-stream",
+      "topic": "refunds",
+      "pollRate": 1000,
+      "downstream": [
+        "ledger-db",
+        "payments-api"
+      ],
+      "downstreamDescriptions": {
+        "ledger-db": "Reads the Transactions for the refund's payment_order_id to check whether a step2a_payin-complete Transaction exists.",
+        "payments-api": "POSTs refundPayment (idempotency_key = payment_order_id) when the payin was captured (a step2a_payin-complete Transaction exists), otherwise POSTs cancelPayment to void the uncaptured payment."
+      },
+      "description": "find Transactions equal to refund.payment_order_id. if there is a Transaction that has step of step2a_payin-complete then call payment-api.refundPayment(idempotency_key: refund.payment_order_id). else call payment-api.cancelPayment(idempotency_key: refund.payment_order_id)",
+      "implemented": true,
+      "conversationId": "05c4d6f1-c358-45a5-b2b3-7cbd28324188",
+      "createdAt": "2026-07-02T19:48:10.025Z",
+      "updatedAt": "2026-07-02T19:48:10.025Z",
+      "history": [
+        {
+          "at": "2026-07-02T19:48:10.025Z",
+          "description": "find Transactions equal to refund.payment_order_id. if there is a Transaction that has step of step2a_payin-complete then call payment-api.refundPayment(idempotency_key: refund.payment_order_id). else call payment-api.cancelPayment(idempotency_key: refund.payment_order_id)",
+          "topic": "refunds",
+          "pollRate": 1000
+        }
+      ]
+    }
+  ]
+}

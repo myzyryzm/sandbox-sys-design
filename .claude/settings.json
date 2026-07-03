@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(curl *)",
+      "Bash(python3 *)",
+      "Write(//private/tmp/claude-501/**)",
+      "Write(/systems/*/endtoend-runs/**)"
+    ]
+  }
+}

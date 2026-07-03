@@ -1,0 +1,65 @@
+{
+  "contracts": {
+    "ChunkTransfer": {
+      "instruction": "GetChunk streams a held chunk (a header frame then data frames) to any peer that requests it. Every node serves the chunks it holds, turning the initial star (everyone pulls from the coordinator) into a peer-to-peer mesh.",
+      "methods": [
+        {
+          "name": "GetChunk",
+          "request": {},
+          "response": {},
+          "requestType": "ChunkRequest",
+          "responseType": "ChunkFrame",
+          "requestStreaming": false,
+          "responseStreaming": true
+        }
+      ],
+      "conversationId": "custom-download_coordinator-ChunkTransfer",
+      "createdAt": "2026-06-24T20:56:16.909Z",
+      "source": "download_coordinator"
+    },
+    "Coordination": {
+      "instruction": "Coordinator-only. Register returns the file manifest (chunk count/size, per-chunk checksums, full-file hash); RequestAssignment hands out the next needed chunk plus a load-balanced source address; Heartbeat tracks liveness; ReportComplete is sent once, after a worker holds every chunk and the full-file hash verifies.",
+      "methods": [
+        {
+          "name": "Register",
+          "request": {},
+          "response": {},
+          "requestType": "RegisterRequest",
+          "responseType": "FileManifest",
+          "requestStreaming": false,
+          "responseStreaming": false
+        },
+        {
+          "name": "RequestAssignment",
+          "request": {},
+          "response": {},
+          "requestType": "AssignmentRequest",
+          "responseType": "Assignment",
+          "requestStreaming": false,
+          "responseStreaming": false
+        },
+        {
+          "name": "Heartbeat",
+          "request": {},
+          "response": {},
+          "requestType": "HeartbeatRequest",
+          "responseType": "Ack",
+          "requestStreaming": false,
+          "responseStreaming": false
+        },
+        {
+          "name": "ReportComplete",
+          "request": {},
+          "response": {},
+          "requestType": "CompleteRequest",
+          "responseType": "Ack",
+          "requestStreaming": false,
+          "responseStreaming": false
+        }
+      ],
+      "conversationId": "custom-download_coordinator-Coordination",
+      "createdAt": "2026-06-24T20:56:16.909Z",
+      "source": "download_coordinator"
+    }
+  }
+}

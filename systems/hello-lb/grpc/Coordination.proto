@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package downloadcoordinator;
+
+// Coordination is served ONLY by the coordinator; every worker is a client. The
+// coordinator hands out chunk assignments (load-balanced across all current holders),
+// tracks liveness via heartbeats, and records completion.
+service Coordination {
+  // A worker announces itself and learns the file manifest (chunking + checksums).
+  rpc Register (RegisterRequest) returns (FileManifest);
+  // A worker pulls its next piece of work, carrying its current bitmap so the
+  // coordinator knows what it still needs. Completion of a chunk is signalled
+  // implicitly by the updated bitmap on the NEXT call — there is no chunk-complete RPC.
+  rpc RequestAssignment (AssignmentRequest) returns (Assignment);
+  // Periodic liveness + bitmap sync, on a separate cadence from work pulls.
+  rpc Heartbeat (HeartbeatRequest) returns (Ack);
+  // Sent once, after a worker holds every chunk AND the full-file hash verifies.
+  rpc ReportComplete (CompleteRequest) returns (Ack);
+}
+
+message RegisterRequest {
+  string worker_id = 1;
+}
+
+message FileManifest {
+  bool ready = 1;                      // false until a distribution has been started
+  int32 chunk_count = 2;
+  int64 chunk_size = 3;                // nominal size; the last chunk may be smaller
+  int64 file_size = 4;
+  string full_hash = 5;                // sha256 hex of the whole file
+  repeated string chunk_checksums = 6; // sha256 hex per chunk, index == chunk_id
+}
+
+message AssignmentRequest {
+  string worker_id = 1;
+  bytes bitmap = 2; // one byte per chunk: 1 = held on disk, 0 = missing
+}
+
+message Assignment {
+  enum Kind {
+    ASSIGN = 0; // fetch `chunk_id` from `source_addr`
+    WAIT = 1;   // nothing fetchable yet (no source holds a chunk you need) — retry shortly
+    DONE = 2;   // you hold everything
+  }
+  Kind kind = 1;
+  int32 chunk_id = 2;     // valid when kind == ASSIGN
+  string source_addr = 3; // host:port of a node holding the chunk (kind == ASSIGN)
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  bytes bitmap = 2;
+  string status = 3; // e.g. "downloading", "complete"
+}
+
+message CompleteRequest {
+  string worker_id = 1;
+  bool full_hash_ok = 2;
+}
+
+message Ack {
+  bool ok = 1;
+}

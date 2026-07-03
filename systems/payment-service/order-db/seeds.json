@@ -1,0 +1,7 @@
+{
+  "tables": [
+    { "table": "order", "rows": [ { "id": "order1" } ] },
+    { "table": "item", "rows": [ { "id": "item1", "seller_id": "seller1", "price": 100, "currency": "USD" } ] },
+    { "table": "order_item", "rows": [ { "order_id": "order1", "item_id": "item1" } ] }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "service-1": [
+    {
+      "method": "GET",
+      "path": "/items",
+      "protocol": "http",
+      "request": {},
+      "response": {
+        "items": "array"
+      },
+      "description": "List catalog items from catalog-db",
+      "downstream": [
+        "catalog-db"
+      ],
+      "conversationId": null
+    }
+  ]
+}

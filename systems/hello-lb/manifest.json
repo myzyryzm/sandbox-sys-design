@@ -1,0 +1,19 @@
+{
+  "system_id": "hello-lb",
+  "name": "Hello Load Balancer",
+  "prometheus_base": "/api/prometheus",
+  "poll_interval_ms": 4000,
+  "nodes": [
+    {
+      "id": "lb",
+      "label": "nginx LB",
+      "type": "load_balancer",
+      "position": {
+        "x": 80,
+        "y": 160
+      },
+      "metrics": []
+    }
+  ],
+  "edges": []
+}

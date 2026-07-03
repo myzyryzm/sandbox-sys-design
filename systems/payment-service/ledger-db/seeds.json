@@ -1,0 +1,15 @@
+{
+  "tables": [
+    {
+      "table": "account",
+      "rows": [
+        { "id": 1001, "name": "cash", "type": "asset", "owner_id": "platform", "currency": "USD" },
+        { "id": 1002, "name": "escrow", "type": "liability", "owner_id": "platform", "currency": "USD" },
+        { "id": 1003, "name": "income", "type": "income", "owner_id": "platform", "currency": "USD" },
+        { "id": 1004, "name": null, "type": "asset", "owner_id": "psp", "currency": "USD" },
+        { "id": 1005, "name": null, "type": "liability", "owner_id": "seller1", "currency": "USD" },
+        { "id": 1006, "name": null, "type": "liability", "owner_id": "payout", "currency": "USD" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+# Frontend
+node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime state from start.sh / stop.sh
+.run/
+
+# Env / editor
+.DS_Store
+
+schemas/
+instructions/

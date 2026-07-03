@@ -1,0 +1,547 @@
+{
+  "payments-api": [
+    {
+      "method": "POST",
+      "path": "/payment",
+      "protocol": "http",
+      "alias": "createPayment",
+      "request": {},
+      "response": {},
+      "requestModel": "PaymentRegistrationRequest",
+      "responseModel": "PaymentRegistrationResponse",
+      "description": "this method will create a random token and return it to the user along with the input currency, amount, and metadata. the storage will be a map of idempotency_key to token and another map of token to PaymentRegistrationRequest. if the idempotency_key already exists in the idempotency_key to token map then construct a PaymentRegistrationResponse via the token to PaymentReqistrationRequest map and return it. basically the idempotency_key should make this endpoint idempotent",
+      "downstream": [],
+      "conversationId": "263b301b-a12d-4f6a-9a48-bb8ced6be1b9",
+      "history": [
+        {
+          "at": "2026-06-26T05:12:20.695Z",
+          "alias": "createPayment",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentRegistrationRequest",
+          "responseModel": "PaymentRegistrationResponse",
+          "description": "this method will create a random token and return it to the user along with the input currency, amount, and metadata. the storage will be a map of idempotency_key to token and another map of token to PaymentRegistrationRequest. if the idempotency_key already exists in the idempotency_key to token map then construct a PaymentRegistrationResponse via the token to PaymentReqistrationRequest map and return it. basically the idempotency_key should make this endpoint idempotent"
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/complete-payment",
+      "protocol": "http",
+      "alias": "completePayment",
+      "request": {},
+      "response": {},
+      "requestModel": "MakePaymentRequest",
+      "responseModel": "MakePaymentResponse",
+      "description": "check the local storage and see if the token exists. if it doesnt call the service-1.step1_paymentWebhook(status: 'fail', currency: '', amount: 0, payment_order_id: '', seller_id: '') and return {status: 'fail', return_url: ''}. else if it does exist call the service-1.step1_paymentWebhook(status: 'success', currency: PaymentRegistrationRequest.currency, amount: PaymentRegistrationRequest.amount, payment_order_id: PaymentRegistrationRequest.payment_order_id, seller_id: PaymentRegistrationRequest.seller_id) and return {status: 'success', return_url: PaymentRegistrationRequest.return_url}\n\nadd the MakePaymentRequest in the request to a new array processingPayments. save that variable in memory",
+      "downstream": [
+        "service-1"
+      ],
+      "downstreamDescriptions": {
+        "service-1": "notifies its paymentFlowStep1 webhook of the completion outcome \u2014 sends the stored currency/amount/payment_order_id/seller_id as a 'success' on a known token, or empty 'fail' fields on an unknown one; best-effort, so the customer-facing response depends only on whether the token exists"
+      },
+      "downstreamMethods": {
+        "service-1": [
+          "POST /payment-flow/1"
+        ]
+      },
+      "conversationId": "6a21f38b-4c97-4368-a129-c7e9d7973d30",
+      "history": [
+        {
+          "at": "2026-06-28T02:08:17.013Z",
+          "alias": "completePayment",
+          "request": {},
+          "response": {},
+          "requestModel": "MakePaymentRequest",
+          "responseModel": "MakePaymentResponse",
+          "description": "check the local storage and see if the token exists. if it doesnt call the service-1.step1_paymentWebhook(status: 'fail', currency: '', amount: 0, payment_order_id: '', seller_id: '') and return {status: 'fail', return_url: ''}. else if it does exist call the service-1.step1_paymentWebhook(status: 'success', currency: PaymentRegistrationRequest.currency, amount: PaymentRegistrationRequest.amount, payment_order_id: PaymentRegistrationRequest.payment_order_id, seller_id: PaymentRegistrationRequest.seller_id) and return {status: 'success', return_url: PaymentRegistrationRequest.return_url}"
+        },
+        {
+          "at": "2026-06-28T20:40:30.260Z",
+          "alias": "completePayment",
+          "request": {},
+          "response": {},
+          "requestModel": "MakePaymentRequest",
+          "responseModel": "MakePaymentResponse",
+          "description": "check the local storage and see if the token exists. if it doesnt call the service-1.step1_paymentWebhook(status: 'fail', currency: '', amount: 0, payment_order_id: '', seller_id: '') and return {status: 'fail', return_url: ''}. else if it does exist call the service-1.step1_paymentWebhook(status: 'success', currency: PaymentRegistrationRequest.currency, amount: PaymentRegistrationRequest.amount, payment_order_id: PaymentRegistrationRequest.payment_order_id, seller_id: PaymentRegistrationRequest.seller_id) and return {status: 'success', return_url: PaymentRegistrationRequest.return_url}\n\nadd the MakePaymentRequest in the request to a new array processingPayments. save that variable in memory"
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/process-payment",
+      "protocol": "http",
+      "alias": "processPayments",
+      "request": {},
+      "response": {},
+      "requestModel": "",
+      "responseModel": "",
+      "description": "loop through the processing_payments list and gets the corresponding PaymentRegistrationRequest. call service-1.paymentFlowStep2a for each. for those that succeed add to in memory processed_payments array. for those that fail add to in memory failed_payments array.",
+      "downstream": [
+        "service-1"
+      ],
+      "downstreamDescriptions": {
+        "service-1": "for each queued completion attempt, looks up its PaymentRegistrationRequest by token and calls paymentFlowStep2a to settle the payin; a 200 routes the request to processed_payments, any error/non-200 to failed_payments"
+      },
+      "downstreamMethods": {
+        "service-1": [
+          "POST /payment-flow/2a"
+        ]
+      },
+      "conversationId": "c980ff72-bbfd-4f29-90f8-480026dc3a62",
+      "history": [
+        {
+          "at": "2026-06-29T07:41:53.303Z",
+          "alias": "processPayment",
+          "path": "/process-payment",
+          "request": {},
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "loop through the processing_payments list and gets the corresponding PaymentRegistrationRequest. call service-1.paymentFlowStep2a for each. for those that succeed add to in memory processed_payments array. for those that fail add to in memory failed_payments array."
+        },
+        {
+          "at": "2026-06-30T20:43:28.994Z",
+          "alias": "processPayments",
+          "path": "/process-payment",
+          "request": {},
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "loop through the processing_payments list and gets the corresponding PaymentRegistrationRequest. call service-1.paymentFlowStep2a for each. for those that succeed add to in memory processed_payments array. for those that fail add to in memory failed_payments array."
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/cancel-payment",
+      "protocol": "http",
+      "alias": "cancelPayment",
+      "request": {
+        "idempotency_key": "string"
+      },
+      "response": {},
+      "requestModel": "",
+      "responseModel": "",
+      "description": "loop through processing_payments, find payment with req.idempotency_key and remove it from processing_payments and add it to a canceled_payments list. if there is no payment with req.idempotency_key then return error else return success",
+      "conversationId": "b0f7ce98-c17a-485b-818f-8346397f840b",
+      "history": [
+        {
+          "at": "2026-07-02T19:36:21.541Z",
+          "alias": "cancelPayment",
+          "path": "/cancel-payment",
+          "request": {
+            "idempotency_key": "string"
+          },
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "loop through processing_payments, find payment with req.idempotency_key and remove it from processing_payments and add it to a canceled_payments list. if there is no payment with req.idempotency_key then return error else return success"
+        }
+      ],
+      "downstream": [],
+      "downstreamDescriptions": {},
+      "downstreamMethods": {}
+    },
+    {
+      "method": "POST",
+      "path": "/refund-payment",
+      "protocol": "http",
+      "alias": "refundPayment",
+      "request": {
+        "idempotency_key": "string"
+      },
+      "response": {},
+      "requestModel": "",
+      "responseModel": "",
+      "description": "go through processed payments and find that with req.idempotency_key. if it doesnt exist return error. else add it to refunded_payments list and return success",
+      "conversationId": "e7303be5-e9f8-404e-905f-354b1340415b",
+      "history": [
+        {
+          "at": "2026-07-02T19:37:27.570Z",
+          "alias": "refundPayment",
+          "path": "/refund-payment",
+          "request": {
+            "idempotency_key": "string"
+          },
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "go through processed payments and find that with req.idempotency_key. if it doesnt exist return error. else add it to refunded_payments list and return success"
+        }
+      ],
+      "downstream": [],
+      "downstreamDescriptions": {},
+      "downstreamMethods": {}
+    }
+  ],
+  "service-1": [
+    {
+      "method": "POST",
+      "path": "/payment-flow/1",
+      "protocol": "http",
+      "alias": "paymentFlowStep1",
+      "request": {},
+      "response": {},
+      "requestModel": "PaymentWebhookRequest",
+      "responseModel": "",
+      "description": "if request.status is 'fail' then update the status of the OrderPayment with id of request.payment_order_id in the order-db to be payment_fail. else if request.status is 'success' then in the ledger-db create 3 records: Transaction(payment_order_id: request.payment_order_id, step: 'step1_payin'), LedgerEntry(transaction: Transaction, account: ('psp', null), direction: 'debit', amount: request.amount, currency: request.currency), LedgerEntry(transaction: Transaction, account: ('platform', 'escrow'), direction: 'credit', amount: request.amount, currency: request.currency). also update the OrderPayment with id of request.payment_order_id to be 'payment_success'. note that the Ledger entries belong to the created Transaction and the Accounts are delineated by (owner_id, name)\n\nwhen creating the Transaction and LedgerEntries also create a PayoutReadiness(payment_order_id: req. payment_order_id, payin_complete: false, fufilled: false)",
+      "downstream": [
+        "ledger-db",
+        "order-db"
+      ],
+      "downstreamDescriptions": {
+        "ledger-db": "on success, posts the step1_payin Transaction plus its debit (psp) / credit (platform/escrow) LedgerEntry pair and a PayoutReadiness row (payin_complete=false, fufilled=false), all in one transaction",
+        "order-db": "updates the OrderPayment (id = payment_order_id) to payment_success on success, or payment_fail on failure"
+      },
+      "conversationId": "c29f0ecc-b769-4bbc-ba8a-3d59b509bc9d",
+      "history": [
+        {
+          "at": "2026-06-28T00:59:35.114Z",
+          "alias": "step1_paymentWebhook",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentWebhookRequest",
+          "responseModel": "",
+          "description": "if request.status is 'fail' then update the status of the OrderPayment with id of request.payment_order_id in the order-db to be payment_fail. else if request.status is 'success' then in the ledger-db create 3 records: Transaction(payment_order_id: request.payment_order_id, step: 'step1_payin'), LedgerEntry(transaction: Transaction, account: ('psp', null), direction: 'debit', amount: request.amount, currency: request.currency), LedgerEntry(transaction: Transaction, account: ('platform', 'escrow'), direction: 'credit', amount: request.amount, currency: request.currency). also update the OrderPayment with id of request.payment_order_id to be 'payment_success'. note that the Ledger entries belong to the created Transaction and the Accounts are delineated by (owner_id, name)"
+        },
+        {
+          "at": "2026-06-28T17:42:12.679Z",
+          "alias": "step1_paymentWebhook",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentWebhookRequest",
+          "responseModel": "",
+          "description": "if request.status is 'fail' then update the status of the OrderPayment with id of request.payment_order_id in the order-db to be payment_fail. else if request.status is 'success' then in the ledger-db create 3 records: Transaction(payment_order_id: request.payment_order_id, step: 'step1_payin'), LedgerEntry(transaction: Transaction, account: ('psp', null), direction: 'debit', amount: request.amount, currency: request.currency), LedgerEntry(transaction: Transaction, account: ('platform', 'escrow'), direction: 'credit', amount: request.amount, currency: request.currency). also update the OrderPayment with id of request.payment_order_id to be 'payment_success'. note that the Ledger entries belong to the created Transaction and the Accounts are delineated by (owner_id, name)"
+        },
+        {
+          "at": "2026-06-29T05:58:48.946Z",
+          "alias": "paymentFlowStep1",
+          "path": "/payment-flow/1",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentWebhookRequest",
+          "responseModel": "",
+          "description": "if request.status is 'fail' then update the status of the OrderPayment with id of request.payment_order_id in the order-db to be payment_fail. else if request.status is 'success' then in the ledger-db create 3 records: Transaction(payment_order_id: request.payment_order_id, step: 'step1_payin'), LedgerEntry(transaction: Transaction, account: ('psp', null), direction: 'debit', amount: request.amount, currency: request.currency), LedgerEntry(transaction: Transaction, account: ('platform', 'escrow'), direction: 'credit', amount: request.amount, currency: request.currency). also update the OrderPayment with id of request.payment_order_id to be 'payment_success'. note that the Ledger entries belong to the created Transaction and the Accounts are delineated by (owner_id, name)"
+        },
+        {
+          "at": "2026-06-30T17:04:14.293Z",
+          "alias": "paymentFlowStep1",
+          "path": "/payment-flow/1",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentWebhookRequest",
+          "responseModel": "",
+          "description": "if request.status is 'fail' then update the status of the OrderPayment with id of request.payment_order_id in the order-db to be payment_fail. else if request.status is 'success' then in the ledger-db create 3 records: Transaction(payment_order_id: request.payment_order_id, step: 'step1_payin'), LedgerEntry(transaction: Transaction, account: ('psp', null), direction: 'debit', amount: request.amount, currency: request.currency), LedgerEntry(transaction: Transaction, account: ('platform', 'escrow'), direction: 'credit', amount: request.amount, currency: request.currency). also update the OrderPayment with id of request.payment_order_id to be 'payment_success'. note that the Ledger entries belong to the created Transaction and the Accounts are delineated by (owner_id, name)\n\nwhen creating the Transaction and LedgerEntries also create a PayoutReadiness(payment_order_id: req. payment_order_id, payin_complete: false, fufilled: false)"
+        }
+      ],
+      "internal": false
+    },
+    {
+      "method": "POST",
+      "path": "/payment-flow/2a",
+      "protocol": "http",
+      "alias": "paymentFlowStep2a",
+      "request": {},
+      "response": {},
+      "requestModel": "PaymentRegistrationRequest",
+      "responseModel": "",
+      "description": "if there are no transactions with payment_order_id == request.payment_order_id and status == step1_payin then return bad request. if there is already a transaction with status == step2a_payin-complete return 200. if not then create Transaction(status: step2a_payin-complete, payment_order_id: request.payment_order_id) and 2 ledger entries pointing to this transaction: LedgerEntry(direction: debit, account: Account(platform, cash), amount: request.amount, currency: request.currency) and LedgerEntry(direction: credit, account: Account(psp, null), amount: request.amount, currency: request.currency). return 200 if all succeeds\n\nwhen creating the Transaction and LedgerEntries also update the PayoutReadiness(payment_order_id: request.payment_order_id).payin_complete to true and  if the payin_complete and fufilled values are both true then create a Payout(payment_order_id: request.payment_order_id). the Transaction, LedgerEntry, PayoutReadiness, Payout his should all be done in the same transaction (ie be atomic)",
+      "downstream": [
+        "ledger-db"
+      ],
+      "downstreamDescriptions": {
+        "ledger-db": "requires the prior step1_payin Transaction (else 400), short-circuits if a step2a_payin-complete Transaction already exists, else atomically posts that Transaction plus its debit (platform/cash) / credit (psp) LedgerEntry pair, flips the order's PayoutReadiness payin_complete to true, and (if payin_complete and fufilled are then both true) writes a Payout row"
+      },
+      "conversationId": "a1d43005-8a93-4f7c-96e0-d59036d1d5d6",
+      "history": [
+        {
+          "at": "2026-06-28T21:00:35.258Z",
+          "alias": "step2a_paymentWebhook",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentRegistrationRequest",
+          "responseModel": "",
+          "description": "if there are no transactions with payment_order_id == request.payment_order_id and status == step1_payin then return bad request. if there is already a transaction with status == step2a_payin-complete return 200. if not then create Transaction(status: step2a_payin-complete, payment_order_id: request.payment_order_id) and 2 ledger entries pointing to this transaction: LedgerEntry(direction: debit, account: Account(platform, cash), amount: request.amount, currency: request.currency) and LedgerEntry(direction: credit, account: Account(psp, null), amount: request.amount, currency: request.currency). return 200 if all succeeds"
+        },
+        {
+          "at": "2026-06-29T05:55:13.782Z",
+          "alias": "paymentFlow2a",
+          "path": "/payment-flow/2a",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentRegistrationRequest",
+          "responseModel": "",
+          "description": "if there are no transactions with payment_order_id == request.payment_order_id and status == step1_payin then return bad request. if there is already a transaction with status == step2a_payin-complete return 200. if not then create Transaction(status: step2a_payin-complete, payment_order_id: request.payment_order_id) and 2 ledger entries pointing to this transaction: LedgerEntry(direction: debit, account: Account(platform, cash), amount: request.amount, currency: request.currency) and LedgerEntry(direction: credit, account: Account(psp, null), amount: request.amount, currency: request.currency). return 200 if all succeeds"
+        },
+        {
+          "at": "2026-06-29T07:12:46.114Z",
+          "alias": "paymentFlowStep2a",
+          "path": "/payment-flow/2a",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentRegistrationRequest",
+          "responseModel": "",
+          "description": "if there are no transactions with payment_order_id == request.payment_order_id and status == step1_payin then return bad request. if there is already a transaction with status == step2a_payin-complete return 200. if not then create Transaction(status: step2a_payin-complete, payment_order_id: request.payment_order_id) and 2 ledger entries pointing to this transaction: LedgerEntry(direction: debit, account: Account(platform, cash), amount: request.amount, currency: request.currency) and LedgerEntry(direction: credit, account: Account(psp, null), amount: request.amount, currency: request.currency). return 200 if all succeeds"
+        },
+        {
+          "at": "2026-06-30T17:19:33.248Z",
+          "alias": "paymentFlowStep2a",
+          "path": "/payment-flow/2a",
+          "request": {},
+          "response": {},
+          "requestModel": "PaymentRegistrationRequest",
+          "responseModel": "",
+          "description": "if there are no transactions with payment_order_id == request.payment_order_id and status == step1_payin then return bad request. if there is already a transaction with status == step2a_payin-complete return 200. if not then create Transaction(status: step2a_payin-complete, payment_order_id: request.payment_order_id) and 2 ledger entries pointing to this transaction: LedgerEntry(direction: debit, account: Account(platform, cash), amount: request.amount, currency: request.currency) and LedgerEntry(direction: credit, account: Account(psp, null), amount: request.amount, currency: request.currency). return 200 if all succeeds\n\nwhen creating the Transaction and LedgerEntries also update the PayoutReadiness(payment_order_id: request.payment_order_id).payin_complete to true and  if the payin_complete and fufilled values are both true then create a Payout(payment_order_id: request.payment_order_id). the Transaction, LedgerEntry, PayoutReadiness, Payout his should all be done in the same transaction (ie be atomic)"
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/payment-flow/2b",
+      "protocol": "http",
+      "alias": "paymentFlowStep2b",
+      "request": {
+        "order_id": "string"
+      },
+      "response": {},
+      "requestModel": "",
+      "responseModel": "",
+      "description": "get the OrderPayment with status == payment_success and order == request.order_id. if none exist return bad request.\nget all transactions with payment_order_id == OrderPayment.id. \nif there is no transactions with payment_order_id == OrderPayment.id and status == step1_payin then return bad request. \nif there is already a transaction with status == step2b_fufilled or status == refund return 200 ok. \ncreate Transaction(status: step2b_fufilled, payment_order_id: OrderPayment.id) and 3 ledger entries pointing to this transaction \n    LedgerEntry(direction: debit, account: Account(platform, escrow), amount: request.amount)\n    LedgerEntry(direction: credit, account: Account(OrderPayment.seller_id, null), amount: request.amount * 0.9)\n    LedgerEntry(direction: credit, account: Account(platform, income), amount: request.amount * 0.1). \n    note: currency is OrderPayment.currency for all. for price splitting round the seller's payout up and the platform's payout down so they stay as integers.\n\nwhen creating the Transaction and LedgerEntries also update the PayoutReadiness(payment_order_id: request.payment_order_id).fufilled to true and  if the payin_complete and fufilled values are both true then create a Payout(payment_order_id: request.payment_order_id). the Transaction, LedgerEntry, PayoutReadiness, Payout updates should all be done in the same transaction (ie be atomic)",
+      "downstream": [
+        "order-db",
+        "ledger-db"
+      ],
+      "downstreamDescriptions": {
+        "order-db": "looks up the order's payment_success OrderPayment, reading its id, seller_id, amount and currency (the request only carries order_id)",
+        "ledger-db": "requires a prior step1_payin Transaction (else 400), short-circuits if a step2b_fufilled or refund Transaction already exists, else atomically posts the step2b_fufilled Transaction plus its escrow debit and seller (90%) / platform-income (10%) credit LedgerEntries, flips the order's PayoutReadiness fufilled to true, and (if payin_complete and fufilled are then both true) writes a Payout row"
+      },
+      "conversationId": "9111852b-e714-4862-831d-18cbf38fca55",
+      "history": [
+        {
+          "at": "2026-06-29T00:25:50.591Z",
+          "alias": "step2b_paymentWebhook",
+          "path": "/payment/webhook/2b",
+          "request": {
+            "order_id": "string"
+          },
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "get the OrderPayment with status == payment_success and order == request.order_id. if none exist return bad request.\nget all transactions with payment_order_id == OrderPayment.id. \nif there is no transactions with payment_order_id == OrderPayment.id and status == step1_payin then return bad request. \nif there is already a transaction with status == step2b_fufilled or status == refund return 200 ok. \ncreate Transaction(status: step2b_fufilled, payment_order_id: OrderPayment.id) and 3 ledger entries pointing to this transaction \n    LedgerEntry(direction: debit, account: Account(platform, escrow), amount: request.amount)\n    LedgerEntry(direction: credit, account: Account(OrderPayment.seller_id, null), amount: request.amount * 0.9)\n    LedgerEntry(direction: credit, account: Account(platform, income), amount: request.amount * 0.1). \n    note: currency is OrderPayment.currency for all. for price splitting round the seller's payout up and the platform's payout down so they stay as integers."
+        },
+        {
+          "at": "2026-06-29T05:56:58.940Z",
+          "alias": "paymentFlowStep2b",
+          "path": "/payment-flow/2b",
+          "request": {
+            "order_id": "string"
+          },
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "get the OrderPayment with status == payment_success and order == request.order_id. if none exist return bad request.\nget all transactions with payment_order_id == OrderPayment.id. \nif there is no transactions with payment_order_id == OrderPayment.id and status == step1_payin then return bad request. \nif there is already a transaction with status == step2b_fufilled or status == refund return 200 ok. \ncreate Transaction(status: step2b_fufilled, payment_order_id: OrderPayment.id) and 3 ledger entries pointing to this transaction \n    LedgerEntry(direction: debit, account: Account(platform, escrow), amount: request.amount)\n    LedgerEntry(direction: credit, account: Account(OrderPayment.seller_id, null), amount: request.amount * 0.9)\n    LedgerEntry(direction: credit, account: Account(platform, income), amount: request.amount * 0.1). \n    note: currency is OrderPayment.currency for all. for price splitting round the seller's payout up and the platform's payout down so they stay as integers."
+        },
+        {
+          "at": "2026-06-30T17:25:35.037Z",
+          "alias": "paymentFlowStep2b",
+          "path": "/payment-flow/2b",
+          "request": {
+            "order_id": "string"
+          },
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "get the OrderPayment with status == payment_success and order == request.order_id. if none exist return bad request.\nget all transactions with payment_order_id == OrderPayment.id. \nif there is no transactions with payment_order_id == OrderPayment.id and status == step1_payin then return bad request. \nif there is already a transaction with status == step2b_fufilled or status == refund return 200 ok. \ncreate Transaction(status: step2b_fufilled, payment_order_id: OrderPayment.id) and 3 ledger entries pointing to this transaction \n    LedgerEntry(direction: debit, account: Account(platform, escrow), amount: request.amount)\n    LedgerEntry(direction: credit, account: Account(OrderPayment.seller_id, null), amount: request.amount * 0.9)\n    LedgerEntry(direction: credit, account: Account(platform, income), amount: request.amount * 0.1). \n    note: currency is OrderPayment.currency for all. for price splitting round the seller's payout up and the platform's payout down so they stay as integers.\n\nwhen creating the Transaction and LedgerEntries also update the PayoutReadiness(payment_order_id: request.payment_order_id).fufilled to true and  if the payin_complete and fufilled values are both true then create a Payout(payment_order_id: request.payment_order_id). the Transaction, LedgerEntry, PayoutReadiness, Payout updates should all be done in the same transaction (ie be atomic)"
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/payment-flow/refund",
+      "protocol": "http",
+      "alias": "paymentFlowRefund",
+      "request": {
+        "order_id": "string"
+      },
+      "response": {},
+      "requestModel": "",
+      "responseModel": "",
+      "description": "get the OrderPayment with OrderPayment.order == request.order_id and status == 'payment_success'. if none exists return bad request\nquery the Transactions(order_payment_id: OrderPayment.id)\nif there is one with status == refund then return 200, refund initiated\nif there is one with status == step2b_fufilled return 200, order complete cannot refund\nif there is none with status == step1_payin then return bad request.\ncreate a Transaction(payment_order_id: OrderPayment.id, step: refund) with:\n    if there is an Transaction with status == step2a_payin-complete create \n        LedgerEntry(direction: debit, account: Account(platform, escrow))\n        LedgerEntry(direction: credit, account: Account(platform, cash))\n        Refund(payment_order_id: OrderPayment.id)\n    else create \n        LedgerEntry(direction: debit, account: Account(platform, escrow))\n        LedgerEntry(direction: credit, account: Account(psp, null))\n        Refund(payment_order_id: OrderPayment.id)\nnote: the amounts and currency for all are OrderPayment.amount and OrderPayment.currency\nnote: this write should be atomic",
+      "downstream": [
+        "order-db",
+        "ledger-db"
+      ],
+      "downstreamDescriptions": {
+        "order-db": "looks up the order's payment_success OrderPayment, reading its id, amount and currency (the request only carries order_id)",
+        "ledger-db": "reads that OrderPayment's Transactions; short-circuits if a refund (200 refund initiated) or step2b_fufilled (200 order complete cannot refund) Transaction already exists, requires a prior step1_payin (else 400), else atomically posts the refund Transaction plus its escrow debit and a platform/cash-or-psp credit and a Refund row; credits platform/cash when the payin was completed (step2a), otherwise credits the psp"
+      },
+      "downstreamMethods": {},
+      "conversationId": "92b5522a-4fbd-4baa-9e6b-e936d61bcdf2",
+      "history": [
+        {
+          "at": "2026-06-30T21:26:23.864Z",
+          "alias": "paymentFlowRefund",
+          "path": "/payment-flow/refund",
+          "request": {
+            "order_id": "string"
+          },
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "get the OrderPayment with OrderPayment.order == request.order_id and status == 'payment_success'. if none exists return bad request\nquery the Transactions(order_payment_id: OrderPayment.id)\nif there is one with status == refund then return 200, refund initiated\nif there is one with status == step2b_fufilled return 200, order complete cannot refund\nif there is none with status == step1_payin then return bad request.\ncreate a Transaction(payment_order_id: OrderPayment.id, step: refund) with:\n    if there is an Transaction with status == step2a_payin-complete create \n        LedgerEntry(direction: debit, account: Account(platform, escrow))\n        LedgerEntry(direction: credit, account: Account(platform, cash))\n        Refund(payment_order_id: OrderPayment.id)\n    else create \n        LedgerEntry(direction: debit, account: Account(platform, escrow))\n        LedgerEntry(direction: credit, account: Account(psp, null))\n        Refund(payment_order_id: OrderPayment.id)\nnote: the amounts and currency for all are OrderPayment.amount and OrderPayment.currency\nnote: this write should be atomic"
+        }
+      ]
+    }
+  ],
+  "payout-api": [
+    {
+      "method": "POST",
+      "path": "/payout",
+      "protocol": "http",
+      "alias": "payout",
+      "request": {},
+      "response": {},
+      "requestModel": "MakePayoutRequest",
+      "responseModel": "",
+      "description": "i want this function to save the incoming request to an in memory map of request.idempotency_key to request.\n\nupdate the name of the internal map to processing_payouts",
+      "downstream": [],
+      "downstreamDescriptions": {},
+      "downstreamMethods": {},
+      "conversationId": "29c7ad18-de4c-40dc-b02b-e7ee3101a6ab",
+      "history": [
+        {
+          "at": "2026-06-30T19:26:23.297Z",
+          "alias": "payout",
+          "path": "/payout",
+          "request": {},
+          "response": {},
+          "requestModel": "MakePayoutRequest",
+          "responseModel": "",
+          "description": "i want this function to save the incoming request to an in memory map of request.idempotency_key to request."
+        },
+        {
+          "at": "2026-06-30T19:59:49.418Z",
+          "alias": "payout",
+          "path": "/payout",
+          "request": {},
+          "response": {},
+          "requestModel": "MakePayoutRequest",
+          "responseModel": "",
+          "description": "i want this function to save the incoming request to an in memory map of request.idempotency_key to request.\n\nupdate the name of the internal map to processing_payouts"
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/process-payouts",
+      "protocol": "http",
+      "alias": "processPayouts",
+      "request": {},
+      "response": {},
+      "requestModel": "",
+      "responseModel": "",
+      "description": "loop through the processing_payouts and gets the corresponding MakePayoutRequest. call payout-service-2.processPayout(idempotency_key: MakePayoutRequest.idempotency_key) for each. for those that succeed add to in memory processed_payments array. for those that fail add to in memory failed_payments array. clear processing_payouts.",
+      "conversationId": "0f4c39b2-68ac-406a-9e83-ea91dff8ded1",
+      "history": [
+        {
+          "at": "2026-06-30T20:22:23.306Z",
+          "alias": "processPayouts",
+          "path": "/process-payouts",
+          "request": {},
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "loop through the processing_payouts and gets the corresponding MakePayoutRequest. call payout-service-2.processPayout(idempotency_key: MakePayoutRequest.idempotency_key) for each. for those that succeed add to in memory processed_payments array. for those that fail add to in memory failed_payments array. clear processing_payouts."
+        }
+      ],
+      "downstream": [
+        "payout-service-2"
+      ],
+      "downstreamDescriptions": {
+        "payout-service-2": "submits each buffered payout by calling its processPayout (idempotency_key only); a 2xx marks the payout processed, any error marks it failed"
+      },
+      "downstreamMethods": {
+        "payout-service-2": [
+          "POST /payout"
+        ]
+      }
+    }
+  ],
+  "orders-service": [
+    {
+      "method": "POST",
+      "path": "/checkout",
+      "protocol": "http",
+      "alias": "checkout",
+      "request": {},
+      "response": {},
+      "requestModel": "OrderCheckoutRequest",
+      "responseModel": "OrderCheckoutResponse",
+      "description": "note: for any database transaction that fails return bad request to the frontend.\nhelper_functions:\ncallPaymentApi(op: OrderPayment)\n    result = PaymentsApi.createPayment(idempotency_key: op.id, return_url: '', payment_order_id: op.id, amount: amount, currency: currency: seller_id: seller_id) \n    if call fails then update OrderPayment we just created to have status of register_failed and return bad request.\n    else \n        update OrderPayment(status: register_success, token: result.token) in db if and only if the current OrderPayment has a status of pending in db (need to perform a read then write)\n        if it doesnt then return bad request. \n        else return 200, {OrderPayment.status, OrderPayment.token}\n\ncreateOrderPayment(attempt_idx, order_id):\n    items = Item(order == order_id)\n    get amount (add up all item amounts), currency and seller_id from items (assume currency and seller_id is same on all items).\n    create a new OrderPayment(id: order_id:attempt_ix, order: order_id, attempt_idx: attempt_idx, status: pending, amount: amount, currency: currency, seller_id: seller_id) in db\n    return callPaymentApi(op)\n\norder = Order(id == request.order_id) \nif order is None return bad request\nelse\n    order_payments = OrderPayment(order == request.order_id, sorted by created_at)\n    if no order_payments return createOrderPayment(1, request.order_id)\n    else\n        op = order_payments[-1] (most recent created at)\n        switch op.status\n            payment_success return 200, {OrderPayment.status}\n            register_success return 200, {OrderPayment.status, OrderPayment.token}\n            pending return callPaymentApi(op)\n            register_fail or payment_fail return createOrderPayment(op.attempt_idx + 1, op.order_id)",
+      "downstream": [
+        "order-db",
+        "payments-api"
+      ],
+      "downstreamDescriptions": {
+        "order-db": "looks up the Order, reads its OrderPayment attempts (the latest attempt's saved id/seller_id/amount/currency), sums the order's Item prices and reads their seller_id/currency for a new attempt, writes the new pending OrderPayment, and (read-then-write) advances a still-pending attempt to register_success or flips it to register_fail",
+        "payments-api": "registers the attempt via POST /payment (idempotency_key and payment_order_id both = the OrderPayment id, plus seller_id, amount, currency) to obtain the provider token \u2014 also re-registers a still-pending latest attempt from its saved fields; a failed registration marks the attempt register_fail and returns a 400"
+      },
+      "downstreamMethods": {
+        "payments-api": [
+          "POST /payment"
+        ]
+      },
+      "conversationId": "1e637842-971b-4de4-b8bf-9cfdb33bfe9f",
+      "history": [
+        {
+          "at": "2026-07-01T16:19:06.265Z",
+          "alias": "checkout",
+          "path": "/checkout",
+          "request": {},
+          "response": {},
+          "requestModel": "OrderCheckoutRequest",
+          "responseModel": "OrderCheckoutResponse",
+          "description": "note: for any database transaction that fails return bad request to the frontend.\nhelper_functions:\ncallPaymentApi(op: OrderPayment)\n    result = PaymentsApi.createPayment(idempotency_key: op.id, return_url: '', payment_order_id: op.id, amount: amount, currency: currency: seller_id: seller_id) \n    if call fails then update OrderPayment we just created to have status of register_failed and return bad request.\n    else \n        update OrderPayment(status: register_success, token: result.token) in db if and only if the current OrderPayment has a status of pending in db (need to perform a read then write)\n        if it doesnt then return bad request. \n        else return 200, {OrderPayment.status, OrderPayment.token}\n\ncreateOrderPayment(attempt_idx, order_id):\n    items = Item(order == order_id)\n    get amount (add up all item amounts), currency and seller_id from items (assume currency and seller_id is same on all items).\n    create a new OrderPayment(id: order_id:attempt_ix, order: order_id, attempt_idx: attempt_idx, status: pending, amount: amount, currency: currency, seller_id: seller_id) in db\n    return callPaymentApi(op)\n\norder = Order(id == request.order_id) \nif order is None return bad request\nelse\n    order_payments = OrderPayment(order == request.order_id, sorted by created_at)\n    if no order_payments return createOrderPayment(1, request.order_id)\n    else\n        op = order_payments[-1] (most recent created at)\n        switch op.status\n            payment_success return 200, {OrderPayment.status}\n            register_success return 200, {OrderPayment.status, OrderPayment.token}\n            pending return callPaymentApi(op)\n            register_fail or payment_fail return createOrderPayment(op.attempt_idx + 1, op.order_id)"
+        }
+      ]
+    }
+  ],
+  "payout-service-2": [
+    {
+      "method": "POST",
+      "path": "/payout",
+      "protocol": "http",
+      "alias": "processPayout",
+      "request": {
+        "idempotency_key": "string"
+      },
+      "response": {},
+      "requestModel": "",
+      "responseModel": "",
+      "description": "if Transaction(payment_order_id: req.idempotency_key, step: step4_payout-received) exists return 200, ok\nle = LedgerEntry(Transaction(payment_order_id: req.idempotency_key, step: step3_payout, direction: credit))\nif no le then bad request\namount = le.amount; currency = le.currency\ncreate a Transaction/LedgerEntry combo:\n    Transaction(payment_order_id: req.idempotency_key, step: step4_payout-received)\n        LedgerEntry(account: Account(payout, null), direction: debit, amount, currency)\n        LedgerEntry(account: Account(platform, cash), direction: credit, amount, currency)",
+      "downstream": [
+        "ledger-db"
+      ],
+      "downstreamDescriptions": {
+        "ledger-db": "short-circuits if a step4_payout-received Transaction already exists for the idempotency_key, else requires the prior step3_payout Transaction and reads its payout-account credit LedgerEntry for the amount/currency (else 400), then posts the step4_payout-received Transaction plus its debit (payout) / credit (platform/cash) LedgerEntry pair"
+      },
+      "downstreamMethods": {},
+      "conversationId": "b24d7569-daee-4efe-a172-e740976b4372",
+      "history": [
+        {
+          "at": "2026-06-30T20:13:14.269Z",
+          "alias": "processPayout",
+          "path": "/payout",
+          "request": {
+            "idempotency_key": "string"
+          },
+          "response": {},
+          "requestModel": "",
+          "responseModel": "",
+          "description": "if Transaction(payment_order_id: req.idempotency_key, step: step4_payout-received) exists return 200, ok\nle = LedgerEntry(Transaction(payment_order_id: req.idempotency_key, step: step3_payout, direction: credit))\nif no le then bad request\namount = le.amount; currency = le.currency\ncreate a Transaction/LedgerEntry combo:\n    Transaction(payment_order_id: req.idempotency_key, step: step4_payout-received)\n        LedgerEntry(account: Account(payout, null), direction: debit, amount, currency)\n        LedgerEntry(account: Account(platform, cash), direction: credit, amount, currency)"
+        }
+      ]
+    }
+  ]
+}

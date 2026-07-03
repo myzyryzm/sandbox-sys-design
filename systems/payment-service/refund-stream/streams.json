@@ -1,0 +1,25 @@
+{
+  "topics": [
+    {
+      "id": "refunds",
+      "producers": [
+        "ledger-db-cdc"
+      ],
+      "consumers": [
+        {
+          "groupId": "refund-service-processRefund",
+          "members": [
+            "refund-service"
+          ]
+        }
+      ],
+      "schemaModel": "Refund"
+    },
+    {
+      "id": "refund-error",
+      "producers": [],
+      "consumers": [],
+      "schemaModel": "Refund"
+    }
+  ]
+}

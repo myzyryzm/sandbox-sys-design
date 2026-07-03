@@ -1,0 +1,189 @@
+{
+  "processId": "1d8606d9-cc13-46ba-a98b-1a0e39d38c18",
+  "processName": "Order (no refund)",
+  "verdict": "PASS",
+  "startedAt": "2026-07-02T21:07:21Z",
+  "endedAt": "2026-07-02T21:07:53Z",
+  "durationSeconds": 31,
+  "stoppedEarly": false,
+  "seeded": [
+    {
+      "store": "ledger-db",
+      "entity": "account",
+      "count": 3,
+      "ids": [
+        "e2e210713-s1",
+        "e2e210713-s2",
+        "e2e210713-s3"
+      ]
+    },
+    {
+      "store": "order-db",
+      "entity": "order",
+      "count": 40,
+      "ids": [
+        "e2e210713-o01",
+        "...",
+        "e2e210713-o40"
+      ]
+    },
+    {
+      "store": "order-db",
+      "entity": "item",
+      "count": 60,
+      "ids": [
+        "e2e210713-o01-i1",
+        "..."
+      ]
+    },
+    {
+      "store": "order-db",
+      "entity": "order_item",
+      "count": 60,
+      "ids": []
+    }
+  ],
+  "clientCalls": [
+    {
+      "client": "externals-trigger",
+      "method": "trigger_processPayments",
+      "calls": 4,
+      "ok": 4,
+      "failed": 0,
+      "skippedTicks": 0,
+      "argsUsed": [],
+      "samples": [
+        "POST /payments-api/process-payment -> 200 {\"processed\": 25, \"failed\": 0}",
+        "POST /payments-api/process-payment -> 200 {\"processed\": 34, \"failed\": 0}"
+      ]
+    },
+    {
+      "client": "externals-trigger",
+      "method": "trigger_processPayouts",
+      "calls": 4,
+      "ok": 4,
+      "failed": 0,
+      "skippedTicks": 0,
+      "argsUsed": [],
+      "samples": [
+        "POST /payout-api/process-payouts -> 200 {\"processed\": 6, \"failed\": 0}",
+        "POST /payout-api/process-payouts -> 200 {\"processed\": 6, \"failed\": 0}"
+      ]
+    },
+    {
+      "client": "mobile-app",
+      "method": "checkout",
+      "calls": 29,
+      "ok": 29,
+      "failed": 0,
+      "skippedTicks": 0,
+      "argsUsed": [
+        "e2e210713-o01",
+        "e2e210713-o02",
+        "e2e210713-o03",
+        "e2e210713-o04",
+        "e2e210713-o05",
+        "e2e210713-o06",
+        "e2e210713-o07",
+        "e2e210713-o08",
+        "e2e210713-o09",
+        "e2e210713-o10",
+        "e2e210713-o11",
+        "e2e210713-o12",
+        "e2e210713-o13",
+        "e2e210713-o14",
+        "e2e210713-o15",
+        "e2e210713-o16",
+        "e2e210713-o17",
+        "e2e210713-o18",
+        "e2e210713-o19",
+        "e2e210713-o20",
+        "e2e210713-o21",
+        "e2e210713-o22",
+        "e2e210713-o23",
+        "e2e210713-o24",
+        "e2e210713-o25"
+      ],
+      "samples": [
+        "POST /payments-api/complete-payment -> 200 {\"status\": \"success\", \"return_url\": \"\"}",
+        "POST /payments-api/complete-payment -> 200 {\"status\": \"success\", \"return_url\": \"\"}"
+      ]
+    },
+    {
+      "client": "mobile-app",
+      "method": "shipOrder",
+      "calls": 7,
+      "ok": 7,
+      "failed": 0,
+      "skippedTicks": 0,
+      "argsUsed": [
+        "e2e210713-o01",
+        "e2e210713-o02",
+        "e2e210713-o03",
+        "e2e210713-o04",
+        "e2e210713-o05",
+        "e2e210713-o06",
+        "e2e210713-o07"
+      ],
+      "samples": [
+        "POST /service-1/payment-flow/2b -> 200 {\"status\": \"step2b_fufilled\"}",
+        "POST /service-1/payment-flow/2b -> 200 {\"status\": \"step2b_fufilled\"}"
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "condition": "two payments for the same order succeed",
+      "occurred": false,
+      "evidence": "order_payment dupes: []; double step2a captures per order: []; 25 payment_success attempts across 25 orders; mid-run sample: []"
+    },
+    {
+      "condition": "sum(debits) != sum(credits) for a single transaction",
+      "occurred": false,
+      "evidence": "imbalanced transactions in run window: []; pre-existing imbalanced (all time): 0; mid-run sample: []"
+    },
+    {
+      "condition": "all processed_payments have step2a_payin-complete Transactions",
+      "occurred": false,
+      "evidence": "{\"processed_delta\": 25, \"failed_delta\": 0, \"step2a_delta_total\": 25, \"run_attempts_payment_success\": 25, \"success_attempts_missing_step2a\": [], \"step2a_without_success_attempt\": []}"
+    },
+    {
+      "condition": "all processed_payouts have step4_payout-received Transactions",
+      "occurred": false,
+      "evidence": "{\"processed_delta\": 7, \"failed_delta\": 0, \"step4_delta_total\": 7, \"run_payout_rows\": 7, \"payouts_missing_step4\": [], \"step4_without_payout_row\": []}"
+    }
+  ],
+  "constraints": [
+    {
+      "constraint": "checkout is only ever called for an order that exists",
+      "upheld": true,
+      "note": "all checkout args drawn from the 40 seeded orders (e2e210713-o01..o40)"
+    },
+    {
+      "constraint": "all sellers need an Account",
+      "upheld": true,
+      "note": "seeded 3 liability accounts (owner e2e210713-s1..s3, name NULL, USD) per the chart-of-accounts seed rule"
+    },
+    {
+      "constraint": "items must have a seller_id that exists in the Account database",
+      "upheld": true,
+      "note": "all 60 seeded items reference the 3 seeded seller accounts"
+    },
+    {
+      "constraint": "all items in an order must have the same seller_id",
+      "upheld": true,
+      "note": "each seeded order's items use one seller"
+    },
+    {
+      "constraint": "shipOrder args from PayoutReadiness (fufilled=false, no refund txn) mapped to Order",
+      "upheld": true,
+      "note": "each shipOrder tick queried payout_readiness (fufilled=false, refund-step excluded), mapped payment_order_id -> order via order_payment; ticks with no candidate were skipped"
+    }
+  ],
+  "skipped": [],
+  "notes": [
+    "start returned 409 but this process id is already the running one; continuing",
+    "run tag e2e210713; providers pre-drained for baselines (payments processed=25, payouts processed=6); one settling drain after the loop",
+    "failed client invocations: 0"
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "processes": [
+    {
+      "id": "1d8606d9-cc13-46ba-a98b-1a0e39d38c18",
+      "name": "Order (no refund)",
+      "client_list": [
+        {
+          "client": "mobile-app",
+          "method": "checkout",
+          "intervalSeconds": 1
+        },
+        {
+          "client": "externals-trigger",
+          "method": "trigger_processPayments",
+          "intervalSeconds": 10
+        },
+        {
+          "client": "externals-trigger",
+          "method": "trigger_processPayouts",
+          "intervalSeconds": 10
+        },
+        {
+          "client": "mobile-app",
+          "method": "shipOrder",
+          "intervalSeconds": 5
+        }
+      ],
+      "failure_list": [
+        "two payments for the same order succeed",
+        "the sum of debit ledger entries does not equal the sum of credit ledger entries for a single transaction",
+        "all processed_payments (payment-api) have equivalent step2a_payin-complete Transactions in the ledger db",
+        "all processed_payouts (payout-api) have equivalent step4_payout-received Transactions in the ledger db"
+      ],
+      "constraint_list": [
+        "checkout is only ever called for an order that exists",
+        "all sellers need an Account (see the rules for seeding the ledger db for the proper seller account entry)",
+        "items must have a seller_id that exists in the Account database",
+        "all items in an order must have the same seller_id",
+        "for client.shipOrder get read the PayoutReadiness table and for payment_order_id. if PayoutReadiness.fufilled is true then skip. if there is a Transaction(payment_order_id, step: refund) then skip that entry. grab the current entries that have fulfilled equal to false, use that payment_order_id to get the corresponding Order in the Order DB and use that as the argument."
+      ],
+      "createdAt": "2026-07-01T20:16:47.113Z",
+      "updatedAt": "2026-07-02T19:46:42.800Z"
+    }
+  ]
+}

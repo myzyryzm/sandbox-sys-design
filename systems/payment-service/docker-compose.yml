@@ -1,0 +1,200 @@
+# Self-contained compose file for the `payment-service` system.
+# Run from inside systems/payment-service/:  docker compose up --build
+#
+# Topology: nginx LB  ->  service-1 (generic FastAPI), with Prometheus scraping
+# the service directly. service-1 is a generic service (the same shape "Add
+# service" creates): it exposes /health and /metrics and is reached through the
+# LB at the /service-1/ prefix. More services slot in the same way — each gets
+# its own compose service, an nginx /<id>/ route, and a Prometheus scrape job.
+#
+# Restartable: `docker compose down` then `up` cleanly recreates everything.
+# Prometheus data is intentionally NOT persisted.
+
+services:
+  lb:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  service-1:
+    # Service "service-1" — generic FastAPI backend (the same shape "Add service" creates)
+    build: ./service-1
+  payments-api:
+    # External service "payments-api" — added by Add external service (simulates a third-party API)
+    build: ./payments-api
+  ledger-db:
+    # PostgreSQL "ledger-db" — added by Add database
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sandbox
+      POSTGRES_PASSWORD: sandbox
+      POSTGRES_DB: ledger_db
+    volumes:
+      - ./ledger-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./ledger-db/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+  ledger-db-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://sandbox:sandbox@ledger-db:5432/ledger_db?sslmode=disable
+    depends_on:
+      - ledger-db
+  order-db:
+    # PostgreSQL "order-db" — added by Add database
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sandbox
+      POSTGRES_PASSWORD: sandbox
+      POSTGRES_DB: order_db
+    volumes:
+      - ./order-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./order-db/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+  order-db-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://sandbox:sandbox@order-db:5432/order_db?sslmode=disable
+    depends_on:
+      - order-db
+  refund-stream:
+    # Kafka "refund-stream" — added by Add event stream
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://refund-stream:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@refund-stream:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  refund-stream-exporter:
+    image: danielqsj/kafka-exporter:latest
+    command:
+      - --kafka.server=refund-stream:9092
+    depends_on:
+      - refund-stream
+    restart: unless-stopped
+  refund-stream-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      - refund-stream
+    restart: no
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        set -e
+
+        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server
+        refund-stream:9092 --list >/dev/null 2>&1; do sleep 2; done
+
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server refund-stream:9092
+        --create --if-not-exists --topic refunds --partitions 1
+        --replication-factor 1
+  ledger-db-cdc:
+    # CDC "ledger-db-cdc" — added by Add CDC
+    build: ./ledger-db-cdc
+    depends_on:
+      - ledger-db
+      - refund-stream
+      - payout-stream
+    environment:
+      CDC_ENGINE: postgres
+      CDC_DB_HOST: ledger-db
+      CDC_DB_PORT: 5432
+      CDC_DB_NAME: ledger_db
+      CDC_DB_USER: sandbox
+      CDC_DB_PASSWORD: sandbox
+      CDC_PG_SLOT: ledger_db_cdc
+    volumes:
+      - ./ledger-db/cdc.json:/cdc.json:ro
+    restart: unless-stopped
+  payout-stream:
+    # Kafka "payout-stream" — added by Add event stream
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://payout-stream:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@payout-stream:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  payout-stream-exporter:
+    image: danielqsj/kafka-exporter:latest
+    command:
+      - --kafka.server=payout-stream:9092
+    depends_on:
+      - payout-stream
+    restart: unless-stopped
+  payout-stream-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      - payout-stream
+    restart: no
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        set -e
+
+        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server
+        payout-stream:9092 --list >/dev/null 2>&1; do sleep 2; done
+
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server payout-stream:9092
+        --create --if-not-exists --topic payout --partitions 1
+        --replication-factor 1
+  payout-api:
+    # External service "payout-api" — added by Add external service (simulates a third-party API)
+    build: ./payout-api
+  payout-service-2:
+    # Service "payout-service-2" — added by Add service (generic FastAPI backend)
+    build: ./payout-service-2
+  payout-consumer:
+    # Service "payout-consumer" — added by Add service (generic FastAPI backend)
+    build: ./payout-consumer
+    depends_on:
+      - payout-stream
+      - ledger-db
+      - payout-api
+    volumes:
+      - ./payout-stream/streams.json:/streams/payout-stream.json:ro # live consumersPaused flag
+  orders-service:
+    # Service "orders-service" — added by Add service (generic FastAPI backend)
+    build: ./orders-service
+  refund-service:
+    # Service "refund-service" — added by Add service (generic FastAPI backend)
+    build: ./refund-service
+    depends_on:
+      - refund-stream
+      - ledger-db
+      - payments-api
+    volumes:
+      - ./refund-stream/streams.json:/streams/refund-stream.json:ro # live consumersPaused flag

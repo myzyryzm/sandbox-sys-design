@@ -1,0 +1,250 @@
+{
+  "processId": "1d8606d9-cc13-46ba-a98b-1a0e39d38c18",
+  "processName": "Order (no refund)",
+  "verdict": "PASS",
+  "startedAt": "2026-07-01T21:26:58Z",
+  "endedAt": "2026-07-01T21:27:29Z",
+  "durationSeconds": 31,
+  "stoppedEarly": false,
+  "seeded": [
+    {
+      "store": "order-db",
+      "entity": "order",
+      "count": 30,
+      "ids": [
+        "nr-ord-01",
+        "nr-ord-02",
+        "nr-ord-03",
+        "nr-ord-04",
+        "nr-ord-05",
+        "nr-ord-06",
+        "nr-ord-07",
+        "nr-ord-08",
+        "nr-ord-09",
+        "nr-ord-10",
+        "nr-ord-11",
+        "nr-ord-12",
+        "nr-ord-13",
+        "nr-ord-14",
+        "nr-ord-15",
+        "nr-ord-16",
+        "nr-ord-17",
+        "nr-ord-18",
+        "nr-ord-19",
+        "nr-ord-20",
+        "nr-ord-21",
+        "nr-ord-22",
+        "nr-ord-23",
+        "nr-ord-24",
+        "nr-ord-25",
+        "nr-ord-26",
+        "nr-ord-27",
+        "nr-ord-28",
+        "nr-ord-29",
+        "nr-ord-30"
+      ],
+      "note": "30 fresh orders seeded before driving; every checkout arg drawn only from this pool (upholds 'checkout only for existing orders')."
+    },
+    {
+      "store": "order-db",
+      "entity": "item",
+      "count": 30,
+      "note": "1 item per order; sellers round-robin seller1/seller2/seller3 (10 each); each order's single item => uniform seller_id trivially holds."
+    },
+    {
+      "store": "order-db",
+      "entity": "order_item",
+      "count": 30,
+      "note": "1:1 order<->item links."
+    },
+    {
+      "store": "ledger-db",
+      "entity": "account",
+      "count": 0,
+      "note": "seller1/seller2/seller3 accounts already present in the chart of accounts (owner_id=<seller>, name NULL, type liability); verified, none needed creating."
+    }
+  ],
+  "clientCalls": [
+    {
+      "client": "mobile-app",
+      "method": "checkout",
+      "calls": 29,
+      "httpCalls": 29,
+      "ok": 29,
+      "failed": 0,
+      "argsUsed": [
+        "nr-ord-01",
+        "nr-ord-02",
+        "nr-ord-03",
+        "nr-ord-04",
+        "nr-ord-05",
+        "nr-ord-06",
+        "nr-ord-07",
+        "nr-ord-08",
+        "nr-ord-09",
+        "nr-ord-10",
+        "nr-ord-11",
+        "nr-ord-12",
+        "nr-ord-13",
+        "nr-ord-14",
+        "nr-ord-15",
+        "nr-ord-16",
+        "nr-ord-17",
+        "nr-ord-18",
+        "nr-ord-19",
+        "nr-ord-20",
+        "nr-ord-21",
+        "nr-ord-22",
+        "nr-ord-23",
+        "nr-ord-24",
+        "nr-ord-25",
+        "nr-ord-26",
+        "nr-ord-27",
+        "nr-ord-28",
+        "nr-ord-29"
+      ],
+      "note": "All 29 checkouts targeted orders already paid in setup, so each returned payment_success idempotently with NO token and NO re-charge (strong double-charge probe).",
+      "samples": [
+        {
+          "order": "nr-ord-01",
+          "response": {
+            "status": "payment_success"
+          }
+        }
+      ]
+    },
+    {
+      "client": "externals-trigger",
+      "method": "trigger_processPayments",
+      "calls": 4,
+      "httpCalls": 4,
+      "ok": 4,
+      "failed": 0,
+      "argsUsed": [],
+      "samples": [
+        {
+          "processed": 45,
+          "failed": 0
+        },
+        {
+          "processed": 45,
+          "failed": 0
+        },
+        {
+          "processed": 45,
+          "failed": 0
+        },
+        {
+          "processed": 45,
+          "failed": 0
+        }
+      ],
+      "note": "processed count steady at 45 (all payins already settled in setup; 0 failed)."
+    },
+    {
+      "client": "externals-trigger",
+      "method": "trigger_processPayouts",
+      "calls": 4,
+      "httpCalls": 4,
+      "ok": 4,
+      "failed": 0,
+      "argsUsed": [],
+      "samples": [
+        {
+          "processed": 0,
+          "failed": 0
+        },
+        {
+          "processed": 2,
+          "failed": 0
+        },
+        {
+          "processed": 4,
+          "failed": 0
+        },
+        {
+          "processed": 6,
+          "failed": 0
+        }
+      ],
+      "note": "processed grew 0->2->4->6 across the run as shipped orders' payouts flowed through CDC->payout-consumer(step3)->payout-api; a final steady-state drain took it to 7 (0 failed)."
+    },
+    {
+      "client": "mobile-app",
+      "method": "shipOrder",
+      "calls": 7,
+      "httpCalls": 7,
+      "ok": 7,
+      "failed": 0,
+      "argsUsed": [
+        "order1",
+        "e2e-ord-01",
+        "e2e-ord-02",
+        "e2e-ord-03",
+        "e2e-ord-04",
+        "e2e-ord-05",
+        "e2e-ord-06"
+      ],
+      "note": "Per constraint #5: each order_id derived from a payout_readiness row with fufilled=false -> its payment_order_id -> the Order in order-db. All 7 returned step2b_fufilled, creating the Payout that drove the payout chain.",
+      "samples": [
+        {
+          "order": "order1",
+          "response": {
+            "status": "step2b_fufilled"
+          }
+        }
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "condition": "two payments for the same order succeed",
+      "occurred": false,
+      "evidence": "SELECT order_id FROM order_payment WHERE status='payment_success' GROUP BY order_id HAVING count(*)>1 -> 0 rows. 45 orders each have exactly one payment_success; 29 repeat checkouts on already-paid orders all returned payment_success with no new OrderPayment/charge (checkout is idempotent)."
+    },
+    {
+      "condition": "sum of debit ledger entries != sum of credit ledger entries for a single transaction",
+      "occurred": false,
+      "evidence": "Per-transaction debit/credit compare -> 0 unbalanced across all 110 transactions (45 step1 + 45 step2a + 7 step2b + 7 step3 + 7 step4); 0 transactions with no ledger entries. Global double-entry: debits = credits = 20448 USD."
+    },
+    {
+      "condition": "all processed_payments (payments-api) have equivalent step2a_payin-complete Transactions in the ledger db",
+      "occurred": false,
+      "evidence": "payments-api processed_payments = 45 (0 failed) == 45 distinct step2a_payin-complete transactions. 0 step1 payment_order_ids lack a step2a; 0 orphan step2a (step2a without step1). Exact 1:1."
+    },
+    {
+      "condition": "all processed_payouts (payout-api) have equivalent step4_payout-received Transactions in the ledger db",
+      "occurred": false,
+      "evidence": "payout-api processed_payouts = 7 (0 failed) == 7 distinct step4_payout-received transactions. 0 orphan step4 (step4 without step3); after the final steady-state drain 0 step3-only remained (the last-shipped e2e-ord-06 payout settled). Exact 1:1."
+    }
+  ],
+  "constraints": [
+    {
+      "constraint": "checkout is only ever called for an order that exists",
+      "upheld": true,
+      "note": "checkout args drawn only from the 30 pre-seeded nr-ord orders; shipOrder args mapped from existing payout_readiness->order_payment->order. Every id referenced a pre-existing Order."
+    },
+    {
+      "constraint": "all sellers need an Account (proper seller account entry in ledger db)",
+      "upheld": true,
+      "note": "seller1/seller2/seller3 each have an account (owner_id=<seller>, name NULL, type liability, USD) in ledger-db; verified present before driving."
+    },
+    {
+      "constraint": "items must have a seller_id that exists in the Account database",
+      "upheld": true,
+      "note": "All 30 seeded items use seller1/seller2/seller3, each of which has an Account."
+    },
+    {
+      "constraint": "all items in an order must have the same seller_id",
+      "upheld": true,
+      "note": "Each seeded order has exactly one item, so the per-order seller_id is trivially uniform."
+    },
+    {
+      "constraint": "shipOrder order_id via PayoutReadiness (fufilled=false) -> payment_order_id -> Order in Order DB",
+      "upheld": true,
+      "note": "pick_ship_order() queried payout_readiness WHERE fufilled=false, took payment_order_id, resolved order_id via order_payment in order-db, and passed that to shipOrder. 7/7 shipOrders resolved to real orders and succeeded (step2b_fufilled)."
+    }
+  ],
+  "skipped": [],
+  "notes": "All 4 client methods resolved & implemented. The backend's own 31s countdown for this run had already elapsed during the required setup (reading service code + seeding the valid world), so run.running was a stale-expired flag rather than a user Stop; the orchestrator drove the full intended 31s and only honored a genuine supersede (a different run.id), which never occurred -> stoppedEarly=false. First orchestrator attempt shipped nothing due to a lookup bug (the psql helper passed the service name 'ledger-db'/'order-db' as the -d database name instead of 'ledger_db'/'order_db'); fixed to use correct db names + surface errors, after which all 7 shipOrders succeeded and the full payout chain (step2b -> Payout -> ledger-db-cdc -> payout-consumer step3 -> processPayouts -> payout-service-2 step4) completed. 0 server 5xx across all services. A single final processPayouts/processPayments drain was issued as a steady-state probe (not part of driving)."
+}

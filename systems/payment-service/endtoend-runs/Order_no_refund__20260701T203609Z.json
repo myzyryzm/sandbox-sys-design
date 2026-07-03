@@ -1,0 +1,181 @@
+{
+  "processId": "1d8606d9-cc13-46ba-a98b-1a0e39d38c18",
+  "processName": "Order (no refund)",
+  "verdict": "PASS",
+  "startedAt": "2026-07-01T20:27:36Z",
+  "endedAt": "2026-07-01T20:28:08Z",
+  "durationSeconds": 32,
+  "stoppedEarly": false,
+  "seeded": [
+    {
+      "store": "order-db",
+      "entity": "order",
+      "count": 15,
+      "ids": [
+        "e2e-ord-01",
+        "e2e-ord-02",
+        "e2e-ord-03",
+        "e2e-ord-04",
+        "e2e-ord-05",
+        "e2e-ord-06",
+        "e2e-ord-07",
+        "e2e-ord-08",
+        "e2e-ord-09",
+        "e2e-ord-10",
+        "e2e-ord-11",
+        "e2e-ord-12",
+        "e2e-ord-13",
+        "e2e-ord-14",
+        "e2e-ord-15"
+      ],
+      "note": "15 orders, all pre-existing before any checkout (upholds 'checkout only for existing orders')"
+    },
+    {
+      "store": "order-db",
+      "entity": "item",
+      "count": 18,
+      "note": "1-2 items per order; every order's items share one seller_id (seller1/seller2/seller3)"
+    },
+    {
+      "store": "order-db",
+      "entity": "order_item",
+      "count": 18
+    },
+    {
+      "store": "ledger-db",
+      "entity": "account",
+      "count": 2,
+      "ids": [
+        "seller2",
+        "seller3"
+      ],
+      "note": "seller1 account pre-seeded; added seller2/seller3 so every item seller has an Account"
+    }
+  ],
+  "clientCalls": [
+    {
+      "client": "mobile-app",
+      "method": "checkout",
+      "calls": 28,
+      "httpCalls": 43,
+      "ok": 43,
+      "failed": 0,
+      "argsUsed": [
+        "e2e-ord-01",
+        "e2e-ord-02",
+        "e2e-ord-03",
+        "e2e-ord-04",
+        "e2e-ord-05",
+        "e2e-ord-06",
+        "e2e-ord-07",
+        "e2e-ord-08",
+        "e2e-ord-09",
+        "e2e-ord-10",
+        "e2e-ord-11",
+        "e2e-ord-12",
+        "e2e-ord-13",
+        "e2e-ord-14",
+        "e2e-ord-15"
+      ],
+      "note": "cycled the 15-order pool; 13 orders checked out twice (idempotency / double-charge probe), 2 once",
+      "samples": [
+        {
+          "order": "e2e-ord-01",
+          "response": {
+            "token": "<redacted>",
+            "status": "register_success"
+          }
+        },
+        {
+          "order": "repeat-on-paid-order",
+          "response": {
+            "status": "payment_success"
+          },
+          "note": "2nd checkout on an already-paid order returns payment_success with no token -> no re-charge"
+        }
+      ]
+    },
+    {
+      "client": "externals-trigger",
+      "method": "trigger_processPayments",
+      "calls": 4,
+      "httpCalls": 4,
+      "ok": 4,
+      "failed": 0,
+      "argsUsed": [],
+      "samples": [
+        {
+          "response": {
+            "processed": 16,
+            "failed": 0
+          },
+          "note": "cumulative after final steady-state drain"
+        }
+      ]
+    },
+    {
+      "client": "externals-trigger",
+      "method": "trigger_processPayouts",
+      "calls": 4,
+      "httpCalls": 4,
+      "ok": 4,
+      "failed": 0,
+      "argsUsed": [],
+      "samples": [
+        {
+          "response": {
+            "processed": 0,
+            "failed": 0
+          },
+          "note": "no payouts are buffered in this process (nothing calls payout-api.payout), so the drain is a no-op"
+        }
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "condition": "two payments for the same order succeed",
+      "occurred": false,
+      "evidence": "SELECT order_id FROM order_payment WHERE status='payment_success' GROUP BY order_id HAVING count(*)>1 -> 0 rows. 16 orders each have exactly one payment_success despite 13 orders being checked out twice; checkout is idempotent."
+    },
+    {
+      "condition": "sum of debit ledger entries != sum of credit ledger entries for a single transaction",
+      "occurred": false,
+      "evidence": "Per-transaction debit/credit compare -> 0 unbalanced; 32/32 transactions balanced. Global double-entry: debits=credits=5948 USD."
+    },
+    {
+      "condition": "all processed_payments (payment-api) have equivalent step2a_payin-complete Transactions in the ledger db",
+      "occurred": false,
+      "evidence": "payments-api processed_payments=16 (0 failed) == 16 step2a_payin-complete transactions across 16 distinct payment_order_ids. Exact 1:1 match."
+    },
+    {
+      "condition": "all processed_payouts (payout-api) have equivalent step4_payout-received Transactions in the ledger db",
+      "occurred": false,
+      "evidence": "payout-api processed_payouts=0 == 0 step4_payout-received transactions. Trivially consistent: this process never buffers a payout (no step3_payout is produced), so processPayouts is a no-op."
+    }
+  ],
+  "constraints": [
+    {
+      "constraint": "checkout is only ever called for an order that exists",
+      "upheld": true,
+      "note": "checkout args drawn only from the 15 pre-seeded orders (all present in order-db before the run)."
+    },
+    {
+      "constraint": "all sellers need an Account",
+      "upheld": true,
+      "note": "seller1 pre-seeded; added seller2 & seller3 accounts to ledger-db before driving."
+    },
+    {
+      "constraint": "items must have a seller_id that exists in the Account database",
+      "upheld": true,
+      "note": "all 18 items use seller1/seller2/seller3, each of which has an Account."
+    },
+    {
+      "constraint": "all items in an order must have the same seller_id",
+      "upheld": true,
+      "note": "verified by join: every seeded order's items share a single seller_id."
+    }
+  ],
+  "skipped": [],
+  "notes": "All 3 client methods resolved & implemented. 0 server 5xx across orders-service/payments-api/service-1/payout-api/payout-service-2 during the run. Mid-run (t=16s) and end-of-run (t=32s) samples both showed no double-charge and no unbalanced transactions. A single final processPayments/processPayouts drain was issued as a steady-state probe (not part of driving). Note: one extra order 'order1' was paid during a pre-run smoke test, which is why the ledger totals show 16 paid orders (15 e2e + order1)."
+}

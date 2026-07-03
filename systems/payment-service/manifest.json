@@ -1,0 +1,551 @@
+{
+  "system_id": "payment-service",
+  "name": "Payment Service",
+  "prometheus_base": "/api/prometheus",
+  "poll_interval_ms": 4000,
+  "nodes": [
+    {
+      "id": "lb",
+      "label": "nginx LB",
+      "type": "load_balancer",
+      "position": {
+        "x": -197,
+        "y": -75
+      },
+      "metrics": []
+    },
+    {
+      "id": "service-1",
+      "label": "service-1",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 17,
+        "y": 242
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"service-1\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"service-1\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"service-1\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"service-1\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"service-1\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"service-1\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "payments-api",
+      "label": "payments-api",
+      "type": "external_service",
+      "origin": "create-external-service",
+      "external": true,
+      "position": {
+        "x": -555,
+        "y": 163
+      },
+      "metrics": []
+    },
+    {
+      "id": "mobile-app",
+      "label": "mobile-app",
+      "type": "client",
+      "origin": "create-client",
+      "external": true,
+      "position": {
+        "x": -555,
+        "y": -88
+      },
+      "metrics": []
+    },
+    {
+      "id": "ledger-db",
+      "label": "ledger-db",
+      "type": "postgres",
+      "origin": "create-database",
+      "position": {
+        "x": 422,
+        "y": 224
+      },
+      "metrics": [
+        {
+          "label": "connections",
+          "query": "sum(pg_stat_database_numbackends{job=\"ledger-db\"})",
+          "unit": ""
+        },
+        {
+          "label": "commits/s",
+          "query": "sum(rate(pg_stat_database_xact_commit{job=\"ledger-db\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "rows fetch/s",
+          "query": "sum(rate(pg_stat_database_tup_fetched{job=\"ledger-db\"}[1m]))",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "pg_up{job=\"ledger-db\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "schemaModels": [
+        "Account",
+        "Transaction",
+        "LedgerEntry",
+        "Refund",
+        "Payout",
+        "PayoutReadiness"
+      ]
+    },
+    {
+      "id": "order-db",
+      "label": "order-db",
+      "type": "postgres",
+      "origin": "create-database",
+      "position": {
+        "x": 375,
+        "y": 639
+      },
+      "metrics": [
+        {
+          "label": "connections",
+          "query": "sum(pg_stat_database_numbackends{job=\"order-db\"})",
+          "unit": ""
+        },
+        {
+          "label": "commits/s",
+          "query": "sum(rate(pg_stat_database_xact_commit{job=\"order-db\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "rows fetch/s",
+          "query": "sum(rate(pg_stat_database_tup_fetched{job=\"order-db\"}[1m]))",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "pg_up{job=\"order-db\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "schemaModels": [
+        "OrderPayment",
+        "OrderItem",
+        "Order",
+        "Item"
+      ]
+    },
+    {
+      "id": "refund-stream",
+      "label": "refund-stream",
+      "type": "kafka",
+      "origin": "create-event-stream",
+      "position": {
+        "x": 1175,
+        "y": -77
+      },
+      "metrics": [
+        {
+          "label": "topics",
+          "query": "count(count by (topic)(kafka_topic_partitions{job=\"refund-stream\",topic!~\"__.*\"})) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "partitions",
+          "query": "sum(kafka_topic_partitions{job=\"refund-stream\",topic!~\"__.*\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "msgs/s",
+          "query": "sum(rate(kafka_topic_partition_current_offset{job=\"refund-stream\",topic!~\"__.*\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "lag",
+          "query": "sum(kafka_consumergroup_lag{job=\"refund-stream\",topic!~\"__.*\"}) or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"refund-stream\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ledger-db-cdc",
+      "label": "ledger-db-cdc",
+      "type": "cdc",
+      "origin": "create-cdc",
+      "cdcOf": "ledger-db",
+      "position": {
+        "x": 1178,
+        "y": 149
+      },
+      "metrics": [
+        {
+          "label": "captured/s",
+          "query": "sum(rate(cdc_events_captured_total{job=\"ledger-db-cdc\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "produced/s",
+          "query": "sum(rate(cdc_events_produced_total{job=\"ledger-db-cdc\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "errors/s",
+          "query": "sum(rate(cdc_errors_total{job=\"ledger-db-cdc\"}[1m])) or vector(0)",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "up{job=\"ledger-db-cdc\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "payout-stream",
+      "label": "payout-stream",
+      "type": "kafka",
+      "origin": "create-event-stream",
+      "position": {
+        "x": 1184,
+        "y": 345
+      },
+      "metrics": [
+        {
+          "label": "topics",
+          "query": "count(count by (topic)(kafka_topic_partitions{job=\"payout-stream\",topic!~\"__.*\"})) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "partitions",
+          "query": "sum(kafka_topic_partitions{job=\"payout-stream\",topic!~\"__.*\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "msgs/s",
+          "query": "sum(rate(kafka_topic_partition_current_offset{job=\"payout-stream\",topic!~\"__.*\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "lag",
+          "query": "sum(kafka_consumergroup_lag{job=\"payout-stream\",topic!~\"__.*\"}) or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"payout-stream\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "payout-api",
+      "label": "payout-api",
+      "type": "external_service",
+      "origin": "create-external-service",
+      "external": true,
+      "position": {
+        "x": 997,
+        "y": 1012
+      },
+      "metrics": []
+    },
+    {
+      "id": "payout-service-2",
+      "label": "payout-service-2",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 652,
+        "y": 589
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"payout-service-2\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"payout-service-2\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"payout-service-2\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"payout-service-2\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"payout-service-2\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"payout-service-2\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "externals-trigger",
+      "label": "externals-trigger",
+      "type": "client",
+      "origin": "create-client",
+      "external": true,
+      "position": {
+        "x": -370,
+        "y": 950
+      },
+      "metrics": []
+    },
+    {
+      "id": "payout-consumer",
+      "label": "payout-consumer",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 847,
+        "y": 323
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"payout-consumer\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"payout-consumer\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"payout-consumer\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"payout-consumer\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"payout-consumer\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"payout-consumer\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "orders-service",
+      "label": "orders-service",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": -60,
+        "y": 630
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"orders-service\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"orders-service\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"orders-service\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"orders-service\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"orders-service\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"orders-service\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "refund-service",
+      "label": "refund-service",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 875,
+        "y": -88
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"refund-service\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"refund-service\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"refund-service\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"refund-service\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"refund-service\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"refund-service\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "ledger-db",
+      "to": "ledger-db-cdc"
+    },
+    {
+      "from": "ledger-db-cdc",
+      "to": "refund-stream"
+    },
+    {
+      "from": "ledger-db-cdc",
+      "to": "payout-stream"
+    },
+    {
+      "from": "payout-stream",
+      "to": "payout-consumer",
+      "origin": "consumer-fn"
+    },
+    {
+      "from": "refund-stream",
+      "to": "refund-service",
+      "origin": "consumer-fn"
+    }
+  ],
+  "boundary": {
+    "x": -122,
+    "y": -138,
+    "w": 1601,
+    "h": 1054
+  }
+}

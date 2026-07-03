@@ -1,0 +1,25 @@
+{
+  "topics": [
+    {
+      "id": "payout",
+      "producers": [
+        "ledger-db-cdc"
+      ],
+      "consumers": [
+        {
+          "groupId": "payout-consumer-consumePayout",
+          "members": [
+            "payout-consumer"
+          ]
+        }
+      ],
+      "schemaModel": "Payout"
+    },
+    {
+      "id": "payout-error",
+      "producers": [],
+      "consumers": [],
+      "schemaModel": "Payout"
+    }
+  ]
+}
