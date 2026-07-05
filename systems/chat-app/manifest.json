@@ -63,8 +63,8 @@
       "wsRole": "server",
       "wsTier": "ws-lb",
       "position": {
-        "x": 380,
-        "y": 589
+        "x": 389,
+        "y": 387
       },
       "metrics": [
         {
@@ -115,8 +115,8 @@
       "wsRole": "server",
       "wsTier": "ws-lb",
       "position": {
-        "x": 380,
-        "y": 780
+        "x": 389,
+        "y": 545
       },
       "metrics": [
         {
