@@ -9,8 +9,8 @@
       "label": "nginx LB",
       "type": "load_balancer",
       "position": {
-        "x": 1470,
-        "y": 1282
+        "x": 1462,
+        "y": 1050
       },
       "metrics": []
     },
@@ -209,7 +209,7 @@
       "wsRole": "presence",
       "wsTier": "ws-lb",
       "position": {
-        "x": 2260,
+        "x": 2278,
         "y": 1703
       },
       "metrics": [
@@ -256,6 +256,44 @@
         "y": 1513
       },
       "metrics": []
+    },
+    {
+      "id": "notification-db",
+      "label": "notification-db",
+      "type": "mongodb",
+      "origin": "create-database",
+      "position": {
+        "x": 2406,
+        "y": 1557
+      },
+      "metrics": [
+        {
+          "label": "connections",
+          "query": "sum(mongodb_ss_connections{job=\"notification-db\",conn_type=\"current\"})",
+          "unit": ""
+        },
+        {
+          "label": "ops/s",
+          "query": "sum(rate(mongodb_ss_opcounters{job=\"notification-db\"}[1m]))",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "mongodb_up{job=\"notification-db\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "schemaModels": [
+        "Notification"
+      ]
     }
   ],
   "edges": [
@@ -286,12 +324,20 @@
     {
       "from": "ws-server-2",
       "to": "ws-presence"
+    },
+    {
+      "from": "ws-server-1",
+      "to": "notification-db"
+    },
+    {
+      "from": "ws-server-2",
+      "to": "notification-db"
     }
   ],
   "boundary": {
     "x": 1452,
-    "y": 1221,
-    "w": 1040,
-    "h": 814
+    "y": 1010,
+    "w": 1224,
+    "h": 1025
   }
 }

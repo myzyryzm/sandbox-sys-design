@@ -1,0 +1,11 @@
+{
+  "models": [
+    {
+      "name": "Notification",
+      "ts": "// id => primary key\n// to => add index\ninterface Notification {\n  id: string;\n  to: string;\n  from: string;\n  message: string;\n  sentAt: string;\n}",
+      "description": "",
+      "createdAt": "2026-07-05T23:24:11.671Z",
+      "updatedAt": "2026-07-05T23:24:11.671Z"
+    }
+  ]
+}

@@ -82,3 +82,20 @@ services:
       REDIS_ADDR: redis://ws-presence:6379
     depends_on:
       - ws-presence
+  notification-db:
+    # MongoDB "notification-db" — added by Add database
+    image: mongo:7
+    environment:
+      MONGO_INITDB_DATABASE: notification_db
+    volumes:
+      - ./notification-db/init.js:/docker-entrypoint-initdb.d/init.js:ro
+  notification-db-exporter:
+    image: percona/mongodb_exporter:0.40
+    # Pin arm64: the amd64 variant segfaults under qemu on this Apple-silicon host.
+    platform: linux/arm64
+    command:
+      - --mongodb.uri=mongodb://notification-db:27017
+      - --collect-all
+      - --compatible-mode
+    depends_on:
+      - notification-db

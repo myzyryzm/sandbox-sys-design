@@ -90,6 +90,8 @@ const WS_HOP_DESC = {
     "Receiving server looks up the recipient in the presence cache to find which server that client is connected to — needed only when the recipient isn't already connected to the same server as the sender.",
   serverToBus:
     "Receiving server publishes the message to the redis pub/sub bus on the recipient's server channel — done only when the target client is connected to a different server than the one that received the message, so that server can deliver it to its locally-connected client.",
+  serverToSink: (node) =>
+    `When the recipient is offline — not connected to any relay server per the presence cache — the receiving server persists the undelivered message to ${node?.label || node?.id} (${node?.type || 'datastore'}) so it can be delivered or retrieved later.`,
 }
 
 // Drag-mode resize handles for the system boundary box: 4 corners + 4 edge midpoints,
@@ -703,6 +705,21 @@ export default function SystemDiagram({
         if (bus) {
           ids.add(bus.id)
           traceEdges.push([fleetId, bus.id, WS_HOP_DESC.serverToBus])
+        }
+        // Beyond the fixed bus/presence redis, a relay server may connect to other sinks
+        // (e.g. a notification-db it writes undelivered messages to) via plain manifest
+        // edges. Collapse those onto the fleet box too — one hop fleet → each distinct
+        // downstream — so the trace reflects the servers' real fan-out, not just the tier
+        // primitives. Driven by the manifest edges (server.id → sink), so nothing goes stale.
+        const serverIds = new Set(servers.map((s) => s.id))
+        const tierNodeIds = new Set(nodes.filter((n) => n.wsTier === tierId).map((n) => n.id))
+        const extraSinks = new Set()
+        for (const e of manifest.edges || []) {
+          if (serverIds.has(e.from) && !tierNodeIds.has(e.to) && byId[e.to]) extraSinks.add(e.to)
+        }
+        for (const sinkId of extraSinks) {
+          ids.add(sinkId)
+          traceEdges.push([fleetId, sinkId, WS_HOP_DESC.serverToSink(byId[sinkId])])
         }
       }
     }

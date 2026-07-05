@@ -1,21 +1,21 @@
 {
-  "ts": "2026-07-05T19:30:36.480Z",
+  "ts": "2026-07-05T23:33:15.989Z",
   "args": {
-    "count": 4,
-    "durationSeconds": 4,
+    "count": 5,
+    "durationSeconds": 10,
     "rate": 2
   },
   "results": {
-    "spawned": 4,
-    "connected": 4,
-    "sent": 28,
-    "delivered": 28,
+    "spawned": 5,
+    "connected": 5,
+    "sent": 95,
+    "delivered": 95,
     "duplicates": 0,
     "errors": 0,
     "latencyMs": {
-      "p50": 4,
+      "p50": 3,
       "p95": 5,
-      "max": 6
+      "max": 7
     }
   }
 }
