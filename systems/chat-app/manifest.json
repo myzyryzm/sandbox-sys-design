@@ -9,8 +9,8 @@
       "label": "nginx LB",
       "type": "load_balancer",
       "position": {
-        "x": 80,
-        "y": 160
+        "x": 1470,
+        "y": 1282
       },
       "metrics": []
     },
@@ -21,8 +21,8 @@
       "origin": "create-websockets",
       "wsRole": "lb",
       "position": {
-        "x": 80,
-        "y": 690
+        "x": 1333,
+        "y": 1546
       },
       "metrics": [
         {
@@ -63,8 +63,8 @@
       "wsRole": "server",
       "wsTier": "ws-lb",
       "position": {
-        "x": 389,
-        "y": 387
+        "x": 1836,
+        "y": 1415
       },
       "metrics": [
         {
@@ -115,8 +115,8 @@
       "wsRole": "server",
       "wsTier": "ws-lb",
       "position": {
-        "x": 389,
-        "y": 545
+        "x": 1836,
+        "y": 1573
       },
       "metrics": [
         {
@@ -167,8 +167,8 @@
       "wsRole": "bus",
       "wsTier": "ws-lb",
       "position": {
-        "x": 680,
-        "y": 600
+        "x": 2273,
+        "y": 1344
       },
       "metrics": [
         {
@@ -209,8 +209,8 @@
       "wsRole": "presence",
       "wsTier": "ws-lb",
       "position": {
-        "x": 680,
-        "y": 780
+        "x": 2260,
+        "y": 1703
       },
       "metrics": [
         {
@@ -252,8 +252,8 @@
       "wsTier": "ws-lb",
       "external": true,
       "position": {
-        "x": -280,
-        "y": 120
+        "x": 893,
+        "y": 1513
       },
       "metrics": []
     }
@@ -287,5 +287,11 @@
       "from": "ws-server-2",
       "to": "ws-presence"
     }
-  ]
+  ],
+  "boundary": {
+    "x": 1452,
+    "y": 1221,
+    "w": 1040,
+    "h": 814
+  }
 }
