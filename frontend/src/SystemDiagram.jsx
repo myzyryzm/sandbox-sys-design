@@ -35,6 +35,9 @@ const PAN_FACTOR = 3
 // a gap below the metrics, then the button itself.
 const EDIT_GAP = 8
 const EDIT_H = 24
+// Vertical gap between the stacked cards of a websocket server fleet (server → server →
+// shared-methods panel) — small, so the tier reads as one contiguous combined body.
+const STACK_GAP = 8
 // Gap between the metric rows and an optional custom service-type body (e.g. a bitmap grid).
 const CUSTOM_GAP = 8
 // Gap above the on-node API method rows (services / external services list their own
@@ -65,6 +68,29 @@ const WS_FLEET_PREFIX = 'ws-fleet:'
 const wsFleetId = (tier) => `${WS_FLEET_PREFIX}${tier}`
 const isFleetId = (id) => typeof id === 'string' && id.startsWith(WS_FLEET_PREFIX)
 const fleetTierOf = (id) => id.slice(WS_FLEET_PREFIX.length)
+
+// Auto-generated hop descriptions for a websocket pool client's builtin tier trace
+// (client → L4 lb → relay fleet → presence + bus). The path has no authored steps — it's
+// derived from the manifest's wsTier/wsRole fields — so, unlike an endpoint's
+// downstreamDescriptions, these are synthesized from the tier's fixed routing model and
+// shown in the same trace-hop info popup. The LB → server phrasing reflects the live lb
+// algorithm; the presence lookup is numbered before the bus publish because that's the
+// order the routing actually happens (find the target's server, then relay to it).
+const WS_ALGO_PHRASE = {
+  leastconn: 'least connections',
+  roundrobin: 'round-robin',
+  source: 'source-IP hashing',
+}
+const WS_HOP_DESC = {
+  clientToLb:
+    'User sends a chat message over its long-lived WebSocket connection to the L4 (TCP) load balancer. Because it balances at layer 4 — forwarding the raw TCP stream without terminating the WebSocket — the persistent connection stays pinned to one relay server for its whole lifetime, instead of being re-routed per message.',
+  lbToServer: (algo) =>
+    `Load balancer routes the message to a websocket server via ${WS_ALGO_PHRASE[algo] || 'least connections'}.`,
+  serverToPresence:
+    "Receiving server looks up the recipient in the presence cache to find which server that client is connected to — needed only when the recipient isn't already connected to the same server as the sender.",
+  serverToBus:
+    "Receiving server publishes the message to the redis pub/sub bus on the recipient's server channel — done only when the target client is connected to a different server than the one that received the message, so that server can deliver it to its locally-connected client.",
+}
 
 // Drag-mode resize handles for the system boundary box: 4 corners + 4 edge midpoints,
 // positioned by a fraction of the box's width/height, each with its resize cursor.
@@ -426,10 +452,41 @@ export default function SystemDiagram({
   // Layout helpers that fold in a node's live custom-type runtime (so a custom body band
   // reserves the right vertical space and edges hit the recomputed center).
   const heightOf = (n) => nodeHeight(n, lbRows, customState[n.id], rowsOf(n))
+
+  // Websocket relay servers render as ONE combined body: a rigid vertical stack (one shared
+  // column x, cascaded top-to-bottom by height + STACK_GAP) instead of each server floating at
+  // its own manifest y. `effPos` returns that stacked position for a ws-server and the normal
+  // (drag/manifest) position for everything else — every geometry consumer below reads it.
+  const wsServersByTier = new Map() // tier id -> its server nodes, in creation order (ws-server-1,-2,…)
+  for (const n of nodes) {
+    if (!isWsServer(n)) continue
+    if (!wsServersByTier.has(n.wsTier)) wsServersByTier.set(n.wsTier, [])
+    wsServersByTier.get(n.wsTier).push(n)
+  }
+  const stackPosByServerId = new Map()
+  for (const [, servers] of wsServersByTier) {
+    const anchorX = Math.min(...servers.map((s) => posOf(s).x))
+    let y = Math.min(...servers.map((s) => posOf(s).y))
+    for (const s of servers) {
+      stackPosByServerId.set(s.id, { x: anchorX, y })
+      y += heightOf(s) + STACK_GAP
+    }
+  }
+  const effPos = (n) => stackPosByServerId.get(n.id) || posOf(n)
+  // Drag payload for a whole tier: captures every server's CURRENT stacked position so a group
+  // drag shifts them all by the same delta (the stack then re-derives identically, shifted).
+  const fleetDragArg = (tier) => ({
+    kind: 'ws-fleet',
+    tier,
+    startPositions: Object.fromEntries(
+      (wsServersByTier.get(tier) || []).map((s) => [s.id, stackPosByServerId.get(s.id)]),
+    ),
+  })
+
   // Center using the EFFECTIVE position (so edges follow a node while it's being dragged).
   const centerOf = (id) => {
     const n = byId[id]
-    const p = posOf(n)
+    const p = effPos(n)
     return { x: p.x + NODE_W / 2, y: p.y + heightOf(n) / 2 }
   }
   // End a trace line at the target node's border (+ a small gap) instead of its center, so the
@@ -473,6 +530,9 @@ export default function SystemDiagram({
     const b = traceBorder(toId, ac)
     return { a, b, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } }
   }
+  // Friendly name for a trace endpoint in the hop popup title: the synthetic ws-fleet box
+  // reads as "server fleet", every real node uses its manifest label.
+  const hopEndpointLabel = (id) => (isFleetId(id) ? 'server fleet' : byId[id]?.label || id)
 
   // The rect analogue of borderPointToward: the point on an arbitrary rectangle's border
   // along the line from its center toward `towardPt`, plus a small gap so an arrowhead there
@@ -574,10 +634,10 @@ export default function SystemDiagram({
   const internalNodes = nodes.filter((n) => !n.external)
   let defaultBoundary = null
   if (internalNodes.length) {
-    const minX = Math.min(...internalNodes.map((n) => posOf(n).x))
-    const minY = Math.min(...internalNodes.map((n) => posOf(n).y))
-    const maxX = Math.max(...internalNodes.map((n) => posOf(n).x + NODE_W))
-    const maxY = Math.max(...internalNodes.map((n) => posOf(n).y + heightOf(n)))
+    const minX = Math.min(...internalNodes.map((n) => effPos(n).x))
+    const minY = Math.min(...internalNodes.map((n) => effPos(n).y))
+    const maxX = Math.max(...internalNodes.map((n) => effPos(n).x + NODE_W))
+    const maxY = Math.max(...internalNodes.map((n) => effPos(n).y + heightOf(n)))
     defaultBoundary = {
       x: minX - BOUNDARY_PAD,
       y: minY - BOUNDARY_PAD,
@@ -620,7 +680,9 @@ export default function SystemDiagram({
     const ids = new Set([ft.client])
     if (byId[tierId]) {
       ids.add(tierId)
-      traceEdges.push([ft.client, tierId])
+      // Each hop carries an auto-generated description (3rd tuple element) shown in the
+      // trace-hop info popup, mirroring an endpoint trace's downstreamDescriptions.
+      traceEdges.push([ft.client, tierId, WS_HOP_DESC.clientToLb])
       // The relay servers are an interchangeable fleet, so the trace collapses onto the fleet
       // box (see traceLine's ws-fleet handling): one hop lb → fleet, then one hop fleet → each
       // redis — instead of lb → every server and every server → every redis. Servers still join
@@ -629,11 +691,18 @@ export default function SystemDiagram({
       if (servers.length) {
         for (const srv of servers) ids.add(srv.id)
         const fleetId = wsFleetId(tierId)
-        traceEdges.push([tierId, fleetId])
-        for (const r of nodes) {
-          if (r.wsTier !== tierId || (r.wsRole !== 'bus' && r.wsRole !== 'presence')) continue
-          ids.add(r.id)
-          traceEdges.push([fleetId, r.id])
+        traceEdges.push([tierId, fleetId, WS_HOP_DESC.lbToServer(wsAlgorithm)])
+        // Presence (find the target's server) is numbered before the bus publish (relay to
+        // it) because that's the order routing happens — regardless of manifest node order.
+        const presence = nodes.find((n) => n.wsTier === tierId && n.wsRole === 'presence')
+        const bus = nodes.find((n) => n.wsTier === tierId && n.wsRole === 'bus')
+        if (presence) {
+          ids.add(presence.id)
+          traceEdges.push([fleetId, presence.id, WS_HOP_DESC.serverToPresence])
+        }
+        if (bus) {
+          ids.add(bus.id)
+          traceEdges.push([fleetId, bus.id, WS_HOP_DESC.serverToBus])
         }
       }
     }
@@ -744,6 +813,9 @@ export default function SystemDiagram({
   const fleetBoxByTier = new Map()
   const serverTier = new Map() // server node id -> its tier
   const FLEET_PAD = 20
+  // Extra headroom added ABOVE the padding on the fleet box so the group id label has its own
+  // title band and doesn't crowd the top server card.
+  const FLEET_TITLE_GAP = 22
   {
     const byTier = new Map()
     for (const n of nodes) {
@@ -754,22 +826,27 @@ export default function SystemDiagram({
     }
     for (const [tier, servers] of byTier) {
       const methodNames = wsMethods ? Object.keys(wsMethods) : ['onMessage', 'onSend']
-      const x = Math.min(...servers.map((s) => posOf(s).x))
-      const y = Math.max(...servers.map((s) => posOf(s).y + heightOf(s))) + 28
+      // Servers stack in a rigid column (effPos); the shared-methods panel is the bottom card
+      // of that stack, STACK_GAP below the lowest server.
+      const x = Math.min(...servers.map((s) => effPos(s).x))
+      const y = Math.max(...servers.map((s) => effPos(s).y + heightOf(s))) + STACK_GAP
       const h = PAD + 14 + methodNames.length * LINE_H + EDIT_GAP + EDIT_H + PAD
       const panel = { tier, x, y, w: NODE_W, h, methodNames }
       wsPanels.push(panel)
       // Box bounds = the union of every server rect and the panel rect, inflated by FLEET_PAD.
-      const minX = Math.min(...servers.map((s) => posOf(s).x), panel.x)
-      const minY = Math.min(...servers.map((s) => posOf(s).y), panel.y)
-      const maxX = Math.max(...servers.map((s) => posOf(s).x + NODE_W), panel.x + panel.w)
-      const maxY = Math.max(...servers.map((s) => posOf(s).y + heightOf(s)), panel.y + panel.h)
+      const minX = Math.min(...servers.map((s) => effPos(s).x), panel.x)
+      const minY = Math.min(...servers.map((s) => effPos(s).y), panel.y)
+      const maxX = Math.max(...servers.map((s) => effPos(s).x + NODE_W), panel.x + panel.w)
+      const maxY = Math.max(...servers.map((s) => effPos(s).y + heightOf(s)), panel.y + panel.h)
       const box = {
         tier,
+        // Group id label (upper-left): the server base name, e.g. ws-server-1 → "ws-server".
+        groupLabel: servers[0].id.replace(/-\d+$/, '') || tier,
         x: minX - FLEET_PAD,
-        y: minY - FLEET_PAD,
+        // Extend upward by an extra title band so the label clears the top server card.
+        y: minY - FLEET_PAD - FLEET_TITLE_GAP,
         w: maxX - minX + 2 * FLEET_PAD,
-        h: maxY - minY + 2 * FLEET_PAD,
+        h: maxY - minY + 2 * FLEET_PAD + FLEET_TITLE_GAP,
       }
       wsFleetBoxes.push(box)
       fleetBoxByTier.set(tier, box)
@@ -802,10 +879,10 @@ export default function SystemDiagram({
   // boundary ⊕ the ws shared-methods panels), plus a margin. Clients sit LEFT of the
   // system, so x can be negative — the viewBox origin moves with it instead of being
   // pinned at 0,0.
-  const xStarts = nodes.map((n) => posOf(n).x)
-  const xEnds = nodes.map((n) => posOf(n).x + NODE_W)
-  const yStarts = nodes.map((n) => posOf(n).y)
-  const yEnds = nodes.map((n) => posOf(n).y + heightOf(n))
+  const xStarts = nodes.map((n) => effPos(n).x)
+  const xEnds = nodes.map((n) => effPos(n).x + NODE_W)
+  const yStarts = nodes.map((n) => effPos(n).y)
+  const yEnds = nodes.map((n) => effPos(n).y + heightOf(n))
   if (boundary) {
     xStarts.push(boundary.x)
     xEnds.push(boundary.x + boundary.w)
@@ -924,6 +1001,16 @@ export default function SystemDiagram({
     const dy = sdy / zoom
     if (g.kind === 'node') {
       setDrag((d) => ({ ...d, [g.nodeId]: { x: Math.round(g.startPos.x + dx), y: Math.round(g.startPos.y + dy) } }))
+    } else if (g.kind === 'ws-fleet') {
+      // Shift every server of the tier by the SAME delta from its captured stacked start; the
+      // stack then re-derives identically, translated — so the combined body moves as one.
+      setDrag((d) => {
+        const next = { ...d }
+        for (const [id, p] of Object.entries(g.startPositions)) {
+          next[id] = { x: Math.round(p.x + dx), y: Math.round(p.y + dy) }
+        }
+        return next
+      })
     } else {
       setBoundaryOverride(rectFor(g, dx, dy))
     }
@@ -956,6 +1043,13 @@ export default function SystemDiagram({
     const dy = (e.clientY - g.startClientY) / zoom
     if (g.kind === 'node') {
       persistLayout({ positions: { [g.nodeId]: { x: Math.round(g.startPos.x + dx), y: Math.round(g.startPos.y + dy) } } })
+    } else if (g.kind === 'ws-fleet') {
+      // One POST carrying every server's new position; layout.js iterates the positions map.
+      const positions = {}
+      for (const [id, p] of Object.entries(g.startPositions)) {
+        positions[id] = { x: Math.round(p.x + dx), y: Math.round(p.y + dy) }
+      }
+      persistLayout({ positions })
     } else {
       persistLayout({ boundary: rectFor(g, dx, dy) })
     }
@@ -1177,18 +1271,37 @@ export default function SystemDiagram({
       ))}
 
       {/* Dotted "fleet" box around each websocket tier's servers + its shared-methods panel;
-          sits behind the nodes it groups. */}
+          sits behind the nodes it groups, with the group id (server base name) in its upper-left.
+          Non-interactive so it never intercepts a drag meant for the move-target/cards below. */}
       {wsFleetBoxes.map((b) => (
-        <rect
-          key={`ws-fleet-${b.tier}`}
-          x={b.x}
-          y={b.y}
-          width={b.w}
-          height={b.h}
-          rx="14"
-          className="ws-fleet-box"
-        />
+        <g key={`ws-fleet-${b.tier}`} style={{ pointerEvents: 'none' }}>
+          <rect x={b.x} y={b.y} width={b.w} height={b.h} rx="14" className="ws-fleet-box" />
+          <text x={b.x + 12} y={b.y + 16} className="ws-fleet-label">
+            {b.groupLabel}
+          </text>
+        </g>
       ))}
+
+      {/* Drag-mode move target per fleet box: a transparent, fully-hittable rect spanning the box
+          so dragging anywhere inside it (including the padding/gaps between cards) moves the whole
+          tier stack. Drawn BEHIND the servers/panel, so their own handlers still win on their areas
+          and this only catches the gaps. It spans just the box column, so it never steals events
+          from ws-lb / ws-bus / ws-presence (which sit outside it and render on top). */}
+      {dragMode &&
+        wsFleetBoxes.map((b) => (
+          <rect
+            key={`ws-fleet-target-${b.tier}`}
+            x={b.x}
+            y={b.y}
+            width={b.w}
+            height={b.h}
+            rx="14"
+            className="ws-fleet-move-target"
+            onPointerDown={(e) => beginDrag(e, fleetDragArg(b.tier))}
+          >
+            <title>Drag to move the whole websocket server fleet</title>
+          </rect>
+        ))}
 
       {/* Collapsed websocket-fleet edges: one arrow INTO the fleet box per distinct caller and
           one arrow OUT per distinct downstream (bus/presence), anchored on the box border rather
@@ -1340,16 +1453,26 @@ export default function SystemDiagram({
         const consumersPaused = pausedConsumers.has(node.id)
         // All per-node actions (schema/topics/endpoints/gRPC/shutdown/delete) now live
         // behind the bottom "Edit" button, so the node body itself is no longer clickable.
-        const p = posOf(node)
+        const p = effPos(node)
         const gClass = [dimmed(node.id) ? 'dim' : '', dragMode ? 'draggable' : ''].filter(Boolean).join(' ') || undefined
         return (
           <g
             key={node.id}
             transform={`translate(${p.x}, ${p.y})`}
             className={gClass}
-            onPointerDown={dragMode ? (e) => beginDrag(e, { kind: 'node', nodeId: node.id, startPos: p }) : undefined}
+            onPointerDown={
+              dragMode
+                ? (e) =>
+                    beginDrag(
+                      e,
+                      // A ws-server is part of a combined body: dragging it moves the whole
+                      // tier stack (servers + panel) together, not just this one card.
+                      isWsServer(node) ? fleetDragArg(node.wsTier) : { kind: 'node', nodeId: node.id, startPos: p },
+                    )
+                : undefined
+            }
           >
-            {/* Websocket servers get the client's dashed-gray outline (fleet look) —
+            {/* Websocket servers get a solid green outline (part of the combined fleet body) —
                 health stays readable on the header strip, and an outage still paints
                 the outline orange. */}
             <rect
@@ -1365,7 +1488,7 @@ export default function SystemDiagram({
                       ? 'node-box ws-server'
                       : 'node-box'
               }
-              style={{ stroke: isWsServer(node) && !inOutage ? COLOR_HEX.gray : color }}
+              style={{ stroke: isWsServer(node) && !inOutage ? COLOR_HEX.green : color }}
             />
             {/* Header strip colored by health. */}
             <rect width={NODE_W} height={HEADER_H} rx="8" fill={color} />
@@ -1640,6 +1763,9 @@ export default function SystemDiagram({
           key={`ws-panel-${pl.tier}`}
           transform={`translate(${pl.x}, ${pl.y})`}
           className={dimmed(pl.tier) ? 'dim' : undefined}
+          // The panel is the bottom card of the combined body: in drag mode it's a drag surface
+          // for the whole tier stack (the Edit button's onClick is disabled in drag mode below).
+          onPointerDown={dragMode ? (e) => beginDrag(e, fleetDragArg(pl.tier)) : undefined}
         >
           <rect width={pl.w} height={pl.h} rx="8" className="ws-shared-panel" />
           <text x={PAD} y={PAD + 8} className="ws-shared-title">
@@ -1770,7 +1896,7 @@ export default function SystemDiagram({
             <div className="trace-info-popup" onClick={(ev) => ev.stopPropagation()}>
               <div className="trace-info-head">
                 <span className="trace-info-title">
-                  Step {openInfo + 1} · {fromId} → {toId}
+                  Step {openInfo + 1} · {hopEndpointLabel(fromId)} → {hopEndpointLabel(toId)}
                 </span>
                 <button
                   type="button"

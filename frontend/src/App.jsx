@@ -629,6 +629,7 @@ export default function App() {
         clientFunctions={clientFunctions}
         wsStats={wsStats}
         wsMethods={wsInfo?.tier?.methods || null}
+        wsAlgorithm={wsInfo?.tier?.algorithm || 'leastconn'}
         onRequestWsMethods={setWsMethodsTier}
         functionTrace={functionTrace}
         onSelectFunction={(fn, clientId) => {

@@ -64,7 +64,7 @@
       "wsTier": "ws-lb",
       "position": {
         "x": 380,
-        "y": 600
+        "y": 589
       },
       "metrics": [
         {
