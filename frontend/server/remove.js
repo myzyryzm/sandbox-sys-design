@@ -449,6 +449,11 @@ export async function handleDelete(body) {
     scrubManifestNode(manifest, rid)
     fs.rmSync(path.join(systemDir(system), rid), { recursive: true, force: true })
   }
+  // A deleted websocket tier also owns the shared hooks dir its servers mount
+  // (ws-shared/ — fixed name, one tier per system, like ws-clients/).
+  if (kind === 'websocket' && node?.wsRole === 'lb') {
+    fs.rmSync(path.join(systemDir(system), 'ws-shared'), { recursive: true, force: true })
+  }
   // Drop consumer functions that referenced any removed node (as owner service or as cluster).
   pruneConsumers(system, removedIds)
   writeManifest(system, manifest)

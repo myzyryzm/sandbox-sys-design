@@ -44,6 +44,8 @@ services:
       PRESENCE_REDIS_URL: redis://ws-presence:6379
       HEARTBEAT_MS: 30000
       PRESENCE_TTL_S: 60
+    volumes:
+      - ./ws-shared:/app/shared:ro
     depends_on:
       - ws-bus
       - ws-presence
@@ -58,6 +60,8 @@ services:
       PRESENCE_REDIS_URL: redis://ws-presence:6379
       HEARTBEAT_MS: 30000
       PRESENCE_TTL_S: 60
+    volumes:
+      - ./ws-shared:/app/shared:ro
     depends_on:
       - ws-bus
       - ws-presence

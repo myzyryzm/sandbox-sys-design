@@ -54,6 +54,17 @@ const COLOR_HEX = {
 const TRACE_COLOR = '#6ea8fe'
 const GRPC_COLOR = '#b18cf2'
 const REPLICA_COLOR = '#3fb6a8'
+// Base dependency-edge color (matches `.edge` in styles.css) — reused for the arrowhead
+// on the collapsed websocket-fleet in/out edges.
+const EDGE_COLOR = '#5b6270'
+
+// A synthetic trace endpoint standing for a websocket tier's whole server fleet (its dotted
+// box), so a lifecycle trace collapses the relay fan-out into one hop into the box and one hop
+// out per downstream — matching the collapsed base edges. Not a real manifest node id.
+const WS_FLEET_PREFIX = 'ws-fleet:'
+const wsFleetId = (tier) => `${WS_FLEET_PREFIX}${tier}`
+const isFleetId = (id) => typeof id === 'string' && id.startsWith(WS_FLEET_PREFIX)
+const fleetTierOf = (id) => id.slice(WS_FLEET_PREFIX.length)
 
 // Drag-mode resize handles for the system boundary box: 4 corners + 4 edge midpoints,
 // positioned by a fraction of the box's width/height, each with its resize cursor.
@@ -120,10 +131,17 @@ function rowCount(node, lbRows) {
   return (node.metrics || []).length
 }
 
+// Websocket relay servers are an interchangeable fleet: their whole editing surface
+// (shared methods / per-server shutdown / tier delete) lives in the tier's
+// shared-methods panel drawn below them, so the nodes themselves carry no Edit button.
+function isWsServer(node) {
+  return node.origin === 'create-websockets' && node.wsRole === 'server'
+}
+
 // Controllable nodes carry a bottom "Edit" button (which opens the tabbed edit modal);
-// the LB and other infra do not.
+// the LB, other infra, and websocket servers (see isWsServer) do not.
 function hasEditButton(node) {
-  return isDeletable(node)
+  return isDeletable(node) && !isWsServer(node)
 }
 
 // y where the metric/endpoint rows end.
@@ -250,6 +268,16 @@ export default function SystemDiagram({
   // pool script writes to ws-clients/<id>.stats.json: { ts, args, results }). Rendered as
   // read-only metric-style rows under the client's ƒ rows.
   wsStats = {},
+  // The websocket tier's SHARED server methods block (registry `methods`: onMessage /
+  // onSend, each { base, entries, implemented, … }). Drawn in the per-tier panel below
+  // the server fleet; its Edit button calls onRequestWsMethods(lbId) to open the shared
+  // modal (methods / per-server shutdown / tier delete).
+  wsMethods = null,
+  onRequestWsMethods,
+  // The websocket tier's lb balancing algorithm (registry `algorithm`: leastconn |
+  // roundrobin | source). Only used to phrase the auto-generated LB → server hop
+  // description on the builtin tier trace. One tier per system today.
+  wsAlgorithm = 'leastconn',
   // A selected client function, traced client → LB → each called service → its downstreams,
   // with every called method highlighted on its service. Top precedence over methodTrace /
   // the LB endpoint selection. Set via onSelectFunction, cleared via onClearFunctionTrace.
@@ -426,12 +454,42 @@ export default function SystemDiagram({
   // source's BORDER (not its center) matters for short hops: with a center start the midpoint —
   // where the sequence badge + info button sit — lands inside the source box, and the nodes
   // (drawn after the edges) cover it. Border-to-border keeps the midpoint in the visible gap.
+  // A trace endpoint is a real node OR a synthetic ws-fleet:<tier> box (used to collapse the
+  // relay fan-out into one hop in / one hop out per downstream). Resolve either to its center
+  // and to the border point facing the other end. (rectCenter/rectBorderToward/fleetBoxByTier
+  // are declared below but only read at render time, so the forward reference is fine.)
+  const traceCenter = (id) =>
+    isFleetId(id) ? rectCenter(fleetBoxByTier.get(fleetTierOf(id))) : centerOf(id)
+  const traceBorder = (id, toward) =>
+    isFleetId(id)
+      ? rectBorderToward(fleetBoxByTier.get(fleetTierOf(id)), toward)
+      : byId[id]
+        ? borderPointToward(toward, byId[id])
+        : centerOf(id)
   const traceLine = (fromId, toId) => {
-    const ac = centerOf(fromId)
-    const bc = centerOf(toId)
-    const a = byId[fromId] ? borderPointToward(bc, byId[fromId]) : ac
-    const b = byId[toId] ? borderPointToward(ac, byId[toId]) : bc
+    const ac = traceCenter(fromId)
+    const bc = traceCenter(toId)
+    const a = traceBorder(fromId, bc)
+    const b = traceBorder(toId, ac)
     return { a, b, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } }
+  }
+
+  // The rect analogue of borderPointToward: the point on an arbitrary rectangle's border
+  // along the line from its center toward `towardPt`, plus a small gap so an arrowhead there
+  // lands just OUTSIDE the box. Used to anchor the collapsed websocket-fleet in/out edges to
+  // the fleet box border instead of to each individual server.
+  const rectCenter = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 })
+  const rectBorderToward = (rect, towardPt, gap = 6) => {
+    const c = rectCenter(rect)
+    const dx = towardPt.x - c.x
+    const dy = towardPt.y - c.y
+    if (!dx && !dy) return c
+    const k = Math.min(
+      Math.abs(dx) ? rect.w / 2 / Math.abs(dx) : Infinity,
+      Math.abs(dy) ? rect.h / 2 / Math.abs(dy) : Infinity,
+    )
+    const t = k + gap / Math.hypot(dx, dy)
+    return { x: c.x + dx * t, y: c.y + dy * t }
   }
 
   // gRPC edges are derived from each service's manifest `grpc.clients[].targets`
@@ -563,14 +621,19 @@ export default function SystemDiagram({
     if (byId[tierId]) {
       ids.add(tierId)
       traceEdges.push([ft.client, tierId])
-      for (const srv of nodes) {
-        if (srv.wsTier !== tierId || srv.wsRole !== 'server') continue
-        ids.add(srv.id)
-        traceEdges.push([tierId, srv.id])
+      // The relay servers are an interchangeable fleet, so the trace collapses onto the fleet
+      // box (see traceLine's ws-fleet handling): one hop lb → fleet, then one hop fleet → each
+      // redis — instead of lb → every server and every server → every redis. Servers still join
+      // `ids` so they stay highlighted (un-dimmed) inside the box.
+      const servers = nodes.filter((n) => n.wsTier === tierId && n.wsRole === 'server')
+      if (servers.length) {
+        for (const srv of servers) ids.add(srv.id)
+        const fleetId = wsFleetId(tierId)
+        traceEdges.push([tierId, fleetId])
         for (const r of nodes) {
           if (r.wsTier !== tierId || (r.wsRole !== 'bus' && r.wsRole !== 'presence')) continue
           ids.add(r.id)
-          traceEdges.push([srv.id, r.id])
+          traceEdges.push([fleetId, r.id])
         }
       }
     }
@@ -668,9 +731,77 @@ export default function SystemDiagram({
     }
   }
 
+  // One shared-methods panel per websocket tier, drawn below the tier's server fleet:
+  // the shared methods every relay runs (from ws-shared/hooks.js) plus the Edit button
+  // that opens the tier's shared modal. Derived from the servers' EFFECTIVE positions,
+  // so it follows them through drags.
+  const wsPanels = []
+  // Dotted "fleet" box per websocket tier, wrapping ALL of that tier's relay servers plus
+  // its shared-methods panel as one grouped unit (padded on every side). The relays are an
+  // interchangeable fleet: callers and the redis bus/presence connect to the box AS A UNIT
+  // (a single arrow in, a single arrow out — see fleetConnections) rather than to each server.
+  const wsFleetBoxes = []
+  const fleetBoxByTier = new Map()
+  const serverTier = new Map() // server node id -> its tier
+  const FLEET_PAD = 20
+  {
+    const byTier = new Map()
+    for (const n of nodes) {
+      if (!isWsServer(n)) continue
+      serverTier.set(n.id, n.wsTier)
+      if (!byTier.has(n.wsTier)) byTier.set(n.wsTier, [])
+      byTier.get(n.wsTier).push(n)
+    }
+    for (const [tier, servers] of byTier) {
+      const methodNames = wsMethods ? Object.keys(wsMethods) : ['onMessage', 'onSend']
+      const x = Math.min(...servers.map((s) => posOf(s).x))
+      const y = Math.max(...servers.map((s) => posOf(s).y + heightOf(s))) + 28
+      const h = PAD + 14 + methodNames.length * LINE_H + EDIT_GAP + EDIT_H + PAD
+      const panel = { tier, x, y, w: NODE_W, h, methodNames }
+      wsPanels.push(panel)
+      // Box bounds = the union of every server rect and the panel rect, inflated by FLEET_PAD.
+      const minX = Math.min(...servers.map((s) => posOf(s).x), panel.x)
+      const minY = Math.min(...servers.map((s) => posOf(s).y), panel.y)
+      const maxX = Math.max(...servers.map((s) => posOf(s).x + NODE_W), panel.x + panel.w)
+      const maxY = Math.max(...servers.map((s) => posOf(s).y + heightOf(s)), panel.y + panel.h)
+      const box = {
+        tier,
+        x: minX - FLEET_PAD,
+        y: minY - FLEET_PAD,
+        w: maxX - minX + 2 * FLEET_PAD,
+        h: maxY - minY + 2 * FLEET_PAD,
+      }
+      wsFleetBoxes.push(box)
+      fleetBoxByTier.set(tier, box)
+    }
+  }
+
+  // Split the persistent dependency edges into ones that touch a websocket-server fleet and
+  // ones that don't. A fleet-touching edge is COLLAPSED onto the fleet box: every server →
+  // <same target> becomes one box → target arrow, and <same source> → every server becomes
+  // one source → box arrow. Edges between two servers of a fleet are internal and dropped.
+  const normalConnections = []
+  const fleetConnMap = new Map()
+  for (const conn of connections) {
+    const fromTier = serverTier.get(conn.from)
+    const toTier = serverTier.get(conn.to)
+    if (fromTier && toTier) continue // intra-/cross-fleet: not drawn as a node-to-node line
+    if (toTier && fleetBoxByTier.has(toTier)) {
+      const k = `in|${toTier}|${conn.from}`
+      if (!fleetConnMap.has(k)) fleetConnMap.set(k, { dir: 'in', tier: toTier, ext: conn.from })
+    } else if (fromTier && fleetBoxByTier.has(fromTier)) {
+      const k = `out|${fromTier}|${conn.to}`
+      if (!fleetConnMap.has(k)) fleetConnMap.set(k, { dir: 'out', tier: fromTier, ext: conn.to })
+    } else {
+      normalConnections.push(conn)
+    }
+  }
+  const fleetConnections = [...fleetConnMap.values()]
+
   // Size the canvas to the true bounding box of everything (nodes ⊕ the system
-  // boundary), plus a margin. Clients sit LEFT of the system, so x can be negative —
-  // the viewBox origin moves with it instead of being pinned at 0,0.
+  // boundary ⊕ the ws shared-methods panels), plus a margin. Clients sit LEFT of the
+  // system, so x can be negative — the viewBox origin moves with it instead of being
+  // pinned at 0,0.
   const xStarts = nodes.map((n) => posOf(n).x)
   const xEnds = nodes.map((n) => posOf(n).x + NODE_W)
   const yStarts = nodes.map((n) => posOf(n).y)
@@ -680,6 +811,18 @@ export default function SystemDiagram({
     xEnds.push(boundary.x + boundary.w)
     yStarts.push(boundary.y)
     yEnds.push(boundary.y + boundary.h)
+  }
+  for (const pl of wsPanels) {
+    xStarts.push(pl.x)
+    xEnds.push(pl.x + pl.w)
+    yStarts.push(pl.y)
+    yEnds.push(pl.y + pl.h)
+  }
+  for (const b of wsFleetBoxes) {
+    xStarts.push(b.x)
+    xEnds.push(b.x + b.w)
+    yStarts.push(b.y)
+    yEnds.push(b.y + b.h)
   }
   let originX = Math.min(...xStarts) - MARGIN
   let originY = Math.min(...yStarts) - MARGIN
@@ -988,6 +1131,18 @@ export default function SystemDiagram({
         >
           <path d="M 0 0 L 10 5 L 0 10 z" fill={REPLICA_COLOR} />
         </marker>
+        {/* Arrowhead for the collapsed websocket-fleet in/out edges (same color as `.edge`). */}
+        <marker
+          id="edge-arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0 0 L 10 5 L 0 10 z" fill={EDGE_COLOR} />
+        </marker>
       </defs>
 
       {/* System boundary: everything inside is our system; external services sit
@@ -1021,11 +1176,50 @@ export default function SystemDiagram({
         />
       ))}
 
+      {/* Dotted "fleet" box around each websocket tier's servers + its shared-methods panel;
+          sits behind the nodes it groups. */}
+      {wsFleetBoxes.map((b) => (
+        <rect
+          key={`ws-fleet-${b.tier}`}
+          x={b.x}
+          y={b.y}
+          width={b.w}
+          height={b.h}
+          rx="14"
+          className="ws-fleet-box"
+        />
+      ))}
+
+      {/* Collapsed websocket-fleet edges: one arrow INTO the fleet box per distinct caller and
+          one arrow OUT per distinct downstream (bus/presence), anchored on the box border rather
+          than drawn to each server. Dim during a trace like the other edges. */}
+      {fleetConnections.map(({ dir, tier, ext }) => {
+        const box = fleetBoxByTier.get(tier)
+        const extNode = byId[ext]
+        if (!box || !extNode) return null
+        const boxPt = rectBorderToward(box, centerOf(ext))
+        const extPt = borderPointToward(rectCenter(box), extNode)
+        const [a, b] = dir === 'in' ? [extPt, boxPt] : [boxPt, extPt]
+        return (
+          <line
+            key={`fleet-${dir}-${tier}-${ext}`}
+            x1={a.x}
+            y1={a.y}
+            x2={b.x}
+            y2={b.y}
+            className={`edge${traceNodes ? ' dim' : ''}`}
+            markerEnd="url(#edge-arrow)"
+          >
+            <title>{dir === 'in' ? `${ext} → ${tier} servers` : `${tier} servers → ${ext}`}</title>
+          </line>
+        )
+      })}
+
       {/* Outbound dependency connections (deduped), behind the node boxes. Each is
           clickable to attach/edit a resilience policy; gRPC keeps its dashed style.
           A connection with a circuit breaker draws a mid-line breaker circle (+ live
           overlay). Dim while a lifecycle trace is active, matching the other edges. */}
-      {connections.map(({ from, to, kind, contract }) => {
+      {normalConnections.map(({ from, to, kind, contract }) => {
         const a = centerOf(from)
         const b = centerOf(to)
         const key = `${from}->${to}`
@@ -1155,6 +1349,9 @@ export default function SystemDiagram({
             className={gClass}
             onPointerDown={dragMode ? (e) => beginDrag(e, { kind: 'node', nodeId: node.id, startPos: p }) : undefined}
           >
+            {/* Websocket servers get the client's dashed-gray outline (fleet look) —
+                health stays readable on the header strip, and an outage still paints
+                the outline orange. */}
             <rect
               width={NODE_W}
               height={h}
@@ -1164,9 +1361,11 @@ export default function SystemDiagram({
                   ? 'node-box external client'
                   : node.external
                     ? 'node-box external'
-                    : 'node-box'
+                    : isWsServer(node)
+                      ? 'node-box ws-server'
+                      : 'node-box'
               }
-              style={{ stroke: color }}
+              style={{ stroke: isWsServer(node) && !inOutage ? COLOR_HEX.gray : color }}
             />
             {/* Header strip colored by health. */}
             <rect width={NODE_W} height={HEADER_H} rx="8" fill={color} />
@@ -1431,6 +1630,60 @@ export default function SystemDiagram({
           </g>
         )
       })}
+
+      {/* Shared-methods panel, one per websocket tier, below its server fleet: the shared
+          methods every relay runs (ws-shared/hooks.js) with a pending badge while an added
+          description entry awaits its authored hook, and the tier's single Edit button —
+          the per-server Edit buttons are gone (see hasEditButton). */}
+      {wsPanels.map((pl) => (
+        <g
+          key={`ws-panel-${pl.tier}`}
+          transform={`translate(${pl.x}, ${pl.y})`}
+          className={dimmed(pl.tier) ? 'dim' : undefined}
+        >
+          <rect width={pl.w} height={pl.h} rx="8" className="ws-shared-panel" />
+          <text x={PAD} y={PAD + 8} className="ws-shared-title">
+            shared methods
+          </text>
+          {pl.methodNames.map((name, i) => {
+            const y = PAD + 14 + i * LINE_H
+            const pending = wsMethods?.[name]?.implemented === false
+            return (
+              <g key={name}>
+                <text x={PAD} y={y + 12} className="endpoint-row">
+                  <tspan className="endpoint-method">ƒ</tspan> {name}
+                </text>
+                {pending && (
+                  <text x={pl.w - PAD} y={y + 12} className="ws-shared-pending">
+                    pending
+                  </text>
+                )}
+              </g>
+            )
+          })}
+          {onRequestWsMethods && (
+            <g
+              className="node-edit"
+              onClick={dragMode ? undefined : (e) => {
+                e.stopPropagation()
+                onRequestWsMethods(pl.tier)
+              }}
+            >
+              <rect
+                x={PAD}
+                y={pl.h - PAD - EDIT_H}
+                width={pl.w - 2 * PAD}
+                height={EDIT_H}
+                rx="6"
+                className="node-edit-btn"
+              />
+              <text x={pl.w / 2} y={pl.h - PAD - EDIT_H / 2} className="node-edit-label">
+                Edit
+              </text>
+            </g>
+          )}
+        </g>
+      ))}
 
       {/* Drag-mode handles for the system boundary box, drawn ON TOP of the nodes. The
           MOVE target is the box BORDER only (thick transparent stroke, fill:none) so the

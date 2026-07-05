@@ -23,6 +23,14 @@
 //        onReceive: names, args with defaults+bounds, summaries). The methods are not
 //        editable or deletable and only end-to-end processes invoke them — the UI
 //        renders them read-only.
+//   POST /api/websockets/methods  { system, method, text, conversationId? }
+//     -> appends a description ENTRY to one of the tier's two SHARED server methods
+//        (onMessage / onSend) in the registry and marks it implemented:false. Pure
+//        registry write (plus an idempotent ws-shared/ + compose-mount backfill for
+//        tiers that predate shared methods) — the actual hook code in
+//        ws-shared/hooks.js is authored by a launched Claude session
+//        (sandbox-websocket skill), which restarts the servers and flips
+//        implemented back to true (the consumers.json contract: Claude owns it).
 //   POST /api/websockets/run  { system, client, count?, durationSeconds?, rate? }
 //     -> spawns `node ws-clients/<client>.mjs --count N --duration S --rate R` on the
 //        host and parses its trailing `__WS_RESULTS__ <json>` line (the ws twin of
@@ -43,6 +51,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { parseDocument } from 'yaml'
 import { repoRoot, systemsDir, systemDir, isValidSystem, nextClientPosition } from './systems.js'
 import { HttpError, bad, NAME_RE, readJsonBody, cloneTemplate } from './scaffold.js'
 import { addComposeServices, addScrapeJob } from './databases.js'
@@ -51,6 +60,14 @@ const pexec = promisify(execFile)
 
 const TEMPLATE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'templates', 'websocket')
 const SERVER_FILES = ['Dockerfile', 'package.json', 'server.js']
+
+// The tier's ONE shared hooks file (fixed dir name like ws-clients/ — one tier per
+// system). Bind-mounted read-only into every server container, so authoring a hook
+// is a single file edit + `docker compose restart` of the servers — no image
+// rebuild. A DIRECTORY mount, not a file mount: editors that write via rename would
+// leave a file mount pinned to the stale inode.
+const SHARED_DIR = 'ws-shared'
+const SHARED_MOUNT = `./${SHARED_DIR}:/app/shared:ro`
 
 // One websocket tier per system today, so the ports are fixed. The registry records
 // them anyway so a multi-tier port allocator can come later without a shape change.
@@ -94,6 +111,29 @@ const CLIENT_METHODS = [
     args: [{ name: 'message', type: 'json' }],
   },
 ]
+
+// The two SHARED server methods every relay runs from ws-shared/hooks.js: onMessage
+// (a frame is received from a client) and onSend (a payload is delivered back to a
+// client). The BASE behavior lives in server.js and is fixed — description entries
+// only ADD side effects, and the hook code is authored by a launched Claude session
+// (sandbox-websocket skill). This plugin does the mechanical registry half; Claude
+// owns `implemented` (set true after it writes the hook + restarts the servers).
+const METHOD_NAMES = ['onMessage', 'onSend']
+const MAX_METHOD_TEXT = 4000
+const BASE_METHOD_TEXT = {
+  onMessage:
+    'Base (fixed): a client frame arrives; ws_messages_received_total is bumped, the frame is parsed and routed to msg.to — delivered directly when the target is connected to this server, otherwise looked up in the presence cache and published to the owning server\'s bus channel; unknown/offline targets are dropped.',
+  onSend:
+    'Base (fixed): a payload is delivered to a locally connected client over its websocket (locally-routed AND bus-arriving frames both funnel through here), bumping the delivered/latency metrics; a gone connection means the message is dropped.',
+}
+function defaultMethods(now = new Date().toISOString()) {
+  return Object.fromEntries(
+    METHOD_NAMES.map((m) => [
+      m,
+      { base: BASE_METHOD_TEXT[m], entries: [], implemented: true, conversationId: '', updatedAt: now },
+    ]),
+  )
+}
 
 // Health rule shared by every node: red when the target is down, green up.
 const HEALTH_RULES = [
@@ -157,6 +197,15 @@ export function readTierRegistry(system, lbId) {
 }
 function writeTierRegistry(system, reg) {
   fs.writeFileSync(registryPath(system, reg.lb), JSON.stringify(reg, null, 2) + '\n')
+}
+
+// The shared hooks file all servers mount — created with the tier, backfilled for
+// tiers that predate shared methods, never clobbered once it has authored code.
+function ensureSharedHooksFile(system) {
+  const dir = path.join(systemDir(system), SHARED_DIR)
+  fs.mkdirSync(dir, { recursive: true })
+  const dest = path.join(dir, 'hooks.js')
+  if (!fs.existsSync(dest)) fs.copyFileSync(path.join(TEMPLATE_DIR, 'shared', 'hooks.js'), dest)
 }
 
 // haproxy.cfg is rendered from the registry (never hand-edited server lines): an L4
@@ -315,6 +364,8 @@ function buildTier(ids, algorithm) {
         HEARTBEAT_MS: 30000,
         PRESENCE_TTL_S: 60,
       },
+      // every server mounts the tier's ONE shared hooks file (see SHARED_DIR)
+      volumes: [SHARED_MOUNT],
       depends_on: [ids.bus, ids.presence],
       // depends_on only waits for the redis CONTAINERS to start, not for redis to
       // accept connections — a relay that exhausts its connect retries exits, so
@@ -481,13 +532,16 @@ export async function handleCreate(body) {
     bus: ids.bus,
     presence: ids.presence,
     client: ids.client,
+    methods: defaultMethods(),
   }
   fs.mkdirSync(path.join(systemDir(system), ids.lb), { recursive: true })
   writeTierRegistry(system, reg)
   writeHaproxyCfg(system, reg)
 
   // 2. per-server folders from the template (identical files — per-instance
-  //    identity is env-only, like download-coordinator workers)
+  //    identity is env-only, like download-coordinator workers), plus the ONE
+  //    shared hooks file they all bind-mount
+  ensureSharedHooksFile(system)
   for (const sid of ids.servers) {
     cloneTemplate(system, sid, path.join(TEMPLATE_DIR, 'server'), SERVER_FILES)
   }
@@ -531,6 +585,9 @@ function getTier(system) {
   const lb = manifest.nodes.find((n) => n.origin === 'create-websockets' && n.wsRole === 'lb')
   if (!lb) return { ok: true, tier: null }
   const tier = readTierRegistry(system, lb.id)
+  // Tiers created before shared methods existed: default the block in the RESPONSE
+  // only (no write on GET) so the UI always sees both methods.
+  if (tier && !tier.methods) tier.methods = defaultMethods()
   const clientId =
     tier?.client ||
     manifest.nodes.find((n) => n.origin === 'create-websockets' && n.wsRole === 'client')?.id
@@ -540,6 +597,63 @@ function getTier(system) {
     stats: clientId ? readClientStats(system, clientId) : null,
     clientMethods: CLIENT_METHODS,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Shared methods: append a description entry (the mechanical half — the hook
+// code itself is authored by a launched Claude session, like consumers.js)
+// ---------------------------------------------------------------------------
+
+// A tier created before shared methods existed lacks ws-shared/ and the compose
+// mounts — backfill both, idempotently and comment-preserving. server.js itself is
+// NOT patched mechanically (it may be hand-customized); the launched session adds
+// the hook loader per the skill's pre-migration escape when needed.
+function ensureSharedScaffold(system, reg) {
+  ensureSharedHooksFile(system)
+  const file = path.join(systemDir(system), 'docker-compose.yml')
+  const doc = parseDocument(fs.readFileSync(file, 'utf8'))
+  let changed = false
+  for (const sid of reg.servers) {
+    if (!doc.hasIn(['services', sid])) continue
+    const volumes = doc.getIn(['services', sid, 'volumes'])
+    if (volumes?.items?.some((i) => String(i?.value ?? i) === SHARED_MOUNT)) continue
+    if (volumes) volumes.add(doc.createNode(SHARED_MOUNT))
+    else doc.setIn(['services', sid, 'volumes'], doc.createNode([SHARED_MOUNT]))
+    changed = true
+  }
+  if (changed) fs.writeFileSync(file, doc.toString())
+}
+
+function addMethodEntry(body) {
+  const { system, method, conversationId } = body
+  if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
+  // whitelist (also keeps arbitrary keys out of the registry object)
+  if (!METHOD_NAMES.includes(method)) {
+    throw bad(`method must be one of: ${METHOD_NAMES.join(', ')}`)
+  }
+  const text = typeof body.text === 'string' ? body.text.trim() : ''
+  if (!text) throw bad('text is required — describe the behavior to add')
+  if (text.length > MAX_METHOD_TEXT) {
+    throw bad(`text must be at most ${MAX_METHOD_TEXT} characters`)
+  }
+
+  const manifest = readManifest(system)
+  const lb = manifest.nodes.find((n) => n.origin === 'create-websockets' && n.wsRole === 'lb')
+  if (!lb) throw bad(`system "${system}" has no websocket tier`)
+  const reg = readTierRegistry(system, lb.id)
+  if (!reg) throw bad(`websocket tier registry for "${lb.id}" is missing`)
+
+  if (!reg.methods) reg.methods = defaultMethods() // lazy-migrate older registries
+  const m = reg.methods[method]
+  const now = new Date().toISOString()
+  m.entries = [...(m.entries || []), { at: now, text }]
+  m.implemented = false // Claude owns this; set true after it writes the hook + restarts
+  m.conversationId = conversationId || m.conversationId || ''
+  m.updatedAt = now
+
+  ensureSharedScaffold(system, reg)
+  writeTierRegistry(system, reg)
+  return { ok: true, lb: reg.lb, method, methods: reg.methods }
 }
 
 // ---------------------------------------------------------------------------
@@ -636,6 +750,9 @@ export default function websockets() {
       server.middlewares.use('/api/websockets', async (req, res, next) => {
         try {
           const url = new URL(req.url, 'http://localhost')
+          if (url.pathname === '/methods' && req.method === 'POST') {
+            return json(res, 200, addMethodEntry(await readJsonBody(req)))
+          }
           if (url.pathname === '/run' && req.method === 'POST') {
             return json(res, 200, await runPool(await readJsonBody(req)))
           }

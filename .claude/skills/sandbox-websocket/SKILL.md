@@ -5,11 +5,13 @@ description: >-
   haproxy L4 (tcp) load balancer in front of N node.js `ws` relay servers, with a redis
   pub/sub bus for cross-server message routing and a redis presence cache mapping connected
   clients to their server, plus a host-run websocket client pool script. Use whenever the
-  task is to customize a websocket server's behavior, change the lb algorithm or the server
-  set, understand or drive the client pool (spawn N clients, send/receive, delivery stats),
-  or wire the tier into end-to-end tests — it covers the tier's compose services, the
-  websockets.json registry + generated haproxy.cfg, the ws-native Prometheus metrics the
-  diagram depends on, the pool script's CLI + __WS_RESULTS__ contract, and the docker
+  task is to implement one of the tier's SHARED server methods (the onMessage / onSend hooks
+  in ws-shared/hooks.js, authored from description entries), customize a websocket server's
+  behavior, change the lb algorithm or the server set, understand or drive the client pool
+  (spawn N clients, send/receive, delivery stats), or wire the tier into end-to-end tests —
+  it covers the tier's compose services, the websockets.json registry + generated
+  haproxy.cfg, the shared-hooks contract, the ws-native Prometheus metrics the diagram
+  depends on, the pool script's CLI + __WS_RESULTS__ contract, and the docker
   rebuild/verify steps.
 ---
 
@@ -46,9 +48,14 @@ For a tier named `ws` (the name prefixes every id):
      on pong).
 2. **`systems/<id>/ws-lb/websockets.json`** — the tier **registry**, the durable source of
    truth for the lb: `{ lb, algorithm, hostPort, wsPort, statsPort, metricsPort, servers[],
-   bus, presence, client }`. `haproxy.cfg` is **rendered from it** — if you change the
-   algorithm or the server set, update the registry AND regenerate/edit the cfg to match,
-   then `restart` the lb.
+   bus, presence, client, methods }`. `haproxy.cfg` is **rendered from it** — if you change
+   the algorithm or the server set, update the registry AND regenerate/edit the cfg to
+   match, then `restart` the lb. `methods` holds the two shared server methods (see
+   "Shared methods" below).
+   **`systems/<id>/ws-shared/hooks.js`** — the tier's ONE shared hooks file, bind-mounted
+   read-only into every server at `/app/shared/hooks.js` (compose volume
+   `./ws-shared:/app/shared:ro`). Editing it needs only a `restart` of the servers — no
+   image rebuild.
 3. **Manifest nodes** (`origin: "create-websockets"`): the lb (`type: websocket-lb`,
    `wsRole: "lb"`), each server (`websocket-server`, `wsRole: "server"`), both redis
    (`wsRole: "bus"` / `"presence"`), and the client (`type: "client"`, `external: true`,
@@ -69,10 +76,64 @@ Every frame is `{ msgId, from, to, body, sentAt }`. A server routes on `to`: loc
 connected → deliver; otherwise look up `presence:<to>` and publish to `server:<theirServer>`
 on the bus; unknown/offline → **dropped** (barebones by design). Receivers dedupe by `msgId`.
 
+## Shared methods (onMessage / onSend hooks)
+
+Every server in the tier runs two SHARED methods from the one mounted
+`systems/<id>/ws-shared/hooks.js` (ESM, `export default { onMessage, onSend }`):
+
+- `onMessage(msg, ctx)` — fires after a client frame is received, parsed, and routed.
+- `onSend(clientId, payload, ctx)` — fires when a payload is delivered to a locally
+  connected client (locally-routed AND bus-arriving frames both funnel through here).
+
+The **base implementation is fixed** (the routing/delivery path in `server.js` — never
+modify it for a shared-method task). Hooks are **additive, fire-and-forget side effects**:
+server.js catches and logs their errors, and they must never block, veto, or reorder base
+routing/delivery, and never touch the six `ws_*` metric names (listed under "Customizing a
+server"). `ctx` is `{ serverId, clientId (onMessage only: the SENDER), localMap
+(clientId → ws, this server only), presence (ioredis, `presence:<clientId>` keys), pub
+(ioredis, publish-capable bus handle), deliverLocal(clientId, payload),
+route(targetClientId, payload) }`.
+
+The registry's `methods.onMessage` / `methods.onSend` each hold `{ base, entries[],
+implemented, conversationId, updatedAt }`. `base` is the immutable description of the
+built-in behavior; `entries[]` (`{ at, text }`) is the append-only list of added behaviors —
+your job is to make the hook body implement **all** entries, in order. The app writes the
+entry and sets `implemented: false` before launching you; **you own the flip back**: after
+editing hooks.js, restarting, and verifying, set `"implemented": true` on that method in
+`systems/<id>/<lb>/websockets.json`.
+
+Reload (no image rebuild — the hooks file is a mounted directory):
+
+```bash
+docker compose -f systems/<id>/docker-compose.yml restart ws-server-1 ws-server-2
+```
+
+Caveats:
+- **New npm dependency?** The image only ships `ws` + `ioredis` + `prom-client`. Prefer
+  dep-free code, node's built-in `fetch` (e.g. to call a service through the nginx lb at
+  `http://lb/<service>/...`), or the provided `presence`/`pub` redis handles. If a package
+  is truly needed, add it to **each** `systems/<id>/ws-server-*/package.json` and
+  `up -d --build` all servers.
+- **Tier predates shared methods?** If a server's `server.js` has no hooks loader (grep for
+  `fireHook`), copy the loader + the two `fireHook(...)` call sites from
+  `frontend/server/templates/websocket/server/server.js` into every clone, and use
+  `up -d --build` instead of `restart` so the just-added `./ws-shared:/app/shared:ro`
+  volume mounts (the app backfills the compose volumes + ws-shared/hooks.js when the first
+  entry is saved).
+- A broken hooks.js can't take a relay down (the import is guarded), but it silently
+  disables ALL hooks — check `docker compose … logs ws-server-1 | grep hooks:` after every
+  reload.
+
+Verify a shared-method change: run the pool (below) and confirm **delivered ≈ sent still
+holds** (a hook must not regress base delivery), confirm the new side effect happened (its
+target table/topic/log), and check the server logs are free of `hooks.` errors.
+
 ## Customizing a server
 
-Edit `systems/<id>/ws-server-<n>/server.js` (each server folder is a clone — apply the same
-edit to every instance unless divergence is the point), then rebuild **only that service**:
+For behavior that should stay **per-server** (deliberate divergence — e.g. one slow
+replica), edit that one `systems/<id>/ws-server-<n>/server.js` and rebuild **only that
+service** (for tier-wide behavior use the shared hooks above instead — one file, no
+rebuild):
 
 ```bash
 docker compose -f systems/<id>/docker-compose.yml up -d --build ws-server-1

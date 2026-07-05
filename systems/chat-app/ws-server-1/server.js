@@ -11,8 +11,10 @@
 // it's delivered directly; otherwise the presence cache says which server holds it
 // and the message hops the pub/sub bus on that server's dedicated channel
 // (`server:<id>`). Recipient unknown/offline -> dropped (barebones, by design).
+import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
+import { pathToFileURL } from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
 import Redis from 'ioredis'
 import promClient from 'prom-client'
@@ -84,6 +86,7 @@ function deliverLocal(clientId, payload) {
     if (payload && typeof payload.sentAt === 'number') {
       mLatency.observe(Math.max(0, (Date.now() - payload.sentAt) / 1000))
     }
+    fireHook('onSend', clientId, payload, hookCtx)
   } else {
     mDropped.inc()
   }
@@ -105,6 +108,31 @@ async function route(targetClientId, payload) {
     mDropped.inc() // recipient offline — barebones: drop
   }
 }
+
+// --- Shared additive hooks (mounted read-only at /app/shared/hooks.js) ---
+// Fire-and-forget side effects layered on the fixed base relay above: onMessage
+// (frame received from a client) and onSend (payload delivered to a client). A
+// missing or broken hooks file must never take the relay down — tolerate absence,
+// catch import errors, and log; the base path runs unconditionally either way.
+const HOOKS_PATH = process.env.HOOKS_PATH || '/app/shared/hooks.js'
+let hooks = null
+if (fs.existsSync(HOOKS_PATH)) {
+  try {
+    hooks = (await import(pathToFileURL(HOOKS_PATH).href)).default ?? null
+  } catch (err) {
+    console.error(`hooks: failed to load ${HOOKS_PATH}: ${err.message}`)
+  }
+}
+function fireHook(name, ...args) {
+  const fn = hooks?.[name]
+  if (typeof fn !== 'function') return
+  try {
+    Promise.resolve(fn(...args)).catch((err) => console.error(`hooks.${name}: ${err.message}`))
+  } catch (err) {
+    console.error(`hooks.${name}: ${err.message}`)
+  }
+}
+const hookCtx = { serverId: SERVER_ID, localMap, presence, pub, deliverLocal, route }
 
 // --- Connection lifecycle ---
 wss.on('connection', (ws, req) => {
@@ -128,6 +156,7 @@ wss.on('connection', (ws, req) => {
     try {
       const msg = JSON.parse(data)
       route(msg.to, msg)
+      fireHook('onMessage', msg, { ...hookCtx, clientId })
     } catch {
       /* ignore malformed frames */
     }
