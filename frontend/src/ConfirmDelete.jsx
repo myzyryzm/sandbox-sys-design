@@ -11,11 +11,15 @@ import { useEffect, useState } from 'react'
  * disable Delete (the backend enforces the same guard). The user must remove those
  * calls first. Read replicas / CDC workers cascade and don't count as dependents.
  *
+ * A websocket tier is one unit: a non-lb member (server, bus, presence, pool client)
+ * gets no Delete button at all — just a pointer at its L4 load balancer, whose own
+ * delete cascades the whole tier (the backend rejects member deletes the same way).
+ *
  * Renders standalone by default; pass `embedded` to drop the overlay/header and
  * return just the body, so it can live inside the NodeEditModal "Delete" tab.
  * `onBusyChange` lets that parent disable tab-switching during the delete.
  */
-export default function ConfirmDelete({ systemId, node, onClose, embedded = false, onBusyChange }) {
+export default function ConfirmDelete({ systemId, node, manifest, onClose, embedded = false, onBusyChange }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [dependents, setDependents] = useState([])
@@ -28,9 +32,17 @@ export default function ConfirmDelete({ systemId, node, onClose, embedded = fals
   // /api/delete (remove.js). Nothing depends on a client, so it skips the probe.
   const isClient = node.type === 'client'
 
+  // Websocket tier members (servers, bus, presence, the pool client) are never
+  // individually deletable — the whole tier goes away via its lb's cascade.
+  const isWsTierMember = node.origin === 'create-websockets' && node.wsRole !== 'lb'
+  const isWsLb = node.origin === 'create-websockets' && node.wsRole === 'lb'
+  const wsTierChildren = isWsLb
+    ? (manifest?.nodes || []).filter((n) => n.wsTier === node.id).map((n) => n.id)
+    : []
+
   // Probe dependents up front (read-only) so we can warn before the user clicks.
   useEffect(() => {
-    if (isClient) return
+    if (isClient || isWsTierMember) return
     let live = true
     setChecking(true)
     fetch(`/api/dependents?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(node.id)}`)
@@ -39,7 +51,7 @@ export default function ConfirmDelete({ systemId, node, onClose, embedded = fals
       .catch(() => { if (live) setDependents([]) })
       .finally(() => { if (live) setChecking(false) })
     return () => { live = false }
-  }, [systemId, node.id, isClient])
+  }, [systemId, node.id, isClient, isWsTierMember])
 
   const blocked = dependents.length > 0
 
@@ -74,7 +86,21 @@ export default function ConfirmDelete({ systemId, node, onClose, embedded = fals
   }
   const viaLabel = { http: 'HTTP', grpc: 'gRPC', kafka: 'Kafka', scenario: 'function', consumer: 'consumer' }
 
-  const body = (
+  // A websocket tier member offers no delete at all — just the pointer at its lb
+  // (the backend rejects the delete the same way, so this isn't merely cosmetic).
+  const body = isWsTierMember ? (
+    <>
+      <p className="sim-desc">
+        <strong>{node.label}</strong> is part of the <strong>{node.wsTier}</strong> websocket
+        tier and can't be deleted on its own. The whole websocket process — load balancer,
+        servers, bus, presence and client — is deleted in one shot from its L4 load
+        balancer: open <code>{node.wsTier}</code> → Delete.
+      </p>
+      <div className="modal-actions">
+        <button type="button" onClick={onClose}>Close</button>
+      </div>
+    </>
+  ) : (
     <>
       <p className="sim-desc">
         {isClient ? (
@@ -88,6 +114,15 @@ export default function ConfirmDelete({ systemId, node, onClose, embedded = fals
           route and Prometheus scrape, and its node on the diagram. This can't be undone.</>
         )}
       </p>
+
+      {isWsLb && wsTierChildren.length > 0 && (
+        <p className="sim-desc">
+          Deleting this load balancer removes the <strong>whole websocket tier</strong>:{' '}
+          {wsTierChildren.map((cid, i) => (
+            <span key={cid}>{i > 0 && ', '}<code>{cid}</code></span>
+          ))}.
+        </p>
+      )}
 
       {checking && <p className="sim-desc">Checking dependencies…</p>}
 

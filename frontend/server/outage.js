@@ -77,7 +77,10 @@ function isControllable(node) {
     node.type === 'service' ||
     node.type === 'external_service' ||
     node.origin === 'create-database' ||
-    node.origin === 'create-event-stream'
+    node.origin === 'create-event-stream' ||
+    // WebSocket-tier nodes are real containers too (kill a relay and watch the
+    // haproxy lb shift sessions) — except the client, which runs on the host.
+    (node.origin === 'create-websockets' && node.type !== 'client')
   )
 }
 

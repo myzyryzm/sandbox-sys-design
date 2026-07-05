@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Scrape each service container DIRECTLY (not through the nginx LB), so the
+  # metrics reflect the service itself. `service-1:8000` resolves on the compose
+  # network. The job name is the service id, which the manifest's health/metric
+  # queries key off of: up{job="service-1"}. "Add service" appends a job here.
+  [
+    # WebSocket tier "ws-lb" — added by Add WebSockets
+    {
+        job_name: ws-lb,
+        metrics_path: /metrics,
+        static_configs: [ { targets: [ ws-lb:8405 ] } ]
+      },
+    # WebSocket tier "ws-server-1" — added by Add WebSockets
+    {
+        job_name: ws-server-1,
+        static_configs: [ { targets: [ ws-server-1:9100 ] } ]
+      },
+    # WebSocket tier "ws-server-2" — added by Add WebSockets
+    {
+        job_name: ws-server-2,
+        static_configs: [ { targets: [ ws-server-2:9100 ] } ]
+      },
+    # WebSocket tier "ws-bus" — added by Add WebSockets
+    { job_name: ws-bus, static_configs: [ { targets: [ ws-bus-exporter:9121 ] } ] },
+    # WebSocket tier "ws-presence" — added by Add WebSockets
+    {
+        job_name: ws-presence,
+        static_configs: [ { targets: [ ws-presence-exporter:9121 ] } ]
+      }
+  ]

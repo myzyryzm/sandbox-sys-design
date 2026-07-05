@@ -8,6 +8,7 @@ import EventStreamModal from './EventStreamModal.jsx'
 import NodeOutageModal from './NodeOutageModal.jsx'
 import ConfirmDelete from './ConfirmDelete.jsx'
 import ClientScenarioTab from './ClientScenarioTab.jsx'
+import WsClientMethodsTab from './WsClientMethodsTab.jsx'
 import ConsumerTab from './ConsumerTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
 import { customTypeOf } from './customTypes/index.js'
@@ -54,8 +55,15 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     tabs.push({ id: 'endpoints', label: 'Endpoints' })
     tabs.push({ id: 'calls', label: 'Calls' })
   } else if (isClient) {
-    // A client serves nothing and has no container — just its own multi-step functions.
-    tabs.push({ id: 'functions', label: 'Functions', Component: ClientScenarioTab })
+    // A client serves nothing and has no container — just its own functions. A regular
+    // client's are authorable multi-step python functions; a websocket client's are the
+    // BUILT-IN methods of its generated host pool script (ws-clients/<id>.mjs), shown
+    // read-only (not editable/deletable, invoked only by end-to-end processes).
+    tabs.push({
+      id: 'functions',
+      label: 'Functions',
+      Component: node.origin === 'create-websockets' ? WsClientMethodsTab : ClientScenarioTab,
+    })
   } else if (isDatabase) {
     tabs.push({ id: 'schema', label: isSecondary ? 'Replica' : 'Schema' })
     // CDC + Seed (postgres/mongodb primaries only; replicas are read-only).
@@ -197,6 +205,7 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
             embedded
             systemId={systemId}
             node={node}
+            manifest={manifest}
             onClose={onClose}
             onBusyChange={setBusy}
           />

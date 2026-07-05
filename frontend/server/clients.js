@@ -64,11 +64,18 @@ function deleteClient(body) {
   const { system, id } = body
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
   const manifest = readManifest(system)
-  if (!findClient(manifest, id)) throw bad(`"${id}" is not a client in this system`)
+  const node = findClient(manifest, id)
+  if (!node) throw bad(`"${id}" is not a client in this system`)
+  // A websocket pool client is tier-owned: it only goes away with the whole tier
+  // (the remove.js cascade from the lb, which also cleans up its script + stats).
+  if (node.origin === 'create-websockets') {
+    throw bad(`"${id}" is part of the "${node.wsTier}" websocket tier — delete the whole websocket process from its load balancer "${node.wsTier}"`)
+  }
   manifest.nodes = manifest.nodes.filter((n) => n.id !== id)
   manifest.edges = (manifest.edges || []).filter((e) => e.from !== id && e.to !== id)
   writeManifest(system, manifest)
-  removeClientScript(system, id) // drop its script (the shared lbclient.py stays)
+  // Drop its python module (the shared lbclient.py stays).
+  removeClientScript(system, id)
   return { ok: true, removed: id }
 }
 

@@ -1,0 +1,84 @@
+# Self-contained compose file for the `chat-app` system.
+# Run from inside systems/chat-app/:  docker compose up --build
+#
+# Topology: nginx LB  ->  service-1 (generic FastAPI), with Prometheus scraping
+# the service directly. service-1 is a generic service (the same shape "Add
+# service" creates): it exposes /health and /metrics and is reached through the
+# LB at the /service-1/ prefix. More services slot in the same way — each gets
+# its own compose service, an nginx /<id>/ route, and a Prometheus scrape job.
+#
+# Restartable: `docker compose down` then `up` cleanly recreates everything.
+# Prometheus data is intentionally NOT persisted.
+
+services:
+  lb:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  ws-lb:
+    # WebSocket tier "ws-lb" — added by Add WebSockets
+    image: haproxy:3.0-alpine
+    ports:
+      - 8090:8080
+    volumes:
+      - ./ws-lb/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - ws-server-1
+      - ws-server-2
+  ws-server-1:
+    build: ./ws-server-1
+    environment:
+      SERVER_ID: ws-server-1
+      WS_PORT: 8080
+      METRICS_PORT: 9100
+      BUS_REDIS_URL: redis://ws-bus:6379
+      PRESENCE_REDIS_URL: redis://ws-presence:6379
+      HEARTBEAT_MS: 30000
+      PRESENCE_TTL_S: 60
+    volumes:
+      - ./ws-shared:/app/shared:ro
+    depends_on:
+      - ws-bus
+      - ws-presence
+    restart: unless-stopped
+  ws-server-2:
+    build: ./ws-server-2
+    environment:
+      SERVER_ID: ws-server-2
+      WS_PORT: 8080
+      METRICS_PORT: 9100
+      BUS_REDIS_URL: redis://ws-bus:6379
+      PRESENCE_REDIS_URL: redis://ws-presence:6379
+      HEARTBEAT_MS: 30000
+      PRESENCE_TTL_S: 60
+    volumes:
+      - ./ws-shared:/app/shared:ro
+    depends_on:
+      - ws-bus
+      - ws-presence
+    restart: unless-stopped
+  ws-bus:
+    image: redis:7-alpine
+  ws-bus-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: redis://ws-bus:6379
+    depends_on:
+      - ws-bus
+  ws-presence:
+    image: redis:7-alpine
+  ws-presence-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: redis://ws-presence:6379
+    depends_on:
+      - ws-presence

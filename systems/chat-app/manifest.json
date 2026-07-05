@@ -1,0 +1,297 @@
+{
+  "system_id": "chat-app",
+  "name": "Chat App",
+  "prometheus_base": "/api/prometheus",
+  "poll_interval_ms": 4000,
+  "nodes": [
+    {
+      "id": "lb",
+      "label": "nginx LB",
+      "type": "load_balancer",
+      "position": {
+        "x": 1470,
+        "y": 1282
+      },
+      "metrics": []
+    },
+    {
+      "id": "ws-lb",
+      "label": "ws-lb",
+      "type": "websocket-lb",
+      "origin": "create-websockets",
+      "wsRole": "lb",
+      "position": {
+        "x": 1333,
+        "y": 1546
+      },
+      "metrics": [
+        {
+          "label": "sessions",
+          "query": "sum(haproxy_backend_current_sessions{job=\"ws-lb\",proxy=\"ws_servers\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "conns/s",
+          "query": "sum(rate(haproxy_frontend_connections_total{job=\"ws-lb\",proxy=\"ws_in\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "servers up",
+          "query": "count(haproxy_server_status{job=\"ws-lb\",proxy=\"ws_servers\",state=\"UP\"} == 1) or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"ws-lb\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ws-server-1",
+      "label": "ws-server-1",
+      "type": "websocket-server",
+      "origin": "create-websockets",
+      "wsRole": "server",
+      "wsTier": "ws-lb",
+      "position": {
+        "x": 1836,
+        "y": 1415
+      },
+      "metrics": [
+        {
+          "label": "ws conns",
+          "query": "ws_connections{job=\"ws-server-1\"}",
+          "unit": ""
+        },
+        {
+          "label": "lb sessions",
+          "query": "haproxy_server_current_sessions{job=\"ws-lb\",proxy=\"ws_servers\",server=\"ws-server-1\"}",
+          "unit": ""
+        },
+        {
+          "label": "msgs in/s",
+          "query": "sum(rate(ws_messages_received_total{job=\"ws-server-1\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "local/s",
+          "query": "sum(rate(ws_messages_delivered_local_total{job=\"ws-server-1\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "remote/s",
+          "query": "sum(rate(ws_messages_routed_remote_total{job=\"ws-server-1\"}[1m])) or vector(0)",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "up{job=\"ws-server-1\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ws-server-2",
+      "label": "ws-server-2",
+      "type": "websocket-server",
+      "origin": "create-websockets",
+      "wsRole": "server",
+      "wsTier": "ws-lb",
+      "position": {
+        "x": 1836,
+        "y": 1573
+      },
+      "metrics": [
+        {
+          "label": "ws conns",
+          "query": "ws_connections{job=\"ws-server-2\"}",
+          "unit": ""
+        },
+        {
+          "label": "lb sessions",
+          "query": "haproxy_server_current_sessions{job=\"ws-lb\",proxy=\"ws_servers\",server=\"ws-server-2\"}",
+          "unit": ""
+        },
+        {
+          "label": "msgs in/s",
+          "query": "sum(rate(ws_messages_received_total{job=\"ws-server-2\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "local/s",
+          "query": "sum(rate(ws_messages_delivered_local_total{job=\"ws-server-2\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "remote/s",
+          "query": "sum(rate(ws_messages_routed_remote_total{job=\"ws-server-2\"}[1m])) or vector(0)",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "up{job=\"ws-server-2\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ws-bus",
+      "label": "ws-bus",
+      "type": "redis",
+      "origin": "create-websockets",
+      "wsRole": "bus",
+      "wsTier": "ws-lb",
+      "position": {
+        "x": 2273,
+        "y": 1344
+      },
+      "metrics": [
+        {
+          "label": "clients",
+          "query": "redis_connected_clients{job=\"ws-bus\"}",
+          "unit": ""
+        },
+        {
+          "label": "ops/s",
+          "query": "sum(rate(redis_commands_processed_total{job=\"ws-bus\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "keys",
+          "query": "sum(redis_db_keys{job=\"ws-bus\"})",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "redis_up{job=\"ws-bus\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ws-presence",
+      "label": "ws-presence",
+      "type": "redis",
+      "origin": "create-websockets",
+      "wsRole": "presence",
+      "wsTier": "ws-lb",
+      "position": {
+        "x": 2260,
+        "y": 1703
+      },
+      "metrics": [
+        {
+          "label": "clients",
+          "query": "redis_connected_clients{job=\"ws-presence\"}",
+          "unit": ""
+        },
+        {
+          "label": "ops/s",
+          "query": "sum(rate(redis_commands_processed_total{job=\"ws-presence\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "keys",
+          "query": "sum(redis_db_keys{job=\"ws-presence\"})",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "redis_up{job=\"ws-presence\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ws-client",
+      "label": "ws-client",
+      "type": "client",
+      "origin": "create-websockets",
+      "wsRole": "client",
+      "wsTier": "ws-lb",
+      "external": true,
+      "position": {
+        "x": 893,
+        "y": 1513
+      },
+      "metrics": []
+    }
+  ],
+  "edges": [
+    {
+      "from": "ws-client",
+      "to": "ws-lb"
+    },
+    {
+      "from": "ws-lb",
+      "to": "ws-server-1"
+    },
+    {
+      "from": "ws-lb",
+      "to": "ws-server-2"
+    },
+    {
+      "from": "ws-server-1",
+      "to": "ws-bus"
+    },
+    {
+      "from": "ws-server-2",
+      "to": "ws-bus"
+    },
+    {
+      "from": "ws-server-1",
+      "to": "ws-presence"
+    },
+    {
+      "from": "ws-server-2",
+      "to": "ws-presence"
+    }
+  ],
+  "boundary": {
+    "x": 1452,
+    "y": 1221,
+    "w": 1040,
+    "h": 814
+  }
+}

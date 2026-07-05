@@ -38,6 +38,7 @@ Read `systems/<id>/endtoend.json` and find the entry whose `id` matches your tas
 ```json
 { "id": "…", "name": "Checkout under load",
   "client_list": [ { "client": "mobile-app", "method": "checkout", "intervalSeconds": 5 } ],
+  "websocket_list": [ { "client": "ws-client", "clientCount": 50, "messagesPerSecond": 2 } ],
   "constraint_list": [ "every seller has an Account", "checkout is only called on an Order that exists" ],
   "failure_list": [ "two OrderPayments for the same order both have status=success (double charge)" ] }
 ```
@@ -46,6 +47,12 @@ Read `systems/<id>/endtoend.json` and find the entry whose `id` matches your tas
   in `systems/<id>/scenarios.json`, implemented as `def <method>(…)` in
   `systems/<id>/clients/<module>.py` (`<module>` = client id with hyphens → underscores). Call it
   every `intervalSeconds` seconds.
+- **`websocket_list`** (optional; absent on most processes) — websocket client **pools** to keep
+  connected for the whole run. Each row names a websocket client node (`origin:
+  "create-websockets"`) whose behavior is a host-run pool script
+  `systems/<id>/ws-clients/<client>.mjs` (node ≥ 22, zero deps); `clientCount` is **how many pool
+  clients to spawn** and `messagesPerSecond` how chatty each is. See the [[sandbox-websocket]]
+  skill for the tier's anatomy and the script's contract.
 - **`constraint_list`** — the **rules of the valid world** the system *assumes* but does not create
   itself. They are **rules YOU must uphold**, not things to passively watch. They tell you two
   things: (a) what **out-of-scope preconditions to seed** so the world is valid (e.g. "every seller
@@ -153,6 +160,28 @@ Why this shape (tradeoffs): a Bash+curl loop is fine only for the trivial single
 flexibly; importing the client modules in-process is wrong — they share `lbclient._calls` and an
 `atexit` emit, so multiple calls in one process tangle the output.
 
+**WebSocket pools (`websocket_list`)** ride alongside the loop, not inside it: spawn each row's
+pool ONCE at run start as a **background subprocess of the orchestrator** (still a child of the
+foreground Bash call — dies with the session) and collect it at the deadline:
+
+```python
+pools = [subprocess.Popen(["node", f"systems/{SYSTEM}/ws-clients/{row['client']}.mjs",
+                           "--count", str(row["clientCount"]), "--duration", str(DURATION),
+                           "--rate", str(row.get("messagesPerSecond", 1))],
+                          stdout=subprocess.PIPE, text=True)
+         for row in websocket_list]
+# … the client_list loop runs as above …
+for p, row in zip(pools, websocket_list):          # after the loop: the scripts self-terminate
+    out = p.communicate(timeout=60)[0]             # at --duration; parse the LAST sentinel line
+    ws_results = json.loads(next(l for l in reversed(out.splitlines())
+                                 if l.startswith("__WS_RESULTS__ ")).split(" ", 1)[1])
+```
+
+Each report is `{spawned, connected, sent, delivered, duplicates, errors, latencyMs:{p50,p95,max}}`.
+`delivered` < `sent` (beyond a small in-flight tail) or `duplicates` > 0 are exactly the kind of
+states `failure_list` entries probe for. For pools anywhere near the 200 cap, run
+`ulimit -n 4096` in the spawning shell first (each pool client is one host fd).
+
 ### 5. Probe for failure states (and confirm constraints held)
 
 **`failure_list` — the point of the run.** For each, decide the concrete bad state and look for it
@@ -190,6 +219,9 @@ or `run.id` changed), stop invoking and:
      "seeded":      [ { "store": "order-db", "entity": "orders", "count": 20, "ids": ["…"] } ],
      "clientCalls": [ { "client": "mobile-app", "method": "checkout", "calls": 12, "ok": 12,
                         "failed": 0, "argsUsed": ["…"], "samples": ["…"] } ],
+     "websocketPools": [ { "client": "ws-client", "count": 50, "connected": 50, "sent": 6000,
+                           "delivered": 5991, "duplicates": 0,
+                           "latencyMs": { "p50": 4, "p95": 12, "max": 40 } } ],
      "failures":    [ { "condition": "double charge", "occurred": false, "evidence": "…" } ],
      "constraints": [ { "constraint": "every seller has an Account", "upheld": true, "note": "seeded 5 accounts" } ],
      "skipped":     [ ] }
@@ -214,6 +246,9 @@ or `run.id` changed), stop invoking and:
 - The orchestrator ran ~`duration` seconds (or until an early Stop) and made **≥1 call per
   implemented method at roughly its `intervalSeconds`** — confirm via the `log` and/or moving
   Prometheus metrics.
+- Every `websocket_list` row's pool was spawned with its `clientCount`, its `__WS_RESULTS__`
+  report was parsed into the run report's `websocketPools`, and its delivered/duplicates numbers
+  were checked against the failure conditions.
 - Every `failure_list` entry was probed against the datastore / metrics / call log with concrete
   evidence, and every `constraint_list` entry has an upheld/flagged outcome.
 - A report file `systems/<id>/endtoend-runs/<name>_<timestamp>.json` was written with `processId`

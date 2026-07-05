@@ -1,17 +1,19 @@
 // Vite dev-server plugin: per-system "end-to-end processes" — named test processes the user
-// defines and then RUNS. A process names a set of client methods to call on a schedule, a list of
+// defines and then RUNS. A process names a set of client methods to call on a schedule, optional
+// websocket client pools to keep connected (with a configurable client count), a list of
 // freeform "failure" conditions (a bug occurred if any happens) and "constraint" invariants (must
 // never be violated). Defining a process is pure data entry; RUNNING it hands off to a launched
 // Claude session (the sandbox-end-to-end-process skill), which does all the real work — calling
-// the methods at their rates for a duration, synthesizing arguments, evaluating the conditions, and
-// writing a run report.
+// the methods at their rates for a duration, spawning the ws pools, synthesizing arguments,
+// evaluating the conditions, and writing a run report.
 //
 //   GET    /api/endtoend?system=<id>
-//     -> { ok, processes: [{ id, name, client_list, failure_list, constraint_list, createdAt,
-//                            updatedAt, lastRun? }], run }
+//     -> { ok, processes: [{ id, name, client_list, websocket_list, failure_list, constraint_list,
+//                            createdAt, updatedAt, lastRun? }], run }
 //        `run` is { running:false } or { running:true, id, name, startedAt, durationSeconds,
 //        remaining_seconds }. `lastRun` is the newest persisted run report for that process.
-//   POST   /api/endtoend  { system, id?, name, client_list, failure_list, constraint_list }
+//   POST   /api/endtoend  { system, id?, name, client_list, websocket_list?, failure_list,
+//                           constraint_list }
 //     -> upsert a process definition. No/unknown id creates (uuid + createdAt); a known id updates
 //        in place (createdAt preserved, updatedAt bumped). 409 if the id is currently running.
 //   DELETE /api/endtoend  { system, id }   -> remove a process (409 if it's running).
@@ -41,6 +43,10 @@ const MAX_NAME = 120
 const MAX_ROWS = 20
 const MAX_COND = 500
 const MAX_INTERVAL = 60
+// websocket_list bounds — mirror websockets.js' pool-run route (each pool client
+// is one host fd; the macOS default soft ulimit is often 256).
+const MAX_WS_CLIENTS = 200
+const MAX_WS_RATE = 20
 const MAX_DURATION = 600
 
 // system id -> { id, name, startedAt, durationSeconds, timer }. A pure coordination flag: only one
@@ -152,11 +158,14 @@ function validateProcessInput(system, body) {
   if (!name) throw bad('process name is required')
   if (name.length > MAX_NAME) throw bad(`process name is too long (max ${MAX_NAME})`)
 
-  const rawClients = body.client_list
-  if (!Array.isArray(rawClients) || rawClients.length === 0) {
-    throw bad('client_list must have at least one client method')
+  const rawClients = Array.isArray(body.client_list) ? body.client_list : []
+  const rawWs = body.websocket_list == null ? [] : body.websocket_list
+  if (!Array.isArray(rawWs)) throw bad('websocket_list must be an array')
+  if (rawClients.length === 0 && rawWs.length === 0) {
+    throw bad('the process needs at least one client method or websocket client pool')
   }
   if (rawClients.length > MAX_ROWS) throw bad(`client_list can have at most ${MAX_ROWS} rows`)
+  if (rawWs.length > MAX_ROWS) throw bad(`websocket_list can have at most ${MAX_ROWS} rows`)
 
   // The set of (client, method) pairs that actually exist, and the set of client nodes.
   const functions = readScenarioFunctions(system)
@@ -179,6 +188,26 @@ function validateProcessInput(system, body) {
     return { client, method, intervalSeconds }
   })
 
+  // WebSocket client pools: how many pool clients to spawn (the run session drives
+  // `node ws-clients/<client>.mjs --count <clientCount>` for the run's duration).
+  // Bounds mirror the /api/websockets/run route: each pool client is one host fd.
+  const websocket_list = rawWs.map((r) => {
+    const client = typeof r?.client === 'string' ? r.client : ''
+    const node = manifest.nodes.find(
+      (n) => n.id === client && n.type === 'client' && n.origin === 'create-websockets',
+    )
+    if (!node) throw bad(`"${client}" is not a websocket client in this system`)
+    const clientCount = Number(r?.clientCount)
+    if (!Number.isInteger(clientCount) || clientCount < 1 || clientCount > MAX_WS_CLIENTS) {
+      throw bad(`clientCount for "${client}" must be a whole number between 1 and ${MAX_WS_CLIENTS}`)
+    }
+    const messagesPerSecond = r?.messagesPerSecond == null ? 1 : Number(r.messagesPerSecond)
+    if (!Number.isInteger(messagesPerSecond) || messagesPerSecond < 1 || messagesPerSecond > MAX_WS_RATE) {
+      throw bad(`messagesPerSecond for "${client}" must be a whole number between 1 and ${MAX_WS_RATE}`)
+    }
+    return { client, clientCount, messagesPerSecond }
+  })
+
   const cleanConditions = (raw, label) => {
     if (raw == null) return []
     if (!Array.isArray(raw)) throw bad(`${label} must be an array`)
@@ -192,7 +221,7 @@ function validateProcessInput(system, body) {
   const failure_list = cleanConditions(body.failure_list, 'failure_list')
   const constraint_list = cleanConditions(body.constraint_list, 'constraint_list')
 
-  return { name, client_list, failure_list, constraint_list }
+  return { name, client_list, websocket_list, failure_list, constraint_list }
 }
 
 // --- operations -----------------------------------------------------------------

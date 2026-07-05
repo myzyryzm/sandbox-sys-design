@@ -7,10 +7,12 @@ import CreateService from './CreateService.jsx'
 import CreateExternalService from './CreateExternalService.jsx'
 import CreateClient from './CreateClient.jsx'
 import CreateEventStream from './CreateEventStream.jsx'
+import CreateWebsockets from './CreateWebsockets.jsx'
 import GrpcContractsModal from './GrpcContractsModal.jsx'
 import ModelsModal from './ModelsModal.jsx'
 import ConnectionResilienceModal from './ConnectionResilienceModal.jsx'
 import NodeEditModal from './NodeEditModal.jsx'
+import WsSharedMethodsModal from './WsSharedMethodsModal.jsx'
 import { CUSTOM_RUNTIMES } from './customTypes/index.js'
 import TestPanel from './TestPanel.jsx'
 import EndToEndModal from './EndToEndModal.jsx'
@@ -103,6 +105,7 @@ export default function App() {
   const [showCreateExternal, setShowCreateExternal] = useState(false)
   const [showCreateClient, setShowCreateClient] = useState(false)
   const [showCreateEventStream, setShowCreateEventStream] = useState(false)
+  const [showCreateWebsockets, setShowCreateWebsockets] = useState(false)
   const [showGrpcContracts, setShowGrpcContracts] = useState(false)
   const [showModels, setShowModels] = useState(false)
   const [connectionTarget, setConnectionTarget] = useState(null)
@@ -132,6 +135,14 @@ export default function App() {
   // The per-system consumer-function registry (systems/<id>/consumers.json), polled below.
   // Grouped per service into clickable CONS rows on each service node.
   const [consumers, setConsumers] = useState([])
+  // The websocket tier info (GET /api/websockets: registry + the pool client's builtin
+  // method descriptors + its last run's delivery stats), polled below only while the
+  // manifest actually contains a tier. Drives the ws client node's ƒ rows + stat rows.
+  const [wsInfo, setWsInfo] = useState(null)
+  // The websocket tier (lb id) whose SHARED editing modal is open — the shared methods
+  // (onMessage/onSend) + per-server shutdown + tier delete. Opened from the Edit button
+  // on the shared-methods panel the diagram draws below the server fleet.
+  const [wsMethodsTier, setWsMethodsTier] = useState(null)
   // A consumer function selected on the diagram, traced cluster → consuming service. Mutually
   // exclusive with the method/function/LB selections. Cleared on canvas click.
   const [consumerTrace, setConsumerTrace] = useState(null)
@@ -239,6 +250,33 @@ export default function App() {
       clearInterval(id)
     }
   }, [])
+
+  // Poll the websocket tier (registry + builtin client methods + last pool-run stats).
+  // Gated on the manifest containing a tier, so tier-less systems never hit the route;
+  // the gate flipping (tier created / deleted) starts and stops the poll automatically.
+  const hasWsTier = !!manifest?.nodes?.some((n) => n.origin === 'create-websockets')
+  useEffect(() => {
+    if (!hasWsTier) {
+      setWsInfo(null)
+      return
+    }
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/websockets?system=${SYSTEM_ID}`)
+        const data = await res.json()
+        if (!cancelled && data.ok) setWsInfo(data)
+      } catch {
+        /* keep the last good response */
+      }
+    }
+    tick()
+    const id = setInterval(tick, 4000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [hasWsTier])
 
   // Poll the per-service consumer-function registry so each service's CONS rows (and their
   // cluster→service traces) update as consumer functions are authored/edited/deleted.
@@ -475,11 +513,29 @@ export default function App() {
 
   // Group the live functions registry by owner client into the function objects (with steps)
   // the diagram renders as rows + traces. Only clients own functions (external services don't).
+  // A websocket client's rows are its pool script's BUILTIN methods (from /api/websockets),
+  // synthesized here — NOT injected into `scenarios`, so the end-to-end modal's client_list
+  // method dropdown (built from `scenarios`) stays real-functions-only.
   const clientFunctions = {}
   for (const n of manifest.nodes || []) {
     if (n.type !== 'client') continue
+    if (n.origin === 'create-websockets') {
+      clientFunctions[n.id] = (wsInfo?.clientMethods || []).map((m) => ({
+        client: n.id,
+        name: m.name,
+        args: m.args || [],
+        wsBuiltin: true,
+      }))
+      continue
+    }
     clientFunctions[n.id] = scenarios.filter((f) => f.client === n.id)
   }
+
+  // The ws pool client's last-run delivery stats, keyed by its node id for the diagram.
+  const wsClientNode = (manifest.nodes || []).find(
+    (n) => n.origin === 'create-websockets' && n.wsRole === 'client',
+  )
+  const wsStats = wsClientNode && wsInfo?.stats ? { [wsClientNode.id]: wsInfo.stats } : {}
 
   // Group the live consumer-function registry by owner service into the CONS rows the diagram
   // renders on each service node. Only internal services own consumer functions.
@@ -525,6 +581,9 @@ export default function App() {
         <button className="header-btn no-auto" onClick={() => setShowCreateEventStream(true)}>
           ＋ Add event stream
         </button>
+        <button className="header-btn no-auto" onClick={() => setShowCreateWebsockets(true)}>
+          ＋ Add WebSockets
+        </button>
         <button className="header-btn no-auto" onClick={() => setShowGrpcContracts(true)}>
           ＋ gRPC contract
         </button>
@@ -568,8 +627,19 @@ export default function App() {
         onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setMethodTrace(ep) }}
         onClearMethodTrace={() => setMethodTrace(null)}
         clientFunctions={clientFunctions}
+        wsStats={wsStats}
+        wsMethods={wsInfo?.tier?.methods || null}
+        wsAlgorithm={wsInfo?.tier?.algorithm || 'leastconn'}
+        onRequestWsMethods={setWsMethodsTier}
         functionTrace={functionTrace}
-        onSelectFunction={(fn, clientId) => { setMethodTrace(null); setConsumerTrace(null); setFunctionTrace(deriveFunctionTrace(fn, endpoints, clientId)) }}
+        onSelectFunction={(fn, clientId) => {
+          setMethodTrace(null)
+          setConsumerTrace(null)
+          // A ws builtin has no authored steps — the diagram traces the tier path itself.
+          setFunctionTrace(fn.wsBuiltin
+            ? { client: clientId, name: fn.name, wsBuiltin: true, methods: [] }
+            : deriveFunctionTrace(fn, endpoints, clientId))
+        }}
         onClearFunctionTrace={() => setFunctionTrace(null)}
         consumerFunctions={consumerFunctions}
         consumerTrace={consumerTrace}
@@ -605,6 +675,9 @@ export default function App() {
       )}
       {showCreateEventStream && (
         <CreateEventStream systemId={SYSTEM_ID} onClose={() => setShowCreateEventStream(false)} />
+      )}
+      {showCreateWebsockets && (
+        <CreateWebsockets systemId={SYSTEM_ID} onClose={() => setShowCreateWebsockets(false)} />
       )}
       {showTest && (
         <TestPanel systemId={SYSTEM_ID} onClose={() => setShowTest(false)} />
@@ -645,6 +718,16 @@ export default function App() {
             )?.resilience || null
           }
           onClose={() => setConnectionTarget(null)}
+          onLaunch={enqueueSession}
+        />
+      )}
+      {wsMethodsTier && wsInfo?.tier && (
+        <WsSharedMethodsModal
+          systemId={SYSTEM_ID}
+          tier={wsInfo.tier}
+          manifest={manifest}
+          outages={outages}
+          onClose={() => setWsMethodsTier(null)}
           onLaunch={enqueueSession}
         />
       )}

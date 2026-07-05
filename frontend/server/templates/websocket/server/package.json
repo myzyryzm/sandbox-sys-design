@@ -1,0 +1,10 @@
+{
+  "name": "sandbox-ws-server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "ioredis": "^5.4.1",
+    "prom-client": "^15.1.3"
+  }
+}

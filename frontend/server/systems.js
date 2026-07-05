@@ -29,15 +29,20 @@ export function isValidSystem(id) {
 }
 
 // Where to drop the next frontend-generated node (a database or a service).
-// Every generated node carries an `origin`, so they share one grid laid out in
-// rows of three below the hand-authored nodes — no overlap between features.
-// External services are excluded here: they live OUTSIDE the system boundary and
-// get their own column via nextExternalPosition.
+// New nodes land in the MIDDLE of the current space — the center of the bounding
+// box of every in-system node — instead of the top-left corner, and fan out in
+// rows of three so successive adds don't stack on the exact same spot. External
+// services are excluded here: they live OUTSIDE the system boundary and get their
+// own column via nextExternalPosition.
 export function nextNodePosition(manifest) {
   const nodes = (manifest.nodes || []).filter((n) => !n.external)
   const i = nodes.filter((n) => n.origin).length
-  const baseY = Math.max(0, ...nodes.filter((n) => !n.origin).map((n) => n.position?.y || 0))
-  return { x: 80 + (i % 3) * 300, y: baseY + 220 + Math.floor(i / 3) * 180 }
+  const positioned = nodes.filter((n) => n.position)
+  const xs = positioned.map((n) => n.position.x)
+  const ys = positioned.map((n) => n.position.y)
+  const cx = positioned.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 80
+  const cy = positioned.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : 160
+  return { x: Math.round(cx + (i % 3) * 300), y: Math.round(cy + Math.floor(i / 3) * 180) }
 }
 
 // Where to drop the next external service. External services are drawn OUTSIDE the

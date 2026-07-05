@@ -488,6 +488,69 @@ h1 {
   fill: #1b2230;
 }
 
+/* Websocket relay servers: interchangeable workers behind the tier's L4 lb, rendered as
+   stacked cards of one combined fleet body — SOLID green outline (2px stroke, green inline
+   color) so each card reads as part of that body. The dotted wrapper is .ws-fleet-box.
+   Body fill stays the internal one; health lives on the header strip. */
+.node-box.ws-server {
+  stroke: #2e7d32;
+}
+
+/* Dotted box wrapping a websocket tier's whole server fleet + its shared-methods panel,
+   so the interchangeable relays (and the methods they all run) read as one grouped unit.
+   Drawn behind those nodes; a single arrow enters and single arrows leave it. */
+.ws-fleet-box {
+  fill: rgba(158, 158, 158, 0.05);
+  stroke: #9e9e9e;
+  stroke-width: 1.5;
+  stroke-dasharray: 2 6;
+  stroke-linecap: round;
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+/* The per-tier "shared methods" panel: the bottom card of the combined fleet body — same
+   SOLID gray outline as the server cards above it so the stack reads as one unit. */
+.ws-shared-panel {
+  fill: #1e222c;
+  stroke: #9e9e9e;
+  stroke-width: 2;
+}
+
+/* Group id (server base name, e.g. "ws-server") in the upper-left of the dotted fleet box. */
+.ws-fleet-label {
+  fill: #9e9e9e;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  dominant-baseline: middle;
+}
+
+/* Drag-mode move target spanning a fleet box: transparent but fully hittable, so a drag
+   anywhere inside the combined body (cards, panel, or the gaps between them) moves the whole
+   tier stack. Unlike .boundary-move-target this catches the interior too (pointer-events: all). */
+.ws-fleet-move-target {
+  fill: transparent;
+  pointer-events: all;
+  cursor: move;
+}
+.ws-shared-title {
+  fill: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+/* Amber "pending" marker on a method row whose latest description entry hasn't been
+   authored into ws-shared/hooks.js yet (registry implemented:false). */
+.ws-shared-pending {
+  fill: #d8a657;
+  font-size: 10px;
+  text-anchor: end;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 /* Client "Functions" tab: the ordered step list, the editor rows, and run results. */
 .scenario-steps {
   list-style: none;
