@@ -24,10 +24,6 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-
-  service-1:
-    # Service "service-1" — generic FastAPI backend (the same shape "Add service" creates)
-    build: ./service-1
   ws-lb:
     # WebSocket tier "ws-lb" — added by Add WebSockets
     image: haproxy:3.0-alpine

@@ -13,7 +13,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { parseDocument } from 'yaml'
 import { repoRoot, systemsDir, systemDir, isValidSystem } from './systems.js'
-import { removeServerFromTier, removeWsClientScript } from './websockets.js'
+import { removeWsClientScript } from './websockets.js'
 
 const pexec = promisify(execFile)
 
@@ -66,13 +66,12 @@ function validate(body) {
         : node.origin === 'create-event-stream'
           ? 'event-stream'
           : 'service'
-  // A websocket tier must keep at least one relay behind its lb (an empty haproxy
-  // backend serves nothing) — the whole tier goes away via its load balancer.
-  if (kind === 'websocket' && node.wsRole === 'server') {
-    const siblings = manifest.nodes.filter((n) => n.wsTier === node.wsTier && n.wsRole === 'server')
-    if (siblings.length <= 1) {
-      throw bad(`"${id}" is the tier's last websocket server — delete the whole tier via its load balancer "${node.wsTier}"`)
-    }
+  // A websocket tier is one unit: servers, bus, presence and the client pool all
+  // cascade from the lb (see cascadeChildIds). Only the lb is individually
+  // deletable — nothing else can validate, so the cascade loop below never has
+  // to re-check its children.
+  if (kind === 'websocket' && node.wsRole !== 'lb') {
+    throw bad(`"${id}" is part of the "${node.wsTier}" websocket tier — delete the whole websocket process from its load balancer "${node.wsTier}"`)
   }
   return { system, id, manifest, kind }
 }
@@ -382,7 +381,7 @@ async function reconcileSecondaryRemoval(system, node, manifest) {
   }
 }
 
-async function rebuild(system, kind, restartService = null) {
+async function rebuild(system, kind) {
   if (process.env.DELETE_SKIP_REBUILD === '1') return '(rebuild skipped)'
 
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
@@ -395,12 +394,6 @@ async function rebuild(system, kind, restartService = null) {
     if (kind === 'service') {
       const ng = await pexec('docker', ['compose', '-f', compose, 'exec', '-T', 'lb', 'nginx', '-s', 'reload'], opts)
       log += ng.stdout + ng.stderr
-    }
-    // A websocket single-server delete regenerated the tier lb's bind-mounted
-    // haproxy.cfg — restart that lb so it drops the removed server line.
-    if (restartService) {
-      const rs = await pexec('docker', ['compose', '-f', compose, 'restart', restartService], opts)
-      log += rs.stdout + rs.stderr
     }
     const r = await pexec('docker', ['compose', '-f', compose, 'restart', 'prometheus'], opts)
     log += r.stdout + r.stderr
@@ -460,13 +453,7 @@ export async function handleDelete(body) {
   pruneConsumers(system, removedIds)
   writeManifest(system, manifest)
 
-  // A single deleted relay leaves the tier registry + haproxy.cfg stale — regenerate
-  // them from the registry now (before the compose reconcile), then have rebuild()
-  // restart the lb so it drops the removed server line (the cfg is a bind mount).
-  const wsLbToRestart = kind === 'websocket' && node?.wsRole === 'server' ? node.wsTier : null
-  if (wsLbToRestart) removeServerFromTier(system, wsLbToRestart, id)
-
-  const log = await rebuild(system, kind, wsLbToRestart)
+  const log = await rebuild(system, kind)
   return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds], log }
 }
 

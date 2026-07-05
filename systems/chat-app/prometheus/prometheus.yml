@@ -8,8 +8,6 @@ scrape_configs:
   # network. The job name is the service id, which the manifest's health/metric
   # queries key off of: up{job="service-1"}. "Add service" appends a job here.
   [
-    # Service "service-1" — generic FastAPI backend
-    { job_name: service-1, static_configs: [ { targets: [ service-1:8000 ] } ] },
     # WebSocket tier "ws-lb" — added by Add WebSockets
     {
         job_name: ws-lb,

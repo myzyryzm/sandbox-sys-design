@@ -16,8 +16,14 @@
 // clients' __LB_RESULTS__ sentinel):
 //   __WS_RESULTS__ {"spawned":..,"connected":..,"sent":..,"delivered":..,
 //                   "duplicates":..,"errors":..,"latencyMs":{"p50":..,"p95":..,"max":..}}
+// The same report (plus a timestamp and the args used) is also written next to this
+// script as __CLIENT__.stats.json — best-effort — so the app can show the last run's
+// delivery stats no matter which driver spawned us (the API or an e2e session).
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
 const WS_URL = process.env.WS_URL || '__WS_URL__'
 const CONNECT_GRACE_MS = 10_000 // wait up to this long for the pool to connect
@@ -135,6 +141,25 @@ function finish(code = 0) {
       p95: percentile(sorted, 95),
       max: sorted.length ? sorted[sorted.length - 1] : null,
     },
+  }
+  // persist the report next to this script (script-relative, NOT cwd-relative — the
+  // API spawns us from the system dir, e2e sessions from the repo root); best-effort
+  try {
+    const statsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '__CLIENT__.stats.json')
+    fs.writeFileSync(
+      statsPath,
+      JSON.stringify(
+        {
+          ts: new Date().toISOString(),
+          args: { count: args.count, durationSeconds: args.duration, rate: args.rate },
+          results: report,
+        },
+        null,
+        2,
+      ) + '\n',
+    )
+  } catch {
+    /* stats are best-effort — never fail the run over them */
   }
   console.log('__WS_RESULTS__ ' + JSON.stringify(report))
   process.exit(code)

@@ -52,11 +52,16 @@ For a tier named `ws` (the name prefixes every id):
 3. **Manifest nodes** (`origin: "create-websockets"`): the lb (`type: websocket-lb`,
    `wsRole: "lb"`), each server (`websocket-server`, `wsRole: "server"`), both redis
    (`wsRole: "bus"` / `"presence"`), and the client (`type: "client"`, `external: true`,
-   `wsRole: "client"`). Every non-lb node carries `wsTier: "<lb-id>"` — deleting the lb
-   cascades the whole tier; the redis nodes are delete-blocked while servers depend on them.
+   `wsRole: "client"`). Every non-lb node carries `wsTier: "<lb-id>"`. **The tier is one
+   deletion unit**: deleting the lb cascades the whole tier (servers, redis, client, pool
+   script + stats file), and every non-lb member is individually delete-BLOCKED — the app's
+   Delete tabs (and `POST /api/delete` / `DELETE /api/clients`) all point at the lb instead.
 4. **Prometheus scrape jobs** — one per lb/server/redis (`prometheus/prometheus.yml`).
 5. **The client pool script** `systems/<id>/ws-clients/<name>-client.mjs` — host-run
    (node ≥ 22, zero npm deps, built-in `WebSocket`), connects to `ws://localhost:8090`.
+   On every run its `finish()` also writes `ws-clients/<name>-client.stats.json`
+   (`{ ts, args, results }`, results = the `__WS_RESULTS__` shape) next to itself —
+   script-relative, so any driver leaves stats the UI displays on the client node.
 
 ## The message contract
 
@@ -85,10 +90,11 @@ rename the existing ones without updating the manifest queries in the same chang
 - **Algorithm** (`leastconn` | `roundrobin` | `source`): set it in `websockets.json`, change
   the `balance <algo>` line in `ws-lb/haproxy.cfg`, then
   `docker compose -f systems/<id>/docker-compose.yml restart ws-lb` (the cfg is a bind mount).
-- **Removing a server**: use the app's Delete (it regenerates the cfg + restarts the lb + scrubs
-  compose/prometheus/manifest). By hand you must do all of that yourself — registry `servers[]`,
-  the cfg's `server` line, the compose service + its folder, the scrape job, the manifest
-  node/edges — then `up -d --remove-orphans`, `restart ws-lb`, `restart prometheus`.
+- **Removing a server**: the app no longer deletes individual tier members (every non-lb
+  node's delete is blocked — the whole tier goes away via the lb's Delete tab). Shrinking
+  the server set is a **hand-only** procedure: registry `servers[]`, the cfg's `server`
+  line, the compose service + its folder, the scrape job, the manifest node/edges — then
+  `up -d --remove-orphans`, `restart ws-lb`, `restart prometheus`.
 - **Adding a server**: clone an existing `ws-server-*` folder, add the compose service (same
   env shape, unique `SERVER_ID`), scrape job, manifest node (+ `ws-lb → ws-server-N`,
   `→ ws-bus`, `→ ws-presence` edges), append to registry `servers[]` + a cfg `server` line;
@@ -115,6 +121,13 @@ pools near the 200 cap run `ulimit -n 4096` in the spawning shell first. In end-
 processes the pool rides `websocket_list` rows (`{ client, clientCount, messagesPerSecond }`)
 — see [[sandbox-end-to-end-process]].
 
+`GET /api/websockets?system=<id>` returns `{ ok, tier, stats, clientMethods }`: the registry,
+the stats-file contents (or null before the first run), and the descriptor of the client's
+two **built-in methods** — `spawnAndSend(count=5, durationSeconds=10, rate=1)` (the pool run)
+and `onReceive(message)` (the dedupe-by-msgId / latency-measuring receive handler). The UI
+renders them read-only on the client node and its Functions tab: they are not editable, not
+deletable, and only end-to-end processes invoke them.
+
 ## Verify
 
 ```bash
@@ -130,6 +143,8 @@ docker compose -f systems/<id>/docker-compose.yml exec -T prometheus wget -qO- h
 curl -s 'http://localhost:9090/api/v1/targets' | python3 -c "import json,sys;[print(t['labels']['job'],t['health']) for t in json.load(sys.stdin)['data']['activeTargets']]"
 # a pool run round-trips: delivered ≈ sent, duplicates = 0
 node systems/<id>/ws-clients/<name>-client.mjs --count 5 --duration 10 --rate 2
+# …and left its report on disk for the UI (ts + args + results)
+cat systems/<id>/ws-clients/<name>-client.stats.json
 # cross-server routing actually happens (needs ≥2 servers + a multi-client pool)
 curl -s 'http://localhost:9090/api/v1/query?query=sum(rate(ws_messages_routed_remote_total%5B1m%5D))'
 ```

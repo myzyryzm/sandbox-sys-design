@@ -18,7 +18,6 @@ import path from 'node:path'
 import { systemDir, isValidSystem, nextClientPosition } from './systems.js'
 import { bad, NAME_RE, readJsonBody } from './scaffold.js'
 import { scaffoldClientScript, removeClientScript } from './clientScript.js'
-import { removeWsClientScript } from './websockets.js'
 
 function readManifest(system) {
   return JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
@@ -67,13 +66,16 @@ function deleteClient(body) {
   const manifest = readManifest(system)
   const node = findClient(manifest, id)
   if (!node) throw bad(`"${id}" is not a client in this system`)
+  // A websocket pool client is tier-owned: it only goes away with the whole tier
+  // (the remove.js cascade from the lb, which also cleans up its script + stats).
+  if (node.origin === 'create-websockets') {
+    throw bad(`"${id}" is part of the "${node.wsTier}" websocket tier — delete the whole websocket process from its load balancer "${node.wsTier}"`)
+  }
   manifest.nodes = manifest.nodes.filter((n) => n.id !== id)
   manifest.edges = (manifest.edges || []).filter((e) => e.from !== id && e.to !== id)
   writeManifest(system, manifest)
-  // Drop its script: a websocket client's behavior is its host pool script in
-  // ws-clients/; an HTTP client's is its python module (the shared lbclient.py stays).
-  if (node.origin === 'create-websockets') removeWsClientScript(system, id)
-  else removeClientScript(system, id)
+  // Drop its python module (the shared lbclient.py stays).
+  removeClientScript(system, id)
   return { ok: true, removed: id }
 }
 

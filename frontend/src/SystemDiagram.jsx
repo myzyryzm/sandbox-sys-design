@@ -243,7 +243,13 @@ export default function SystemDiagram({
   onClearMethodTrace,
   // A client's attached functions, keyed by client node id (each is a resolved bank
   // function with its authored `steps`). Rendered as clickable rows on the client node.
+  // A websocket client's entries are its pool script's builtin methods (wsBuiltin: true,
+  // no steps) — same rows, but their trace is the tier path, derived here from wsTier/wsRole.
   clientFunctions = {},
+  // The ws pool client's last-run delivery stats, keyed by client node id (the shape the
+  // pool script writes to ws-clients/<id>.stats.json: { ts, args, results }). Rendered as
+  // read-only metric-style rows under the client's ƒ rows.
+  wsStats = {},
   // A selected client function, traced client → LB → each called service → its downstreams,
   // with every called method highlighted on its service. Top precedence over methodTrace /
   // the LB endpoint selection. Set via onSelectFunction, cleared via onClearFunctionTrace.
@@ -360,12 +366,26 @@ export default function SystemDiagram({
   // A service's consumer functions, dropping any whose cluster node no longer exists (so a deleted
   // cluster can't leave a dangling CONS row that traces to nothing).
   const consumersOf = (id) => (consumerFunctions[id] || []).filter((c) => byId[c.cluster])
+  // The ws pool client's last-run delivery stats, folded into the row list so they size
+  // the node like every other row (read-only — the renderer draws them non-interactive).
+  const wsStatRowsOf = (id) => {
+    const s = wsStats[id]?.results
+    if (!s) return []
+    const lat = s.latencyMs || {}
+    return [
+      { label: 'delivered', value: `${s.delivered}/${s.sent}` },
+      { label: 'dup · err', value: `${s.duplicates} · ${s.errors}` },
+      { label: 'p50/p95', value: lat.p50 != null ? `${lat.p50}/${lat.p95} ms` : '—' },
+      { label: 'last run', value: wsStats[id].ts ? new Date(wsStats[id].ts).toLocaleTimeString() : '—' },
+    ].map((r) => ({ kind: 'wsstat', ...r }))
+  }
   const rowsOf = (node) => {
     if (!node) return []
     return [
       ...methodsOf(node.id).map((e) => ({ kind: 'method', e })),
       ...functionsOf(node.id).map((fn) => ({ kind: 'fn', fn })),
       ...consumersOf(node.id).map((c) => ({ kind: 'cons', c })),
+      ...wsStatRowsOf(node.id),
     ]
   }
 
@@ -401,6 +421,17 @@ export default function SystemDiagram({
     const GAP = 6 // px of clearance outside the box for the arrow tip
     const t = k + GAP / Math.hypot(dx, dy)
     return { x: c.x - dx * t, y: c.y - dy * t }
+  }
+  // A trace hop's line runs border-to-border along the center↔center axis. Starting at the
+  // source's BORDER (not its center) matters for short hops: with a center start the midpoint —
+  // where the sequence badge + info button sit — lands inside the source box, and the nodes
+  // (drawn after the edges) cover it. Border-to-border keeps the midpoint in the visible gap.
+  const traceLine = (fromId, toId) => {
+    const ac = centerOf(fromId)
+    const bc = centerOf(toId)
+    const a = byId[fromId] ? borderPointToward(bc, byId[fromId]) : ac
+    const b = byId[toId] ? borderPointToward(ac, byId[toId]) : bc
+    return { a, b, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } }
   }
 
   // gRPC edges are derived from each service's manifest `grpc.clients[].targets`
@@ -521,7 +552,30 @@ export default function SystemDiagram({
   // A consumer trace highlights one consume edge: cluster → consuming service. Both nodes must
   // still exist. Mutually exclusive with the other traces (App nulls the others when one is set).
   const ct = consumerTrace && byId[consumerTrace.cluster] && byId[consumerTrace.service] ? consumerTrace : null
-  if (ft) {
+  if (ft && ft.wsBuiltin) {
+    // A ws pool client's builtin method has no authored steps — trace the TIER path
+    // instead: client → its L4 lb → each relay server → the bus + presence redis.
+    // Both methods (spawnAndSend / onReceive) share it: messages traverse the same
+    // path in each direction. Derived from the manifest's wsTier/wsRole fields, so
+    // there's nothing to go stale.
+    const tierId = byId[ft.client]?.wsTier
+    const ids = new Set([ft.client])
+    if (byId[tierId]) {
+      ids.add(tierId)
+      traceEdges.push([ft.client, tierId])
+      for (const srv of nodes) {
+        if (srv.wsTier !== tierId || srv.wsRole !== 'server') continue
+        ids.add(srv.id)
+        traceEdges.push([tierId, srv.id])
+        for (const r of nodes) {
+          if (r.wsTier !== tierId || (r.wsRole !== 'bus' && r.wsRole !== 'presence')) continue
+          ids.add(r.id)
+          traceEdges.push([srv.id, r.id])
+        }
+      }
+    }
+    traceNodes = ids
+  } else if (ft) {
     const ids = new Set([ft.client])
     const seenSvc = new Set()
     // Draw each directed edge once — a duplicate would stack a second sequence badge on the line.
@@ -1057,51 +1111,23 @@ export default function SystemDiagram({
         )
       })}
 
-      {/* Highlighted trace edges (only while a trace is selected). Each line ends at the target
-          node's border so its arrowhead is visible. At the midpoint sits the hop's sequence number
-          (index + 1, edges are pushed in request order); a hop that carries a description (the 3rd
-          tuple element) also gets an info button that opens the full text in a popup (rendered
-          after the nodes so it stacks on top — see the `openInfo` block below). */}
-      {traceEdges.map(([fromId, toId, label], i) => {
-        const a = centerOf(fromId)
-        const b = byId[toId] ? borderPointToward(a, byId[toId]) : centerOf(toId)
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
-        const hasDesc = !!(label && label.trim())
+      {/* Highlighted trace edges (only while a trace is selected). Each line runs border-to-border
+          (see traceLine) so the arrowhead is visible at the target and the midpoint stays in the
+          gap between the boxes. The sequence badges + info buttons that sit at each midpoint are
+          rendered AFTER the nodes (see the trace-badge block below) so a node box never covers
+          them; the description popup stacks last of all (`openInfo` block). */}
+      {traceEdges.map(([fromId, toId], i) => {
+        const { a, b } = traceLine(fromId, toId)
         return (
-          <g key={`trace-${i}`}>
-            <line
-              x1={a.x}
-              y1={a.y}
-              x2={b.x}
-              y2={b.y}
-              className="trace-edge"
-              markerEnd="url(#trace-arrow)"
-            />
-            <foreignObject
-              x={mid.x - 40}
-              y={mid.y - 13}
-              width={80}
-              height={26}
-              style={{ overflow: 'visible', pointerEvents: 'none' }}
-            >
-              <div className="trace-badge-row">
-                <span className="trace-seq-badge">{i + 1}</span>
-                {hasDesc && (
-                  <button
-                    type="button"
-                    className={`trace-info-btn${openInfo === i ? ' active' : ''}`}
-                    aria-label={`Show step ${i + 1} description`}
-                    onClick={(ev) => {
-                      ev.stopPropagation()
-                      setOpenInfo(openInfo === i ? null : i)
-                    }}
-                  >
-                    i
-                  </button>
-                )}
-              </div>
-            </foreignObject>
-          </g>
+          <line
+            key={`trace-${i}`}
+            x1={a.x}
+            y1={a.y}
+            x2={b.x}
+            y2={b.y}
+            className="trace-edge"
+            markerEnd="url(#trace-arrow)"
+          />
         )
       })}
 
@@ -1269,6 +1295,20 @@ export default function SystemDiagram({
                   </g>
                 )
               }
+              if (row.kind === 'wsstat') {
+                // A ws pool client's last-run delivery stat: read-only, metric-styled —
+                // must come before the method fall-through below (which assumes row.e).
+                return (
+                  <g key={`wsstat-${row.label}`} style={{ pointerEvents: 'none' }}>
+                    <text x={PAD} y={y + 12} className="metric-label">
+                      {row.label}
+                    </text>
+                    <text x={NODE_W - PAD} y={y + 12} className="metric-value">
+                      {row.value}
+                    </text>
+                  </g>
+                )
+              }
               if (row.kind === 'cons') {
                 // A Kafka consumer function: clicking it traces the consume edge cluster → service.
                 // "CONS" stands in for the GET/POST method badge an HTTP row would show.
@@ -1423,15 +1463,49 @@ export default function SystemDiagram({
         </g>
       )}
 
-      {/* Open trace-hop description popup. Rendered last so it stacks above the nodes (nodes draw
-          after the trace edges, so an inline popup would be covered by a node box). Only one hop's
-          popup is open at a time (`openInfo`). Closes via its × or by re-clicking its info button. */}
+      {/* Trace hop badges: the sequence number (index + 1, edges are pushed in request order) and,
+          for a hop that carries a description (the 3rd tuple element), an info button that opens
+          the full text in a popup. Rendered after the nodes so a badge stays visible even when a
+          short hop's midpoint sits right up against (or on) a node box. */}
+      {traceEdges.map(([fromId, toId, label], i) => {
+        const { mid } = traceLine(fromId, toId)
+        const hasDesc = !!(label && label.trim())
+        return (
+          <foreignObject
+            key={`trace-badge-${i}`}
+            x={mid.x - 40}
+            y={mid.y - 13}
+            width={80}
+            height={26}
+            style={{ overflow: 'visible', pointerEvents: 'none' }}
+          >
+            <div className="trace-badge-row">
+              <span className="trace-seq-badge">{i + 1}</span>
+              {hasDesc && (
+                <button
+                  type="button"
+                  className={`trace-info-btn${openInfo === i ? ' active' : ''}`}
+                  aria-label={`Show step ${i + 1} description`}
+                  onClick={(ev) => {
+                    ev.stopPropagation()
+                    setOpenInfo(openInfo === i ? null : i)
+                  }}
+                >
+                  i
+                </button>
+              )}
+            </div>
+          </foreignObject>
+        )
+      })}
+
+      {/* Open trace-hop description popup. Rendered last so it stacks above the nodes and the
+          badges. Only one hop's popup is open at a time (`openInfo`). Closes via its × or by
+          re-clicking its info button. */}
       {openInfo != null && traceEdges[openInfo] && (() => {
         const [fromId, toId, label] = traceEdges[openInfo]
         if (!label || !label.trim()) return null
-        const a = centerOf(fromId)
-        const b = byId[toId] ? borderPointToward(a, byId[toId]) : centerOf(toId)
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+        const { mid } = traceLine(fromId, toId)
         return (
           <foreignObject
             x={mid.x + 16}

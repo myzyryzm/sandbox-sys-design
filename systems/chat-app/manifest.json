@@ -15,52 +15,6 @@
       "metrics": []
     },
     {
-      "id": "service-1",
-      "label": "service-1",
-      "type": "service",
-      "origin": "create-service",
-      "position": {
-        "x": 80,
-        "y": 380
-      },
-      "metrics": [
-        {
-          "label": "req/s",
-          "query": "sum(rate(http_requests_total{job=\"service-1\"}[1m]))",
-          "unit": "/s"
-        },
-        {
-          "label": "p95",
-          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"service-1\"}[1m])) by (le)) * 1000",
-          "unit": "ms"
-        },
-        {
-          "label": "in-flight",
-          "query": "sum(http_requests_in_flight{job=\"service-1\"})",
-          "unit": ""
-        },
-        {
-          "label": "errors",
-          "query": "(sum(rate(http_requests_total{job=\"service-1\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"service-1\"}[1m])), 0.0001)",
-          "unit": "%",
-          "scale": 100
-        }
-      ],
-      "health": {
-        "query": "up{job=\"service-1\"}",
-        "rules": [
-          {
-            "color": "red",
-            "when": "value < 1"
-          },
-          {
-            "color": "green",
-            "when": "value >= 1"
-          }
-        ]
-      }
-    },
-    {
       "id": "ws-lb",
       "label": "ws-lb",
       "type": "websocket-lb",

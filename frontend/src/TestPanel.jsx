@@ -8,8 +8,6 @@ import { useEffect, useState } from 'react'
  * can slot in later.
  */
 
-const FALLBACK = { service: 'service-1', method: 'GET', path: '/service-1/health' }
-
 export default function TestPanel({ systemId, onClose }) {
   const [rps, setRps] = useState(20)
   const [endpoints, setEndpoints] = useState([])
@@ -18,7 +16,8 @@ export default function TestPanel({ systemId, onClose }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
 
-  const options = endpoints.length ? endpoints : [FALLBACK]
+  const options = endpoints
+  const hasEndpoints = options.length > 0
 
   // Load the endpoint catalog and any load already running when the modal opens.
   useEffect(() => {
@@ -28,8 +27,8 @@ export default function TestPanel({ systemId, onClose }) {
       fetch(`/api/test/load?system=${encodeURIComponent(systemId)}`).then((r) => r.json()).catch(() => ({})),
     ]).then(([eps, st]) => {
       if (cancelled) return
-      const list = eps.ok && eps.endpoints.length ? eps.endpoints : [FALLBACK]
-      setEndpoints(eps.ok ? eps.endpoints : [])
+      const list = eps.ok ? eps.endpoints : []
+      setEndpoints(list)
       if (st.ok) {
         setLoad(st)
         if (st.running) {
@@ -42,9 +41,13 @@ export default function TestPanel({ systemId, onClose }) {
   }, [systemId])
 
   async function send(action) {
+    // 'stop' doesn't need a target (the server kills the loop by system id), so it
+    // still works when the catalog is empty — e.g. a load left running against a
+    // since-deleted endpoint.
+    const sel = options[target]
+    if (action === 'start' && !sel) return
     setBusy(true)
     setError(null)
-    const sel = options[target] || FALLBACK
     try {
       const res = await fetch('/api/test/load', {
         method: 'POST',
@@ -53,8 +56,8 @@ export default function TestPanel({ systemId, onClose }) {
           system: systemId,
           action,
           rps: Number(rps),
-          method: sel.method,
-          path: sel.path,
+          method: sel?.method,
+          path: sel?.path,
         }),
       })
       const data = await res.json().catch(() => ({}))
@@ -89,10 +92,14 @@ export default function TestPanel({ systemId, onClose }) {
           <div className="sim-controls">
             <label className="sim-target">
               <span>endpoint</span>
-              <select value={target} onChange={(e) => setTarget(Number(e.target.value))} disabled={busy}>
-                {options.map((e, i) => (
-                  <option key={`${e.method} ${e.path}`} value={i}>{e.method} {e.path}</option>
-                ))}
+              <select value={target} onChange={(e) => setTarget(Number(e.target.value))} disabled={busy || !hasEndpoints}>
+                {hasEndpoints ? (
+                  options.map((e, i) => (
+                    <option key={`${e.method} ${e.path}`} value={i}>{e.method} {e.path}</option>
+                  ))
+                ) : (
+                  <option value={0}>no endpoints — add a service route first</option>
+                )}
               </select>
             </label>
             <label>
@@ -110,7 +117,7 @@ export default function TestPanel({ systemId, onClose }) {
             {load.running ? (
               <button className="danger" onClick={() => send('stop')} disabled={busy}>Stop</button>
             ) : (
-              <button className="primary" onClick={() => send('start')} disabled={busy}>Start load</button>
+              <button className="primary" onClick={() => send('start')} disabled={busy || !hasEndpoints}>Start load</button>
             )}
           </div>
         </div>

@@ -15,7 +15,14 @@
 //        plus the scrape jobs, manifest nodes/edges, and the tier registry
 //        systems/<id>/<name>-lb/websockets.json (source of truth for haproxy.cfg).
 //   GET  /api/websockets?system=<id>
-//     -> { ok, tier } — the registry contents, or tier:null (one tier per system today).
+//     -> { ok, tier, stats, clientMethods } — the registry contents (or tier:null; one
+//        tier per system today), the client pool's last-run delivery stats (from
+//        ws-clients/<client>.stats.json, written by the pool script itself on every
+//        run regardless of driver — or null when it has never run), and the static
+//        descriptor of the pool client's two BUILT-IN methods (spawnAndSend /
+//        onReceive: names, args with defaults+bounds, summaries). The methods are not
+//        editable or deletable and only end-to-end processes invoke them — the UI
+//        renders them read-only.
 //   POST /api/websockets/run  { system, client, count?, durationSeconds?, rate? }
 //     -> spawns `node ws-clients/<client>.mjs --count N --duration S --rate R` on the
 //        host and parses its trailing `__WS_RESULTS__ <json>` line (the ws twin of
@@ -27,8 +34,10 @@
 //
 // The lb speaks raw TCP (L4), not HTTP, so there is NO nginx route: ws clients reach
 // it directly on the published host port. Tier membership lives on the manifest nodes
-// (`wsTier: "<lb-id>"`, `wsRole: lb|server|bus|presence|client`) — remove.js keys its
-// cascade/dependents off those, the same convention as replicaOf / cdcOf.
+// (`wsTier: "<lb-id>"`, `wsRole: lb|server|bus|presence|client`), the same convention
+// as replicaOf / cdcOf. The tier is one unit: deleting the lb cascades every wsTier
+// member (remove.js), and every non-lb member is individually delete-BLOCKED — the
+// whole websocket process only goes away via its load balancer.
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -60,6 +69,32 @@ const MAX_POOL = 200
 const MAX_DURATION_S = 120
 const MAX_RATE = 20
 
+// The pool client's BUILT-IN methods — a static descriptor, not a registry: the
+// script is generated from one template, so its behavior is fixed. Served on
+// GET /api/websockets so the UI has one source of truth for names/args/defaults.
+// Neither method is editable or deletable, and neither can be run from the UI —
+// only end-to-end processes invoke them (via their websocket pool rows).
+const CLIENT_METHODS = [
+  {
+    name: 'spawnAndSend',
+    builtin: true,
+    summary:
+      'spawn N pool clients that connect through the L4 load balancer; each sends messages to random peers at the given rate for the duration, then reports delivery stats',
+    args: [
+      { name: 'count', type: 'number', default: 5, min: 1, max: MAX_POOL },
+      { name: 'durationSeconds', type: 'number', default: 10, min: 1, max: MAX_DURATION_S },
+      { name: 'rate', type: 'number', default: 1, min: 1, max: MAX_RATE },
+    ],
+  },
+  {
+    name: 'onReceive',
+    builtin: true,
+    summary:
+      "the 'message' handler: dedupes by msgId (a repeat only bumps the duplicates counter), records the delivery, and measures latency from the sender's sentAt timestamp",
+    args: [{ name: 'message', type: 'json' }],
+  },
+]
+
 // Health rule shared by every node: red when the target is down, green up.
 const HEALTH_RULES = [
   { color: 'red', when: 'value < 1' },
@@ -77,13 +112,27 @@ function writeManifest(system, manifest) {
 }
 
 // The host-run client pool script (ws twin of clientScript.js' clients/<module>.py —
-// exported so clients.js / remove.js can clean it up on delete).
+// exported so remove.js can clean it up on tier delete). The script leaves its last
+// run's report next to itself as <id>.stats.json (see the template's finish()).
 export function wsClientScriptPath(system, id) {
   return path.join(systemDir(system), 'ws-clients', `${id}.mjs`)
+}
+export function wsClientStatsPath(system, id) {
+  return path.join(systemDir(system), 'ws-clients', `${id}.stats.json`)
+}
+function readClientStats(system, id) {
+  try {
+    return JSON.parse(fs.readFileSync(wsClientStatsPath(system, id), 'utf8'))
+  } catch {
+    return null
+  }
 }
 export function removeWsClientScript(system, id) {
   try {
     fs.rmSync(wsClientScriptPath(system, id), { force: true })
+    // stats too, or the empty-dir check below never fires and a recreated
+    // same-name tier would resurrect a stale last-run report
+    fs.rmSync(wsClientStatsPath(system, id), { force: true })
     const dir = path.join(systemDir(system), 'ws-clients')
     if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir)
   } catch {
@@ -93,7 +142,7 @@ export function removeWsClientScript(system, id) {
 
 // ---------------------------------------------------------------------------
 // The tier registry: systems/<id>/<lb>/websockets.json — the durable source of
-// truth haproxy.cfg is rendered from, so a server delete can regenerate the cfg.
+// truth haproxy.cfg is rendered from.
 // ---------------------------------------------------------------------------
 
 function registryPath(system, lbId) {
@@ -162,16 +211,6 @@ frontend stats
 }
 function writeHaproxyCfg(system, reg) {
   fs.writeFileSync(path.join(systemDir(system), reg.lb, 'haproxy.cfg'), renderHaproxyCfg(reg))
-}
-
-// Drop a deleted server from the registry + regenerate haproxy.cfg to match. The
-// caller (remove.js) restarts the lb container afterwards (the cfg is a bind mount).
-export function removeServerFromTier(system, lbId, serverId) {
-  const reg = readTierRegistry(system, lbId)
-  if (!reg) return
-  reg.servers = (reg.servers || []).filter((s) => s !== serverId)
-  writeTierRegistry(system, reg)
-  writeHaproxyCfg(system, reg)
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +512,9 @@ export async function handleCreate(body) {
     .split('__WS_URL__').join(`ws://localhost:${HOST_PORT}`)
   fs.mkdirSync(path.join(systemDir(system), 'ws-clients'), { recursive: true })
   fs.writeFileSync(wsClientScriptPath(system, ids.client), filled)
+  // a hand-deleted tier can leave a same-name stats file behind — a fresh tier
+  // must not start life showing another tier's last run
+  fs.rmSync(wsClientStatsPath(system, ids.client), { force: true })
 
   // 6. rebuild (frontend-safe)
   const log = await rebuild(system, ids.servers)
@@ -488,7 +530,16 @@ function getTier(system) {
   const manifest = readManifest(system)
   const lb = manifest.nodes.find((n) => n.origin === 'create-websockets' && n.wsRole === 'lb')
   if (!lb) return { ok: true, tier: null }
-  return { ok: true, tier: readTierRegistry(system, lb.id) }
+  const tier = readTierRegistry(system, lb.id)
+  const clientId =
+    tier?.client ||
+    manifest.nodes.find((n) => n.origin === 'create-websockets' && n.wsRole === 'client')?.id
+  return {
+    ok: true,
+    tier,
+    stats: clientId ? readClientStats(system, clientId) : null,
+    clientMethods: CLIENT_METHODS,
+  }
 }
 
 // ---------------------------------------------------------------------------
