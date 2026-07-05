@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { parseDocument } from 'yaml'
 import { repoRoot, systemsDir, systemDir, isValidSystem } from './systems.js'
+import { removeServerFromTier, removeWsClientScript } from './websockets.js'
 
 const pexec = promisify(execFile)
 
@@ -54,21 +55,37 @@ function validate(body) {
     node.type === 'service' ||
     node.type === 'external_service' ||
     node.origin === 'create-database' ||
-    node.origin === 'create-event-stream'
+    node.origin === 'create-event-stream' ||
+    node.origin === 'create-websockets'
   if (!deletable) throw bad(`"${id}" (${node.type}) cannot be deleted`)
   const kind =
-    node.origin === 'create-database'
-      ? 'database'
-      : node.origin === 'create-event-stream'
-        ? 'event-stream'
-        : 'service'
+    node.origin === 'create-websockets'
+      ? 'websocket'
+      : node.origin === 'create-database'
+        ? 'database'
+        : node.origin === 'create-event-stream'
+          ? 'event-stream'
+          : 'service'
+  // A websocket tier must keep at least one relay behind its lb (an empty haproxy
+  // backend serves nothing) — the whole tier goes away via its load balancer.
+  if (kind === 'websocket' && node.wsRole === 'server') {
+    const siblings = manifest.nodes.filter((n) => n.wsTier === node.wsTier && n.wsRole === 'server')
+    if (siblings.length <= 1) {
+      throw bad(`"${id}" is the tier's last websocket server — delete the whole tier via its load balancer "${node.wsTier}"`)
+    }
+  }
   return { system, id, manifest, kind }
 }
 
 // Compose services a component owns. A service is just itself; a database or an
 // event stream also owns its exporter / init sidecars (the exact names
-// databases.js / eventstreams.js emit).
-function ownedServices(id, kind) {
+// databases.js / eventstreams.js emit). In a websocket tier only the two redis
+// nodes have exporters (no `-init` sidecars); the lb and servers are just
+// themselves, and the client has no container at all.
+function ownedServices(id, kind, node) {
+  if (kind === 'websocket') {
+    return node?.wsRole === 'bus' || node?.wsRole === 'presence' ? [id, `${id}-exporter`] : [id]
+  }
   return kind === 'database' || kind === 'event-stream'
     ? [id, `${id}-exporter`, `${id}-init`]
     : [id]
@@ -145,13 +162,15 @@ function writeManifest(system, manifest) {
 }
 
 const kindOf = (node) =>
-  node?.origin === 'create-database'
-    ? 'database'
-    : node?.origin === 'create-event-stream'
-      ? 'event-stream'
-      : node?.origin === 'create-cdc'
-        ? 'cdc'
-        : 'service'
+  node?.origin === 'create-websockets'
+    ? 'websocket'
+    : node?.origin === 'create-database'
+      ? 'database'
+      : node?.origin === 'create-event-stream'
+        ? 'event-stream'
+        : node?.origin === 'create-cdc'
+          ? 'cdc'
+          : 'service'
 
 // A removed CDC worker was registered as a producer in its target streams'
 // streams.json — scrub it so no stream lists a producer that no longer exists.
@@ -233,7 +252,12 @@ function cascadeChildIds(manifest, id, kind, node) {
   const cdcWorkerIds = kind === 'database'
     ? manifest.nodes.filter((n) => n.cdcOf === id).map((n) => n.id)
     : []
-  return { secondaryIds, cdcWorkerIds }
+  // Deleting a websocket tier's lb takes the whole tier with it: every node
+  // carrying `wsTier: <lb-id>` (servers, bus + presence redis, the client).
+  const wsChildIds = kind === 'websocket' && node?.wsRole === 'lb'
+    ? manifest.nodes.filter((n) => n.wsTier === id).map((n) => n.id)
+    : []
+  return { secondaryIds, cdcWorkerIds, wsChildIds }
 }
 
 // Reverse-dependency lookup: which OTHER nodes still call/use `id`, so deleting it
@@ -316,6 +340,18 @@ function findDependents(system, manifest, id, kind, cascadeIds = new Set()) {
     deps.push({ node: c.service, label: labelOf(c.service), via: 'consumer', detail: `function ${c.name}`, calls: [] })
   }
 
+  // WebSocket tier — every relay server publishes through the tier's bus and reads/
+  // writes its presence cache, so deleting either redis strands the tier's servers.
+  // (Deleting the tier's own lb passes: the servers are in its cascade set.)
+  const target = byId.get(id)
+  if (target?.wsRole === 'bus' || target?.wsRole === 'presence') {
+    const what = target.wsRole === 'bus' ? 'pub/sub bus' : 'presence store'
+    for (const n of manifest.nodes) {
+      if (skip(n.id) || n.wsTier !== target.wsTier || n.wsRole !== 'server') continue
+      deps.push({ node: n.id, label: labelOf(n.id), via: 'websocket', detail: `uses this redis as its ${what}`, calls: [] })
+    }
+  }
+
   return deps
 }
 
@@ -346,7 +382,7 @@ async function reconcileSecondaryRemoval(system, node, manifest) {
   }
 }
 
-async function rebuild(system, kind) {
+async function rebuild(system, kind, restartService = null) {
   if (process.env.DELETE_SKIP_REBUILD === '1') return '(rebuild skipped)'
 
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
@@ -359,6 +395,12 @@ async function rebuild(system, kind) {
     if (kind === 'service') {
       const ng = await pexec('docker', ['compose', '-f', compose, 'exec', '-T', 'lb', 'nginx', '-s', 'reload'], opts)
       log += ng.stdout + ng.stderr
+    }
+    // A websocket single-server delete regenerated the tier lb's bind-mounted
+    // haproxy.cfg — restart that lb so it drops the removed server line.
+    if (restartService) {
+      const rs = await pexec('docker', ['compose', '-f', compose, 'restart', restartService], opts)
+      log += rs.stdout + rs.stderr
     }
     const r = await pexec('docker', ['compose', '-f', compose, 'restart', 'prometheus'], opts)
     log += r.stdout + r.stderr
@@ -374,13 +416,14 @@ export async function handleDelete(body) {
   const node = manifest.nodes.find((n) => n.id === id)
 
   // The owned children removed in the same cascade (read replicas that stream from a
-  // primary, a database's CDC worker) — excluded from the dependency guard below.
-  const { secondaryIds, cdcWorkerIds } = cascadeChildIds(manifest, id, kind, node)
+  // primary, a database's CDC worker, a websocket lb's whole tier) — excluded from
+  // the dependency guard below.
+  const { secondaryIds, cdcWorkerIds, wsChildIds } = cascadeChildIds(manifest, id, kind, node)
 
   // Block the delete while another node still depends on `id` — an endpoint's HTTP
   // downstream, a gRPC client target, a Kafka producer/consumer, or a client function
   // step. The user must remove those calls first; cascaded children don't count.
-  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds]))
+  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds]))
   if (dependents.length) {
     const err = bad(`Cannot delete "${id}" — ${dependents.length} node(s) still depend on it; remove those calls first.`)
     err.dependents = dependents
@@ -394,18 +437,21 @@ export async function handleDelete(body) {
   // before the loop scrubs nodes from the manifest).
   const kafkaIds = manifest.nodes.filter((n) => n.origin === 'create-event-stream').map((n) => n.id)
 
-  // Remove the worker + secondaries first, then the target, in one manifest write.
-  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, id])
-  for (const rid of [...cdcWorkerIds, ...secondaryIds, id]) {
+  // Remove the children first (workers, secondaries, a ws lb's tier), then the
+  // target, in one manifest write.
+  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, id])
+  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, id]) {
     const rnode = manifest.nodes.find((n) => n.id === rid)
     const rkind = kindOf(rnode)
-    removeComposeServices(system, ownedServices(rid, rkind))
+    removeComposeServices(system, ownedServices(rid, rkind, rnode))
     if (rkind === 'service') removeNginxRoute(system, rid)
     if (rkind === 'cdc') for (const k of kafkaIds) scrubProducerFromStreams(system, k, rid)
     // A removed service may consume topics on other clusters (consumer functions) — scrub its
     // consumer groups from each cluster's streams.json (the deleted node's own folder is removed
     // below, so a removed cluster's groups go with it).
     if (rkind === 'service') for (const k of kafkaIds) scrubConsumerFromStreams(system, k, rid)
+    // A websocket client's host pool script lives in ws-clients/, not a node folder.
+    if (rnode?.wsRole === 'client') removeWsClientScript(system, rid)
     removeScrapeJob(system, rid)
     scrubManifestNode(manifest, rid)
     fs.rmSync(path.join(systemDir(system), rid), { recursive: true, force: true })
@@ -414,15 +460,21 @@ export async function handleDelete(body) {
   pruneConsumers(system, removedIds)
   writeManifest(system, manifest)
 
-  const log = await rebuild(system, kind)
-  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds], log }
+  // A single deleted relay leaves the tier registry + haproxy.cfg stale — regenerate
+  // them from the registry now (before the compose reconcile), then have rebuild()
+  // restart the lb so it drops the removed server line (the cfg is a bind mount).
+  const wsLbToRestart = kind === 'websocket' && node?.wsRole === 'server' ? node.wsTier : null
+  if (wsLbToRestart) removeServerFromTier(system, wsLbToRestart, id)
+
+  const log = await rebuild(system, kind, wsLbToRestart)
+  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds], log }
 }
 
 // What still depends on `id`, for the GET probe and a fresh-manifest computation.
 function dependentsFor(system, manifest, node) {
   const kind = kindOf(node)
-  const { secondaryIds, cdcWorkerIds } = cascadeChildIds(manifest, node.id, kind, node)
-  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds]))
+  const { secondaryIds, cdcWorkerIds, wsChildIds } = cascadeChildIds(manifest, node.id, kind, node)
+  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds]))
 }
 
 export default function removeComponent() {

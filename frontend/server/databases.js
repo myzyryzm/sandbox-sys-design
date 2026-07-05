@@ -339,11 +339,11 @@ export function addComposeServices(system, services, name, label, by = 'Add data
 }
 
 // Append a scrape job to prometheus.yml, preserving its comments.
-export function addScrapeJob(system, scrapeJob, name, by = 'Add database') {
+export function addScrapeJob(system, scrapeJob, name, by = 'Add database', kind = 'Database') {
   const file = path.join(systemDir(system), 'prometheus', 'prometheus.yml')
   const doc = parseDocument(fs.readFileSync(file, 'utf8'))
   const node = doc.createNode(scrapeJob)
-  node.commentBefore = ` Database "${name}" — added by ${by}`
+  node.commentBefore = ` ${kind} "${name}" — added by ${by}`
   doc.addIn(['scrape_configs'], node)
   fs.writeFileSync(file, doc.toString())
 }

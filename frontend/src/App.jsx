@@ -7,6 +7,7 @@ import CreateService from './CreateService.jsx'
 import CreateExternalService from './CreateExternalService.jsx'
 import CreateClient from './CreateClient.jsx'
 import CreateEventStream from './CreateEventStream.jsx'
+import CreateWebsockets from './CreateWebsockets.jsx'
 import GrpcContractsModal from './GrpcContractsModal.jsx'
 import ModelsModal from './ModelsModal.jsx'
 import ConnectionResilienceModal from './ConnectionResilienceModal.jsx'
@@ -103,6 +104,7 @@ export default function App() {
   const [showCreateExternal, setShowCreateExternal] = useState(false)
   const [showCreateClient, setShowCreateClient] = useState(false)
   const [showCreateEventStream, setShowCreateEventStream] = useState(false)
+  const [showCreateWebsockets, setShowCreateWebsockets] = useState(false)
   const [showGrpcContracts, setShowGrpcContracts] = useState(false)
   const [showModels, setShowModels] = useState(false)
   const [connectionTarget, setConnectionTarget] = useState(null)
@@ -525,6 +527,9 @@ export default function App() {
         <button className="header-btn no-auto" onClick={() => setShowCreateEventStream(true)}>
           ＋ Add event stream
         </button>
+        <button className="header-btn no-auto" onClick={() => setShowCreateWebsockets(true)}>
+          ＋ Add WebSockets
+        </button>
         <button className="header-btn no-auto" onClick={() => setShowGrpcContracts(true)}>
           ＋ gRPC contract
         </button>
@@ -605,6 +610,9 @@ export default function App() {
       )}
       {showCreateEventStream && (
         <CreateEventStream systemId={SYSTEM_ID} onClose={() => setShowCreateEventStream(false)} />
+      )}
+      {showCreateWebsockets && (
+        <CreateWebsockets systemId={SYSTEM_ID} onClose={() => setShowCreateWebsockets(false)} />
       )}
       {showTest && (
         <TestPanel systemId={SYSTEM_ID} onClose={() => setShowTest(false)} />

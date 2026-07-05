@@ -18,6 +18,7 @@ import path from 'node:path'
 import { systemDir, isValidSystem, nextClientPosition } from './systems.js'
 import { bad, NAME_RE, readJsonBody } from './scaffold.js'
 import { scaffoldClientScript, removeClientScript } from './clientScript.js'
+import { removeWsClientScript } from './websockets.js'
 
 function readManifest(system) {
   return JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
@@ -64,11 +65,15 @@ function deleteClient(body) {
   const { system, id } = body
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
   const manifest = readManifest(system)
-  if (!findClient(manifest, id)) throw bad(`"${id}" is not a client in this system`)
+  const node = findClient(manifest, id)
+  if (!node) throw bad(`"${id}" is not a client in this system`)
   manifest.nodes = manifest.nodes.filter((n) => n.id !== id)
   manifest.edges = (manifest.edges || []).filter((e) => e.from !== id && e.to !== id)
   writeManifest(system, manifest)
-  removeClientScript(system, id) // drop its script (the shared lbclient.py stays)
+  // Drop its script: a websocket client's behavior is its host pool script in
+  // ws-clients/; an HTTP client's is its python module (the shared lbclient.py stays).
+  if (node.origin === 'create-websockets') removeWsClientScript(system, id)
+  else removeClientScript(system, id)
   return { ok: true, removed: id }
 }
 

@@ -26,6 +26,7 @@ function blankForm() {
   return {
     name: '',
     client_list: [{ client: '', method: '', intervalSeconds: 5 }],
+    websocket_list: [],
     failure_list: [],
     constraint_list: [],
   }
@@ -57,6 +58,12 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
   const validValues = new Set(methodOptions.map((o) => o.value))
   const noMethods = methodOptions.length === 0
 
+  // Websocket clients (pool scripts driven with a configurable client count).
+  const wsClientOptions = (manifest?.nodes || [])
+    .filter((n) => n.type === 'client' && n.origin === 'create-websockets')
+    .map((n) => n.id)
+  const noWsClients = wsClientOptions.length === 0
+
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/endtoend?system=${encodeURIComponent(systemId)}`)
@@ -82,6 +89,13 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
   const removeMethod = (i) =>
     setForm((f) => ({ ...f, client_list: f.client_list.filter((_, j) => j !== i) }))
 
+  const addWsPool = () =>
+    setForm((f) => ({ ...f, websocket_list: [...f.websocket_list, { client: wsClientOptions[0] || '', clientCount: 10, messagesPerSecond: 1 }] }))
+  const updateWsPool = (i, patch) =>
+    setForm((f) => ({ ...f, websocket_list: f.websocket_list.map((r, j) => (j === i ? { ...r, ...patch } : r)) }))
+  const removeWsPool = (i) =>
+    setForm((f) => ({ ...f, websocket_list: f.websocket_list.filter((_, j) => j !== i) }))
+
   const addCond = (key) => setForm((f) => ({ ...f, [key]: [...f[key], ''] }))
   const updateCond = (key, i, val) =>
     setForm((f) => ({ ...f, [key]: f[key].map((s, j) => (j === i ? val : s)) }))
@@ -97,6 +111,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
     setForm({
       name: p.name || '',
       client_list: (p.client_list || []).map((r) => ({ ...r })),
+      websocket_list: (p.websocket_list || []).map((r) => ({ ...r })),
       failure_list: [...(p.failure_list || [])],
       constraint_list: [...(p.constraint_list || [])],
     })
@@ -119,10 +134,27 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
     const client_list = form.client_list
       .filter((r) => r.client && r.method)
       .map((r) => ({ client: r.client, method: r.method, intervalSeconds: Number(r.intervalSeconds) }))
-    if (client_list.length === 0) return setError('Add at least one client method')
+    const websocket_list = form.websocket_list
+      .filter((r) => r.client)
+      .map((r) => ({
+        client: r.client,
+        clientCount: Number(r.clientCount),
+        messagesPerSecond: Number(r.messagesPerSecond) || 1,
+      }))
+    if (client_list.length === 0 && websocket_list.length === 0) {
+      return setError('Add at least one client method or websocket client pool')
+    }
     for (const r of client_list) {
       if (!Number.isInteger(r.intervalSeconds) || r.intervalSeconds < 1 || r.intervalSeconds > 60) {
         return setError(`Rate for ${r.client}.${r.method} must be a whole number of seconds between 1 and 60`)
+      }
+    }
+    for (const r of websocket_list) {
+      if (!Number.isInteger(r.clientCount) || r.clientCount < 1 || r.clientCount > 200) {
+        return setError(`Client count for ${r.client} must be a whole number between 1 and 200`)
+      }
+      if (!Number.isInteger(r.messagesPerSecond) || r.messagesPerSecond < 1 || r.messagesPerSecond > 20) {
+        return setError(`Messages/s for ${r.client} must be a whole number between 1 and 20`)
       }
     }
     const failure_list = form.failure_list.map((s) => s.trim()).filter(Boolean)
@@ -138,6 +170,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
           id: editingId || undefined,
           name,
           client_list,
+          websocket_list,
           failure_list,
           constraint_list,
         }),
@@ -269,6 +302,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
                   </span>
                   <span className="scenario-stepcount">
                     {(p.client_list || []).length} method{(p.client_list || []).length === 1 ? '' : 's'}
+                    {(p.websocket_list || []).length ? ` · ${p.websocket_list.length} ws pool${p.websocket_list.length === 1 ? '' : 's'}` : ''}
                     {(p.failure_list || []).length ? ` · ${p.failure_list.length} fail` : ''}
                     {(p.constraint_list || []).length ? ` · ${p.constraint_list.length} constraint` : ''}
                   </span>
@@ -382,6 +416,58 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
                     />
                     <span className="grpc-optional">s</span>
                     <button type="button" className="link-danger" onClick={() => removeMethod(i)} disabled={busy}>×</button>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* websocket_list */}
+            <div className="form-section">
+              <div className="form-section-head">
+                <span>WebSocket clients <em className="grpc-optional">(pool size to keep connected + messages/s each)</em></span>
+                <button type="button" onClick={addWsPool} disabled={busy || noWsClients}>+ ws pool</button>
+              </div>
+              {noWsClients && form.websocket_list.length === 0 && (
+                <p className="sim-desc">No websocket clients exist yet — add a websocket tier (＋ Add WebSockets) first.</p>
+              )}
+              {form.websocket_list.map((r, i) => {
+                const stale = r.client && !wsClientOptions.includes(r.client)
+                return (
+                  <div className="field-row" key={i}>
+                    <select
+                      value={r.client}
+                      disabled={busy}
+                      onChange={(e) => updateWsPool(i, { client: e.target.value })}
+                    >
+                      <option value="">— pick a websocket client —</option>
+                      {stale && <option value={r.client}>{r.client} (missing)</option>}
+                      {wsClientOptions.map((id) => (
+                        <option key={id} value={id}>{id}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={r.clientCount}
+                      disabled={busy}
+                      onChange={(e) => updateWsPool(i, { clientCount: e.target.value })}
+                      title="how many pool clients to spawn"
+                      style={{ width: 70 }}
+                    />
+                    <span className="grpc-optional">clients</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={r.messagesPerSecond}
+                      disabled={busy}
+                      onChange={(e) => updateWsPool(i, { messagesPerSecond: e.target.value })}
+                      title="messages per second each client sends"
+                      style={{ width: 60 }}
+                    />
+                    <span className="grpc-optional">msg/s</span>
+                    <button type="button" className="link-danger" onClick={() => removeWsPool(i)} disabled={busy}>×</button>
                   </div>
                 )
               })}

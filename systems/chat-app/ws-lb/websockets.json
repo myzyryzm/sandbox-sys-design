@@ -1,0 +1,15 @@
+{
+  "lb": "ws-lb",
+  "algorithm": "leastconn",
+  "hostPort": 8090,
+  "wsPort": 8080,
+  "statsPort": 8405,
+  "metricsPort": 9100,
+  "servers": [
+    "ws-server-1",
+    "ws-server-2"
+  ],
+  "bus": "ws-bus",
+  "presence": "ws-presence",
+  "client": "ws-client"
+}

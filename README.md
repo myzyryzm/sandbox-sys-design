@@ -194,6 +194,7 @@ The header shows the system name/id and a row of top-level actions. Left to righ
 | **＋ Add client** | Add a multi-step caller (no container), drawn left of the boundary. |
 | **＋ Add database** | Provision Postgres / MongoDB / Redis / MinIO (+ exporter). |
 | **＋ Add event stream** | Provision a single-broker Kafka cluster (+ exporter). |
+| **＋ Add WebSockets** | Provision a whole websocket tier: haproxy L4 lb + N `ws` relay servers + redis pub/sub bus + redis presence cache + a host-run client pool. |
 | **＋ gRPC contract** | Open the gRPC contract bank (define / upload `.proto` contracts). |
 | **＋ Models** | Open the model bank (reusable TypeScript interfaces). |
 | **🗒 Queue** | Show the edit queue — pending Claude sessions run one at a time. |
@@ -621,6 +622,48 @@ A cluster also has a **pause** toggle (`consumersPaused`) that consumer loops re
 `GET/POST /api/consumers`, `PUT /api/consumers` (rename), `DELETE /api/consumers`;
 `GET /api/event-stream`, `POST /api/event-stream` (topic schema / pause),
 `POST /api/event-streams` (create cluster).
+
+---
+
+## WebSockets (an L4-balanced real-time tier)
+
+Click **"＋ Add WebSockets"** to provision a complete websocket tier in one mechanical
+POST (`POST /api/websockets` — no launched session; the server code is a deterministic
+template). For a tier named `ws` you get, in one shot:
+
+- **`ws-lb`** — an **haproxy L4 (`mode tcp`) load balancer** publishing host port
+  **8090**, with a selectable algorithm (**least connections** default, round robin,
+  source hash). Its native Prometheus exporter (`:8405`, scraped over the docker
+  network) gives the diagram total sessions, conns/s, servers-up — and **per-server
+  live session counts**, so you can watch leastconn balance in real time.
+- **`ws-server-1..N`** (count picked in the modal, default 2) — **Node.js `ws` relay
+  servers** (template: `frontend/server/templates/websocket/server/`). Each keeps a
+  local `clientId → connection` map, routes frames by recipient — local delivery, or a
+  hop over the **pub/sub bus** to the recipient's server (`server:<id>` channels) —
+  heartbeats clients every 30s, and self-instruments ws-native metrics with
+  `prom-client` (`ws_connections`, msgs in/s, local/s vs remote/s deliveries, drops,
+  delivery-latency histogram).
+- **`ws-bus`** + **`ws-presence`** — two redis nodes (+ `redis_exporter` sidecars):
+  the cross-server pub/sub bus, and the presence cache mapping
+  `presence:<clientId> → serverId` (TTL 60s, refreshed on heartbeat pongs). Both
+  selectors in the modal are dropdowns locked to **redis** today, ready to grow.
+- **`ws-client`** — a container-less `client` node whose behavior is a **host-run pool
+  script** `systems/<id>/ws-clients/ws-client.mjs` (node ≥ 22, zero npm deps — uses the
+  built-in `WebSocket`, mirroring the stdlib-only `lbclient.py` convention). It spawns
+  `--count N` clients that message random peers at `--rate` msgs/s for `--duration`
+  seconds, dedupe by `msgId`, and print one `__WS_RESULTS__ {spawned, connected, sent,
+  delivered, duplicates, errors, latencyMs}` line — also runnable via
+  `POST /api/websockets/run { system, client, count, durationSeconds, rate }`.
+
+The tier registry `systems/<id>/<lb>/websockets.json` (algorithm + server list + ports)
+is the durable source `haproxy.cfg` is rendered from. Tier membership lives on the
+manifest nodes (`wsTier`/`wsRole`, origin `create-websockets`): deleting the **lb
+cascades the whole tier**; a single server is individually deletable (the cfg is
+regenerated + the lb restarted); the two redis nodes are delete-blocked while servers
+depend on them. One tier per system today. In **end-to-end processes**, `websocket_list`
+rows (`{ client, clientCount, messagesPerSecond }`) make the **number of clients to
+spawn** a per-process test variable. Backend: `frontend/server/websockets.js`; skill:
+`sandbox-websocket`.
 
 ---
 

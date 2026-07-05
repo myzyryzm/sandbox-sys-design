@@ -53,8 +53,10 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     // Calls tab traces like any other call.
     tabs.push({ id: 'endpoints', label: 'Endpoints' })
     tabs.push({ id: 'calls', label: 'Calls' })
-  } else if (isClient) {
+  } else if (isClient && node.origin !== 'create-websockets') {
     // A client serves nothing and has no container — just its own multi-step functions.
+    // A websocket client's behavior is its generated host pool script (ws-clients/<id>.mjs),
+    // not python `lb` functions, so it skips the Functions tab (Delete only).
     tabs.push({ id: 'functions', label: 'Functions', Component: ClientScenarioTab })
   } else if (isDatabase) {
     tabs.push({ id: 'schema', label: isSecondary ? 'Replica' : 'Schema' })

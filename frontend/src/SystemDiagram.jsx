@@ -93,15 +93,17 @@ function isLB(node) {
   return node.type === 'load_balancer'
 }
 
-// Services (incl. the base service-1), external services, clients, databases, and
-// event streams can be torn down; the LB (and any other infra) cannot.
+// Services (incl. the base service-1), external services, clients, databases,
+// event streams, and websocket-tier nodes can be torn down; the nginx LB (and any
+// other infra) cannot. Deleting a websocket tier's own lb cascades the whole tier.
 function isDeletable(node) {
   return (
     node.type === 'service' ||
     node.type === 'external_service' ||
     node.type === 'client' ||
     node.origin === 'create-database' ||
-    node.origin === 'create-event-stream'
+    node.origin === 'create-event-stream' ||
+    node.origin === 'create-websockets'
   )
 }
 
