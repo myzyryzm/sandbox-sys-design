@@ -23,6 +23,7 @@ import grpc from './server/grpc.js'
 import createReplica from './server/replicas.js'
 import cdc from './server/cdc.js'
 import resilience from './server/resilience.js'
+import connectionPool from './server/connectionPool.js'
 import outage from './server/outage.js'
 import layout from './server/layout.js'
 import endtoend from './server/endtoend.js'
@@ -67,7 +68,7 @@ function serveSystems() {
 }
 
 export default defineConfig({
-  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), simulate(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), outage(), layout(), endtoend(), websockets(), prometheusNodePlugin()],
+  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), simulate(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), prometheusNodePlugin()],
   server: {
     proxy: {
       // Browser -> /api/prometheus/api/v1/query?...  proxied to Prometheus.

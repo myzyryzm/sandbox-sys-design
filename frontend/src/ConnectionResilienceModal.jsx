@@ -17,10 +17,13 @@ const RETRY_STRATEGIES = [
   { value: 'exponential_backoff_jitter', label: 'exponential backoff + jitter' },
 ]
 
-// Defaults match the brief's example policy; an existing policy (re-open) wins.
-function initialState(initial) {
+// Defaults match the brief's example policy; an existing policy (re-open) wins. The
+// connection pool defaults OFF (unlike breaker/retry) so opening a resilience-only edge
+// doesn't imply a pool; an existing pool block seeds the fields.
+function initialState(initial, initialPool) {
   const cb = initial?.circuit_breaker || {}
   const rt = initial?.retry || {}
+  const pool = initialPool || {}
   return {
     cbEnabled: cb.enabled ?? true,
     failure_threshold: String(cb.failure_threshold ?? 5),
@@ -33,7 +36,12 @@ function initialState(initial) {
     strategy: rt.strategy || 'exponential_backoff_jitter',
     base_delay_seconds: String(rt.base_delay_seconds ?? 0.5),
     max_delay_seconds: String(rt.max_delay_seconds ?? 8),
-    instruction: initial?.instruction || '',
+    poolEnabled: pool.enabled ?? false,
+    max_connections: String(pool.max_connections ?? 10),
+    min_idle: String(pool.min_idle ?? 2),
+    idle_timeout_seconds: String(pool.idle_timeout_seconds ?? 30),
+    max_lifetime_seconds: String(pool.max_lifetime_seconds ?? 1800),
+    instruction: initial?.instruction || initialPool?.instruction || '',
   }
 }
 
@@ -82,8 +90,52 @@ function buildResiliencePrompt({ systemId, from, to, firstAttach, circuit_breake
   ].join('\n')
 }
 
-export default function ConnectionResilienceModal({ systemId, from, to, initial, onClose, onLaunch }) {
-  const [f, setF] = useState(() => initialState(initial))
+function buildConnectionPoolPrompt({ systemId, from, to, firstAttach, pool, instruction }) {
+  const summary = `max ${pool.max_connections} connections, min ${pool.min_idle} idle, reap an idle connection after ${pool.idle_timeout_seconds}s, recycle a connection after ${pool.max_lifetime_seconds}s`
+  return [
+    `Use the sandbox-connection-pool skill to apply a connection pool on the "${systemId}" system.`,
+    ``,
+    `Connection: ${from} -> ${to}  (label "${from}->${to}")`,
+    `The pool config is ALREADY written to systems/${systemId}/manifest.json under`,
+    `edges[] where from="${from}" and to="${to}" (the "connection_pool" block). Read it from there —`,
+    `do NOT rewrite it.`,
+    ``,
+    `Pool summary:`,
+    `  ${summary}`,
+    ``,
+    firstAttach
+      ? [
+          `This is the FIRST pooled connection on "${from}", so wire it up:`,
+          `1. Replace ${from}'s per-request connection to ${to} with a module-level shared pool sized`,
+          `   from the manifest (read the connection_pool block at STARTUP, keyed by SERVICE_ID + to="${to}"):`,
+          `   - postgres: psycopg_pool.ConnectionPool(min_size=min_idle, max_size=max_connections,`,
+          `     max_idle=idle_timeout_seconds, max_lifetime=max_lifetime_seconds); use "with pool.connection()".`,
+          `   - mongodb: pass maxPoolSize/minPoolSize/maxIdleTimeMS to MongoClient (no max_lifetime equiv —`,
+          `     note it).`,
+          `   - service->service HTTP: one shared httpx.Client(limits=httpx.Limits(max_connections=...,`,
+          `     max_keepalive_connections=min_idle, keepalive_expiry=idle_timeout_seconds)); max_lifetime is`,
+          `     not supported by httpx — document that, don't fake it.`,
+          `2. Export pool gauges (connection_pool_max/active/idle, labeled connection="${from}->${to}") on`,
+          `   ${from}'s existing /metrics, and add GET /pool/state returning live {to,max,active,idle}.`,
+          `3. Mount manifest.json (read-only) + set SERVICE_ID in docker-compose (idempotent — may already`,
+          `   be set for resilience/gRPC), then rebuild ONLY ${from}:`,
+          `   docker compose -f systems/${systemId}/docker-compose.yml up -d --build ${from}`,
+        ].join('\n')
+      : [
+          `"${from}" already has a connection pool wired. Pool sizes are set when the pool is CREATED, so`,
+          `this is NOT a no-op like a breaker-threshold edit: confirm ${from} routes its call to ${to}`,
+          `through the shared pool (wire that call site if it isn't yet), keep the connection="${from}->${to}"`,
+          `gauges + /pool/state, then REBUILD/RESTART ${from} so the new sizes take effect:`,
+          `   docker compose -f systems/${systemId}/docker-compose.yml up -d --build ${from}`,
+        ].join('\n'),
+    ``,
+    `Notes / intent:`,
+    (instruction || '').trim() || '(none given)',
+  ].join('\n')
+}
+
+export default function ConnectionResilienceModal({ systemId, from, to, initial, initialPool, poolEligible = true, onClose, onLaunch }) {
+  const [f, setF] = useState(() => initialState(initial, initialPool))
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
 
@@ -92,11 +144,20 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
 
   async function submit() {
     setError(null)
-    if (!f.cbEnabled && !f.rtEnabled) {
-      return setError('Enable circuit breaking and/or retry (or close to leave it unset).')
+    const resilienceRequested = f.cbEnabled || f.rtEnabled
+    const poolRequested = poolEligible && f.poolEnabled
+    if (!resilienceRequested && !poolRequested) {
+      return setError('Enable circuit breaking, retry, and/or a connection pool (or close to leave it unset).')
     }
     if (f.cbEnabled && f.open_behavior === 'fallback' && !f.fallback_response.trim()) {
       return setError('Provide a fallback response (served while the breaker is OPEN).')
+    }
+    if (poolRequested) {
+      const maxC = Number(f.max_connections)
+      const minI = Number(f.min_idle)
+      if (!(maxC >= 1)) return setError('Max connections must be at least 1.')
+      if (!(minI >= 0)) return setError('Min idle must be 0 or more.')
+      if (minI > maxC) return setError('Min idle must be ≤ max connections.')
     }
 
     const circuit_breaker = f.cbEnabled
@@ -119,25 +180,54 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
         }
       : { enabled: false }
 
-    const conversationId = crypto.randomUUID()
-    const body = { system: systemId, from, to, circuit_breaker, retry, instruction: f.instruction, conversationId }
     setBusy(true)
     try {
-      const res = await fetch('/api/connection-resilience', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      onLaunch({
-        sessionId: conversationId,
-        mode: 'new',
-        prompt: buildResiliencePrompt({
-          systemId, from, to, firstAttach: data.firstAttach,
-          circuit_breaker, retry, instruction: f.instruction,
-        }),
-      }, { kind: 'resilience', target: `${from}→${to}`, title: 'policy' })
+      // Resilience (circuit breaker + retry) — unchanged flow.
+      if (resilienceRequested) {
+        const conversationId = crypto.randomUUID()
+        const res = await fetch('/api/connection-resilience', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ system: systemId, from, to, circuit_breaker, retry, instruction: f.instruction, conversationId }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        onLaunch({
+          sessionId: conversationId,
+          mode: 'new',
+          prompt: buildResiliencePrompt({
+            systemId, from, to, firstAttach: data.firstAttach,
+            circuit_breaker, retry, instruction: f.instruction,
+          }),
+        }, { kind: 'resilience', target: `${from}→${to}`, title: 'policy' })
+      }
+
+      // Connection pool — its own config write + session (queue serializes them).
+      if (poolRequested) {
+        const connection_pool = {
+          enabled: true,
+          max_connections: Number(f.max_connections),
+          min_idle: Number(f.min_idle),
+          idle_timeout_seconds: Number(f.idle_timeout_seconds),
+          max_lifetime_seconds: Number(f.max_lifetime_seconds),
+        }
+        const conversationId = crypto.randomUUID()
+        const res = await fetch('/api/connection-pool', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ system: systemId, from, to, connection_pool, instruction: f.instruction, conversationId }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        onLaunch({
+          sessionId: conversationId,
+          mode: 'new',
+          prompt: buildConnectionPoolPrompt({
+            systemId, from, to, firstAttach: data.firstAttach,
+            pool: connection_pool, instruction: f.instruction,
+          }),
+        }, { kind: 'connection-pool', target: `${from}→${to}`, title: 'pool' })
+      }
       onClose()
     } catch (err) {
       setBusy(false)
@@ -149,14 +239,13 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
     <div className="modal-overlay" onClick={busy ? undefined : onClose}>
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <header className="modal-head">
-          <h2>Resilience · <code>{from}</code> → <code>{to}</code></h2>
+          <h2>Connection · <code>{from}</code> → <code>{to}</code></h2>
           <button className="modal-close" onClick={onClose} disabled={busy}>✕</button>
         </header>
 
         <p className="sim-desc">
-          Wrap this connection's outbound call with a circuit breaker and/or retry. The policy is
-          stored on the connection and read by a shared wrapper at runtime — editing thresholds
-          later needs no rebuild.
+          Configure this connection's outbound call: a circuit breaker and/or retry (read by a shared
+          wrapper at runtime — editing thresholds needs no rebuild){poolEligible ? ', and a connection pool sized from the manifest' : ''}.
         </p>
 
         {/* Circuit breaker */}
@@ -225,6 +314,40 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
             </>
           )}
         </div>
+
+        {/* Connection pool — internal targets only (external services sit outside the boundary). */}
+        {poolEligible && (
+          <div className="form-section">
+            <label className="res-section-head">
+              <input type="checkbox" checked={f.poolEnabled} onChange={toggle('poolEnabled')} disabled={busy} />
+              <span>Connection pool</span>
+            </label>
+            {f.poolEnabled && (
+              <>
+                <label className="form-row">
+                  <span>Max connections</span>
+                  <input type="number" min="1" step="1" value={f.max_connections} onChange={set('max_connections')} disabled={busy} />
+                </label>
+                <label className="form-row">
+                  <span>Min idle</span>
+                  <input type="number" min="0" step="1" value={f.min_idle} onChange={set('min_idle')} disabled={busy} />
+                </label>
+                <label className="form-row">
+                  <span>Idle timeout (s)</span>
+                  <input type="number" min="1" step="1" value={f.idle_timeout_seconds} onChange={set('idle_timeout_seconds')} disabled={busy} />
+                </label>
+                <label className="form-row">
+                  <span>Max lifetime (s)</span>
+                  <input type="number" min="1" step="1" value={f.max_lifetime_seconds} onChange={set('max_lifetime_seconds')} disabled={busy} />
+                </label>
+                <p className="sim-desc" style={{ margin: '6px 0 0' }}>
+                  Pool sizes are set when the connection is created, so changing them rebuilds/restarts{' '}
+                  <code>{from}</code> (unlike breaker/retry thresholds).
+                </p>
+              </>
+            )}
+          </div>
+        )}
 
         <label className="form-row">
           <span>Notes</span>
