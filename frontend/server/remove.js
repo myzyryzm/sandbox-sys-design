@@ -14,6 +14,7 @@ import { promisify } from 'node:util'
 import { parseDocument } from 'yaml'
 import { repoRoot, systemsDir, systemDir, isValidSystem } from './systems.js'
 import { removeWsClientScript } from './websockets.js'
+import { removeClientScript } from './clientScript.js'
 
 const pexec = promisify(execFile)
 
@@ -444,7 +445,12 @@ export async function handleDelete(body) {
     // below, so a removed cluster's groups go with it).
     if (rkind === 'service') for (const k of kafkaIds) scrubConsumerFromStreams(system, k, rid)
     // A websocket client's host pool script lives in ws-clients/, not a node folder.
-    if (rnode?.wsRole === 'client') removeWsClientScript(system, rid)
+    // It may ALSO own an authorable HTTP-function script in clients/ (like any client) —
+    // remove both, so a recreated same-name tier doesn't inherit stale functions.
+    if (rnode?.wsRole === 'client') {
+      removeWsClientScript(system, rid)
+      removeClientScript(system, rid)
+    }
     removeScrapeJob(system, rid)
     scrubManifestNode(manifest, rid)
     fs.rmSync(path.join(systemDir(system), rid), { recursive: true, force: true })

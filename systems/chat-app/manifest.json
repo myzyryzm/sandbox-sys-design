@@ -9,8 +9,8 @@
       "label": "nginx LB",
       "type": "load_balancer",
       "position": {
-        "x": 1462,
-        "y": 1050
+        "x": 1364,
+        "y": 1078
       },
       "metrics": []
     },
@@ -168,7 +168,7 @@
       "wsTier": "ws-lb",
       "position": {
         "x": 2273,
-        "y": 1344
+        "y": 1444
       },
       "metrics": [
         {
@@ -263,8 +263,8 @@
       "type": "mongodb",
       "origin": "create-database",
       "position": {
-        "x": 2406,
-        "y": 1557
+        "x": 2008,
+        "y": 1061
       },
       "metrics": [
         {
@@ -294,6 +294,52 @@
       "schemaModels": [
         "Notification"
       ]
+    },
+    {
+      "id": "notification-service",
+      "label": "notification-service",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 1678,
+        "y": 1053
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"notification-service\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"notification-service\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"notification-service\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"notification-service\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"notification-service\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"notification-service\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
     }
   ],
   "edges": [

@@ -35,5 +35,10 @@ scrape_configs:
     {
         job_name: notification-db,
         static_configs: [ { targets: [ notification-db-exporter:9216 ] } ]
+      },
+    # Service "notification-service" — added by Add service
+    {
+        job_name: notification-service,
+        static_configs: [ { targets: [ notification-service:8000 ] } ]
       }
   ]

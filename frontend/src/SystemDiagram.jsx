@@ -675,7 +675,7 @@ export default function SystemDiagram({
   if (ft && ft.wsBuiltin) {
     // A ws pool client's builtin method has no authored steps — trace the TIER path
     // instead: client → its L4 lb → each relay server → the bus + presence redis.
-    // Both methods (spawnAndSend / onReceive) share it: messages traverse the same
+    // Both methods (send / onReceive) share it: messages traverse the same
     // path in each direction. Derived from the manifest's wsTier/wsRole fields, so
     // there's nothing to go stale.
     const tierId = byId[ft.client]?.wsTier

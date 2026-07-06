@@ -207,17 +207,20 @@ export function setInternalRoutes(system, rules) {
   return true
 }
 
-// Validate and hot-reload the lb's nginx config (no rebuild) — used after an internal-route
-// change. Throws (surfacing nginx's own output) if the new config is invalid or the lb
-// container isn't running.
+// Reload the lb's nginx config (no image rebuild) — used after an internal-route change.
+// Recreates the lb rather than `nginx -s reload`: nginx.conf is a single-file bind mount,
+// and on macOS Docker Desktop the container pins a stale inode, so a reload would re-read
+// the OLD config and the change would silently not take effect. Recreating re-resolves the
+// mount to the current file; `nginx -t` then validates the fresh container and surfaces
+// nginx's own output if the new config is invalid.
 export async function reloadNginx(system) {
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
   const opts = { cwd: repoRoot, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 }
-  const run = (...args) => pexec('docker', ['compose', '-f', compose, 'exec', '-T', 'lb', ...args], opts)
+  const run = (...args) => pexec('docker', ['compose', '-f', compose, ...args], opts)
   try {
-    await run('nginx', '-t')
-    const r = await run('nginx', '-s', 'reload')
-    return r.stdout + r.stderr
+    const up = await run('up', '-d', '--force-recreate', 'lb')
+    const t = await run('exec', '-T', 'lb', 'nginx', '-t')
+    return up.stdout + up.stderr + t.stdout + t.stderr
   } catch (err) {
     const detail = `${err.stdout || ''}${err.stderr || ''}` || err.message
     throw new HttpError(500, `nginx reload failed:\n${detail}`)
@@ -237,8 +240,9 @@ export function addManifestNode(system, manifest, node) {
 }
 
 // Frontend-safe rebuild: build just <name>, bring the stack up (creating the new
-// container, leaving the rest running), reload nginx for the new /<name>/ route, and
-// restart prometheus so the appended scrape job is picked up. NEVER ./start.sh.
+// container, leaving the rest running), recreate the lb so it picks up the new
+// /<name>/ route, and restart prometheus so the appended scrape job is picked up.
+// NEVER ./start.sh.
 export async function rebuild(system, name) {
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
   const opts = { cwd: repoRoot, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 }
@@ -248,8 +252,16 @@ export async function rebuild(system, name) {
     log += b.stdout + b.stderr
     const up = await pexec('docker', ['compose', '-f', compose, 'up', '-d'], opts)
     log += up.stdout + up.stderr
-    const ng = await pexec('docker', ['compose', '-f', compose, 'exec', '-T', 'lb', 'nginx', '-s', 'reload'], opts)
+    // Recreate the lb rather than `nginx -s reload`: nginx.conf is a single-file bind
+    // mount, and on macOS Docker Desktop the container pins a stale inode, so a reload
+    // re-reads the OLD config (route never lands, or worse, a truncated file fails to
+    // load). Recreating re-resolves the mount to the current nginx.conf; `nginx -t`
+    // then confirms the fresh container came up with a valid config (and surfaces the
+    // error if it didn't).
+    const ng = await pexec('docker', ['compose', '-f', compose, 'up', '-d', '--force-recreate', 'lb'], opts)
     log += ng.stdout + ng.stderr
+    const ngt = await pexec('docker', ['compose', '-f', compose, 'exec', '-T', 'lb', 'nginx', '-t'], opts)
+    log += ngt.stdout + ngt.stderr
     const r = await pexec('docker', ['compose', '-f', compose, 'restart', 'prometheus'], opts)
     log += r.stdout + r.stderr
   } catch (err) {

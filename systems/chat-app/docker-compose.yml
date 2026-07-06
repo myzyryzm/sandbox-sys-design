@@ -99,3 +99,6 @@ services:
       - --compatible-mode
     depends_on:
       - notification-db
+  notification-service:
+    # Service "notification-service" — added by Add service (generic FastAPI backend)
+    build: ./notification-service

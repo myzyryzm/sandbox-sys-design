@@ -19,7 +19,7 @@
 //        tier per system today), the client pool's last-run delivery stats (from
 //        ws-clients/<client>.stats.json, written by the pool script itself on every
 //        run regardless of driver — or null when it has never run), and the static
-//        descriptor of the pool client's two BUILT-IN methods (spawnAndSend /
+//        descriptor of the pool client's two BUILT-IN methods (send /
 //        onReceive: names, args with defaults+bounds, summaries). The methods are not
 //        editable or deletable and only end-to-end processes invoke them — the UI
 //        renders them read-only.
@@ -93,7 +93,7 @@ const MAX_RATE = 20
 // only end-to-end processes invoke them (via their websocket pool rows).
 const CLIENT_METHODS = [
   {
-    name: 'spawnAndSend',
+    name: 'send',
     builtin: true,
     summary:
       'spawn N pool clients that connect through the L4 load balancer; each sends messages to random peers at the given rate for the duration, then reports delivery stats',

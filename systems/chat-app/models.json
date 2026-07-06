@@ -6,6 +6,20 @@
       "description": "",
       "createdAt": "2026-07-05T23:24:11.671Z",
       "updatedAt": "2026-07-05T23:24:11.671Z"
+    },
+    {
+      "name": "GetNotificationsRequest",
+      "ts": "interface GetNotificationsRequest {\n  id: string;\n}",
+      "description": "",
+      "createdAt": "2026-07-06T15:05:11.673Z",
+      "updatedAt": "2026-07-06T15:05:11.673Z"
+    },
+    {
+      "name": "GetNotifcationsResponse",
+      "ts": "interface GetNotifcationsResponse {\n  notifications: Notification[];\n}\n",
+      "description": "",
+      "createdAt": "2026-07-06T15:05:19.464Z",
+      "updatedAt": "2026-07-06T15:05:19.464Z"
     }
   ]
 }

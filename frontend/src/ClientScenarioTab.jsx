@@ -24,6 +24,11 @@ import { buildScenarioFunctionPrompt } from './scenarioBank.js'
 const ARG_TYPES = ['string', 'number', 'boolean']
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+// A websocket pool client already shows two built-in method rows (see websockets.js
+// CLIENT_METHODS) on the same diagram node as its authored HTTP functions — reserve
+// those names so an authored function can't produce a colliding, ambiguous row.
+const WS_BUILTIN_NAMES = ['send', 'onReceive']
+
 function blankForm() {
   return { name: '', args: [], description: '' }
 }
@@ -122,6 +127,9 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
       if (!name) return setError('Function name is required')
       if (!IDENT_RE.test(name)) {
         return setError('Function name must start with a letter or underscore and use only letters, digits and underscores')
+      }
+      if (node.origin === 'create-websockets' && WS_BUILTIN_NAMES.includes(name)) {
+        return setError(`"${name}" is a built-in websocket method — choose a different name`)
       }
       if ((functions || []).some((f) => f.name === name)) {
         return setError(`a function named "${name}" already exists`)

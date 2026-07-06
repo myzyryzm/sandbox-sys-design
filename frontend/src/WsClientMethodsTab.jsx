@@ -15,7 +15,7 @@ import { useEffect, useState } from 'react'
 // Shown until /api/websockets answers (and if an older backend omits clientMethods).
 const FALLBACK_METHODS = [
   {
-    name: 'spawnAndSend',
+    name: 'send',
     builtin: true,
     summary:
       'spawn N pool clients that connect through the L4 load balancer; each sends messages to random peers at the given rate for the duration, then reports delivery stats',

@@ -514,22 +514,26 @@ export default function App() {
 
   // Group the live functions registry by owner client into the function objects (with steps)
   // the diagram renders as rows + traces. Only clients own functions (external services don't).
-  // A websocket client's rows are its pool script's BUILTIN methods (from /api/websockets),
-  // synthesized here — NOT injected into `scenarios`, so the end-to-end modal's client_list
-  // method dropdown (built from `scenarios`) stays real-functions-only.
+  // A websocket client's rows are its pool script's BUILTIN ws methods (from /api/websockets,
+  // synthesized here and traced along the tier path) PLUS — like any client — its own
+  // authorable HTTP functions (from `scenarios`, traced client → LB → services). The builtin
+  // methods are NOT injected into `scenarios`, so the end-to-end modal's client_list method
+  // dropdown (built from `scenarios`) lists only a client's real HTTP functions.
   const clientFunctions = {}
   for (const n of manifest.nodes || []) {
     if (n.type !== 'client') continue
+    const own = scenarios.filter((f) => f.client === n.id)
     if (n.origin === 'create-websockets') {
-      clientFunctions[n.id] = (wsInfo?.clientMethods || []).map((m) => ({
+      const builtin = (wsInfo?.clientMethods || []).map((m) => ({
         client: n.id,
         name: m.name,
         args: m.args || [],
         wsBuiltin: true,
       }))
+      clientFunctions[n.id] = [...builtin, ...own]
       continue
     }
-    clientFunctions[n.id] = scenarios.filter((f) => f.client === n.id)
+    clientFunctions[n.id] = own
   }
 
   // The ws pool client's last-run delivery stats, keyed by its node id for the diagram.
