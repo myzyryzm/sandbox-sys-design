@@ -31,6 +31,10 @@ export default function ConfirmDelete({ systemId, node, manifest, onClose, embed
   // down through its own endpoint. Everything else goes through the docker-aware
   // /api/delete (remove.js). Nothing depends on a client, so it skips the probe.
   const isClient = node.type === 'client'
+  // Prometheus is a VISUAL toggle: its Delete removes only the diagram node + self-scrape
+  // via /api/prom-node; the shared container stays up. Nothing depends on it, so like a
+  // client it skips the dependents probe.
+  const isPrometheus = node.type === 'prometheus'
 
   // Websocket tier members (servers, bus, presence, the pool client) are never
   // individually deletable — the whole tier goes away via its lb's cascade.
@@ -42,7 +46,7 @@ export default function ConfirmDelete({ systemId, node, manifest, onClose, embed
 
   // Probe dependents up front (read-only) so we can warn before the user clicks.
   useEffect(() => {
-    if (isClient || isWsTierMember) return
+    if (isClient || isPrometheus || isWsTierMember) return
     let live = true
     setChecking(true)
     fetch(`/api/dependents?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(node.id)}`)
@@ -51,7 +55,7 @@ export default function ConfirmDelete({ systemId, node, manifest, onClose, embed
       .catch(() => { if (live) setDependents([]) })
       .finally(() => { if (live) setChecking(false) })
     return () => { live = false }
-  }, [systemId, node.id, isClient, isWsTierMember])
+  }, [systemId, node.id, isClient, isPrometheus, isWsTierMember])
 
   const blocked = dependents.length > 0
 
@@ -59,11 +63,14 @@ export default function ConfirmDelete({ systemId, node, manifest, onClose, embed
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(isClient ? '/api/clients' : '/api/delete', {
-        method: isClient ? 'DELETE' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ system: systemId, id: node.id }),
-      })
+      const res = await fetch(
+        isClient ? '/api/clients' : isPrometheus ? '/api/prom-node' : '/api/delete',
+        {
+          method: isClient || isPrometheus ? 'DELETE' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ system: systemId, id: node.id }),
+        },
+      )
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data.ok) {
         // A blocked-delete 400 carries the dependent list — surface it like the probe.
@@ -103,7 +110,11 @@ export default function ConfirmDelete({ systemId, node, manifest, onClose, embed
   ) : (
     <>
       <p className="sim-desc">
-        {isClient ? (
+        {isPrometheus ? (
+          <>This removes the <strong>Prometheus</strong> node from the diagram (and its self-scrape).
+          The container keeps running — every node's metrics just read <em>“no metrics”</em> until you
+          add Prometheus back from <strong>＋ Add</strong>.</>
+        ) : isClient ? (
           <>This removes <strong>{node.label}</strong> and its scenario from the diagram. This can't be undone.</>
         ) : blocked ? (
           <><strong>{node.label}</strong> can't be deleted — {dependents.length} call

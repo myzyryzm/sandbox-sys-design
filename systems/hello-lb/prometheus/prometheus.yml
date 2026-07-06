@@ -7,4 +7,7 @@ scrape_configs:
   # metrics reflect the service itself. `service-1:8000` resolves on the compose
   # network. The job name is the service id, which the manifest's health/metric
   # queries key off of: up{job="service-1"}. "Add service" appends a job here.
-  []
+  [
+    # prometheus — self-scrape (Prometheus node on the diagram)
+    { job_name: prometheus, static_configs: [ { targets: [ prometheus:9090 ] } ] }
+  ]

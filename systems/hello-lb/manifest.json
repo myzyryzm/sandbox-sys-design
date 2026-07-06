@@ -13,6 +13,51 @@
         "y": 160
       },
       "metrics": []
+    },
+    {
+      "id": "prometheus",
+      "label": "Prometheus",
+      "type": "prometheus",
+      "origin": "create-prometheus",
+      "position": {
+        "x": 80,
+        "y": 160
+      },
+      "metrics": [
+        {
+          "label": "targets up",
+          "query": "sum(up)",
+          "unit": ""
+        },
+        {
+          "label": "series",
+          "query": "prometheus_tsdb_head_series",
+          "unit": ""
+        },
+        {
+          "label": "ingest",
+          "query": "rate(prometheus_tsdb_head_samples_appended_total[1m])",
+          "unit": "/s"
+        },
+        {
+          "label": "api req",
+          "query": "sum(rate(prometheus_http_requests_total[1m]))",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "up{job=\"prometheus\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
     }
   ],
   "edges": []
