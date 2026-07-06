@@ -15,10 +15,15 @@
   "methods": {
     "onMessage": {
       "base": "Base (fixed): a client frame arrives; ws_messages_received_total is bumped, the frame is parsed and routed to msg.to — delivered directly when the target is connected to this server, otherwise looked up in the presence cache and published to the owning server's bus channel; unknown/offline targets are dropped.",
-      "entries": [],
+      "entries": [
+        {
+          "at": "2026-07-05T23:28:40.991Z",
+          "text": "if the target client (ie to) is not online then write it to the notification-db"
+        }
+      ],
       "implemented": true,
-      "conversationId": "",
-      "updatedAt": "2026-07-05T00:00:00.000Z"
+      "conversationId": "4c88a99d-3014-4d0c-aa9e-80dcb22dbd1c",
+      "updatedAt": "2026-07-05T23:28:40.991Z"
     },
     "onSend": {
       "base": "Base (fixed): a payload is delivered to a locally connected client over its websocket (locally-routed AND bus-arriving frames both funnel through here), bumping the delivered/latency metrics; a gone connection means the message is dropped.",

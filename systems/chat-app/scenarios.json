@@ -1,0 +1,37 @@
+{
+  "functions": [
+    {
+      "client": "ws-client",
+      "name": "getNotifications",
+      "args": [
+        {
+          "name": "id",
+          "type": "string"
+        }
+      ],
+      "description": "calls notification-service.getNotifications. id is the websocket client id. should fill up local storage for that client with the notifications (transform them to match current structure)",
+      "steps": [
+        {
+          "method": "GET",
+          "path": "/notification-service/notifications",
+          "label": ""
+        }
+      ],
+      "conversationId": "b2de30c2-225b-4f31-b6b5-992a694d2d2c",
+      "createdAt": "2026-07-06T15:07:25.815Z",
+      "updatedAt": "2026-07-06T15:07:25.815Z",
+      "history": [
+        {
+          "at": "2026-07-06T15:07:25.815Z",
+          "description": "calls notification-service.getNotifications. id is the websocket client id. should fill up local storage for that client with the notifications (transform them to match current structure)",
+          "args": [
+            {
+              "name": "id",
+              "type": "string"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

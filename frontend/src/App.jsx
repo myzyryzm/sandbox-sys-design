@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import SystemDiagram from './SystemDiagram.jsx'
 import Terminal from './Terminal.jsx'
 import EditQueuePanel from './EditQueuePanel.jsx'
+import AddMenu from './AddMenu.jsx'
 import CreateDatabase from './CreateDatabase.jsx'
 import CreateService from './CreateService.jsx'
 import CreateExternalService from './CreateExternalService.jsx'
@@ -513,22 +514,26 @@ export default function App() {
 
   // Group the live functions registry by owner client into the function objects (with steps)
   // the diagram renders as rows + traces. Only clients own functions (external services don't).
-  // A websocket client's rows are its pool script's BUILTIN methods (from /api/websockets),
-  // synthesized here — NOT injected into `scenarios`, so the end-to-end modal's client_list
-  // method dropdown (built from `scenarios`) stays real-functions-only.
+  // A websocket client's rows are its pool script's BUILTIN ws methods (from /api/websockets,
+  // synthesized here and traced along the tier path) PLUS — like any client — its own
+  // authorable HTTP functions (from `scenarios`, traced client → LB → services). The builtin
+  // methods are NOT injected into `scenarios`, so the end-to-end modal's client_list method
+  // dropdown (built from `scenarios`) lists only a client's real HTTP functions.
   const clientFunctions = {}
   for (const n of manifest.nodes || []) {
     if (n.type !== 'client') continue
+    const own = scenarios.filter((f) => f.client === n.id)
     if (n.origin === 'create-websockets') {
-      clientFunctions[n.id] = (wsInfo?.clientMethods || []).map((m) => ({
+      const builtin = (wsInfo?.clientMethods || []).map((m) => ({
         client: n.id,
         name: m.name,
         args: m.args || [],
         wsBuiltin: true,
       }))
+      clientFunctions[n.id] = [...builtin, ...own]
       continue
     }
-    clientFunctions[n.id] = scenarios.filter((f) => f.client === n.id)
+    clientFunctions[n.id] = own
   }
 
   // The ws pool client's last-run delivery stats, keyed by its node id for the diagram.
@@ -551,13 +556,13 @@ export default function App() {
         <h1>{manifest.name}</h1>
         <span className="system-id">{manifest.system_id}</span>
         <button
-          className={`header-btn drag-toggle no-auto ${dragMode ? 'active' : ''}`}
+          className={`header-btn drag-toggle ${dragMode ? 'active' : ''}`}
           onClick={() => setDragMode((v) => !v)}
           title="Drag mode — move nodes and the system boundary"
         >
           <MoveIcon /> Drag
         </button>
-        <button className="header-btn" onClick={() => setShowTest(true)}>
+        <button className="header-btn no-auto" onClick={() => setShowTest(true)}>
           🧪 Test
         </button>
         <button className="header-btn no-auto" onClick={() => setShowEndToEnd(true)}>
@@ -566,30 +571,28 @@ export default function App() {
         <button className="header-btn no-auto" onClick={() => setShowSkills(true)}>
           📖 Skills
         </button>
-        <button className="header-btn no-auto" onClick={() => setShowCreateSvc(true)}>
-          ＋ Add service
-        </button>
-        <button className="header-btn no-auto" onClick={() => setShowCreateExternal(true)}>
-          ＋ Add external service
-        </button>
-        <button className="header-btn no-auto" onClick={() => setShowCreateClient(true)}>
-          ＋ Add client
-        </button>
-        <button className="header-btn no-auto" onClick={() => setShowCreateDb(true)}>
-          ＋ Add database
-        </button>
-        <button className="header-btn no-auto" onClick={() => setShowCreateEventStream(true)}>
-          ＋ Add event stream
-        </button>
-        <button className="header-btn no-auto" onClick={() => setShowCreateWebsockets(true)}>
-          ＋ Add WebSockets
-        </button>
-        <button className="header-btn no-auto" onClick={() => setShowGrpcContracts(true)}>
-          ＋ gRPC contract
-        </button>
-        <button className="header-btn no-auto" onClick={() => setShowModels(true)}>
-          ＋ Models
-        </button>
+        <AddMenu
+          groups={[
+            {
+              label: 'Nodes',
+              items: [
+                { label: 'Service', onClick: () => setShowCreateSvc(true) },
+                { label: 'External service', onClick: () => setShowCreateExternal(true) },
+                { label: 'Client', onClick: () => setShowCreateClient(true) },
+                { label: 'Database', onClick: () => setShowCreateDb(true) },
+                { label: 'Event stream', onClick: () => setShowCreateEventStream(true) },
+                { label: 'WebSockets', onClick: () => setShowCreateWebsockets(true) },
+              ],
+            },
+            {
+              label: 'Contracts & schemas',
+              items: [
+                { label: 'gRPC contract', onClick: () => setShowGrpcContracts(true) },
+                { label: 'Models', onClick: () => setShowModels(true) },
+              ],
+            },
+          ]}
+        />
         <button
           className={`header-btn no-auto ${queue.length ? 'has-queue' : ''}`}
           onClick={() => setShowQueue((v) => !v)}

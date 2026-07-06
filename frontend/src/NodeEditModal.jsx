@@ -24,6 +24,7 @@ import { customTypeOf } from './customTypes/index.js'
  *   - service          → Endpoints · gRPC · Calls · Shutdown · Delete
  *   - external service  → Endpoints · Calls · Shutdown · Delete   (no gRPC — third party)
  *   - client            → Functions · Delete   (a caller: no container, serves nothing)
+ *                         (a websocket pool client also gets a read-only WebSocket tab)
  *
  * The Calls tab is read-only: it lists the service's API methods and, on click, traces
  * one on the MAIN diagram (via `onTraceMethod`), so it also closes this modal.
@@ -55,15 +56,16 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     tabs.push({ id: 'endpoints', label: 'Endpoints' })
     tabs.push({ id: 'calls', label: 'Calls' })
   } else if (isClient) {
-    // A client serves nothing and has no container — just its own functions. A regular
-    // client's are authorable multi-step python functions; a websocket client's are the
-    // BUILT-IN methods of its generated host pool script (ws-clients/<id>.mjs), shown
-    // read-only (not editable/deletable, invoked only by end-to-end processes).
-    tabs.push({
-      id: 'functions',
-      label: 'Functions',
-      Component: node.origin === 'create-websockets' ? WsClientMethodsTab : ClientScenarioTab,
-    })
+    // A client serves nothing and has no container — just its own functions: authorable
+    // multi-step python functions that call the system through the load balancer
+    // (clients/<module>.py, ClientScenarioTab). A websocket client ALSO has the two
+    // BUILT-IN methods of its generated host pool script (ws-clients/<id>.mjs, shown
+    // read-only under a separate "WebSocket" tab) — but it authors HTTP functions just
+    // like any other client.
+    if (node.origin === 'create-websockets') {
+      tabs.push({ id: 'wsmethods', label: 'WebSocket', Component: WsClientMethodsTab })
+    }
+    tabs.push({ id: 'functions', label: 'Functions', Component: ClientScenarioTab })
   } else if (isDatabase) {
     tabs.push({ id: 'schema', label: isSecondary ? 'Replica' : 'Schema' })
     // CDC + Seed (postgres/mongodb primaries only; replicas are read-only).

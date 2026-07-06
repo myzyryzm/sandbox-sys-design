@@ -9,8 +9,8 @@
       "label": "nginx LB",
       "type": "load_balancer",
       "position": {
-        "x": 1470,
-        "y": 1282
+        "x": 1364,
+        "y": 1078
       },
       "metrics": []
     },
@@ -168,7 +168,7 @@
       "wsTier": "ws-lb",
       "position": {
         "x": 2273,
-        "y": 1344
+        "y": 1444
       },
       "metrics": [
         {
@@ -209,7 +209,7 @@
       "wsRole": "presence",
       "wsTier": "ws-lb",
       "position": {
-        "x": 2260,
+        "x": 2278,
         "y": 1703
       },
       "metrics": [
@@ -256,6 +256,90 @@
         "y": 1513
       },
       "metrics": []
+    },
+    {
+      "id": "notification-db",
+      "label": "notification-db",
+      "type": "mongodb",
+      "origin": "create-database",
+      "position": {
+        "x": 2008,
+        "y": 1061
+      },
+      "metrics": [
+        {
+          "label": "connections",
+          "query": "sum(mongodb_ss_connections{job=\"notification-db\",conn_type=\"current\"})",
+          "unit": ""
+        },
+        {
+          "label": "ops/s",
+          "query": "sum(rate(mongodb_ss_opcounters{job=\"notification-db\"}[1m]))",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "mongodb_up{job=\"notification-db\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "schemaModels": [
+        "Notification"
+      ]
+    },
+    {
+      "id": "notification-service",
+      "label": "notification-service",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 1678,
+        "y": 1053
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"notification-service\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"notification-service\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"notification-service\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"notification-service\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"notification-service\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"notification-service\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
     }
   ],
   "edges": [
@@ -286,12 +370,20 @@
     {
       "from": "ws-server-2",
       "to": "ws-presence"
+    },
+    {
+      "from": "ws-server-1",
+      "to": "notification-db"
+    },
+    {
+      "from": "ws-server-2",
+      "to": "notification-db"
     }
   ],
   "boundary": {
     "x": 1452,
-    "y": 1221,
-    "w": 1040,
-    "h": 814
+    "y": 1010,
+    "w": 1224,
+    "h": 1025
   }
 }

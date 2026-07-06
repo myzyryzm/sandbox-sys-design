@@ -1,1 +1,34 @@
-{}
+{
+  "notification-service": [
+    {
+      "method": "GET",
+      "path": "/notifications",
+      "protocol": "http",
+      "alias": "getNotifications",
+      "request": {},
+      "response": {},
+      "requestModel": "GetNotificationsRequest",
+      "responseModel": "GetNotifcationsResponse",
+      "description": "query the notification-db for all the notifications for a user (the \"to\" value in the Notification model)",
+      "downstream": [
+        "notification-db"
+      ],
+      "downstreamDescriptions": {
+        "notification-db": "reads Notification docs where to == the requested user id"
+      },
+      "conversationId": "eb329438-a8b8-4d9f-be03-dc85ce1b2bdc",
+      "history": [
+        {
+          "at": "2026-07-06T15:06:27.893Z",
+          "alias": "getNotifications",
+          "path": "/notifications",
+          "request": {},
+          "response": {},
+          "requestModel": "GetNotificationsRequest",
+          "responseModel": "GetNotifcationsResponse",
+          "description": "query the notification-db for all the notifications for a user (the \"to\" value in the Notification model)"
+        }
+      ]
+    }
+  ]
+}
