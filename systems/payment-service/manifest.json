@@ -523,8 +523,8 @@
       "type": "prometheus",
       "origin": "create-prometheus",
       "position": {
-        "x": 794,
-        "y": 816
+        "x": 50,
+        "y": -71
       },
       "metrics": [
         {

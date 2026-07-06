@@ -60,6 +60,9 @@ const REPLICA_COLOR = '#3fb6a8'
 // Base dependency-edge color (matches `.edge` in styles.css) — reused for the arrowhead
 // on the collapsed websocket-fleet in/out edges.
 const EDGE_COLOR = '#5b6270'
+// When A→B and B→A both exist, each line is nudged this many px perpendicular to its
+// axis so the two opposing arrows render as separate parallel lines instead of overlapping.
+const EDGE_PARALLEL_OFFSET = 7
 
 // A synthetic trace endpoint standing for a websocket tier's whole server fleet (its dotted
 // box), so a lifecycle trace collapses the relay fan-out into one hop into the box and one hop
@@ -269,6 +272,14 @@ function breakerLabel(live) {
   return null
 }
 
+// Compact live pool badge from a service's /pool/state entry: "pool <active>/<max> · <idle> idle".
+// Missing counts render as a dot so a partially-reporting service still shows something.
+function poolLabel(live) {
+  if (!live) return null
+  const dot = (v) => (typeof v === 'number' ? v : '·')
+  return `pool ${dot(live.active)}/${dot(live.max)} · ${dot(live.idle)} idle`
+}
+
 export default function SystemDiagram({
   manifest,
   nodeData,
@@ -281,6 +292,7 @@ export default function SystemDiagram({
   onRequestEdit,
   onRequestConnectionResilience,
   resilienceState = {},
+  poolState = {},
   outages = {},
   // Set of event-stream cluster ids whose consumers are paused — drives an amber
   // "consumers paused" badge under the cluster node (see /api/consumer-pause).
@@ -1378,9 +1390,23 @@ export default function SystemDiagram({
           A connection with a circuit breaker draws a mid-line breaker circle (+ live
           overlay). Dim while a lifecycle trace is active, matching the other edges. */}
       {normalConnections.map(({ from, to, kind, contract }) => {
-        const a = centerOf(from)
-        const b = centerOf(to)
         const key = `${from}->${to}`
+        // Border-to-border (like trace edges) so the arrowhead lands just outside the
+        // target box instead of hidden under its center.
+        let { a, b, mid } = traceLine(from, to)
+        // Anti-parallel offset: when the reverse edge also exists (A→B AND B→A), nudge
+        // each line perpendicular to its axis so the two opposing arrows don't overlap.
+        // A→B and B→A have opposite direction vectors, so the same perpendicular auto-
+        // separates them onto opposite sides; a lone edge stays centered (service→db).
+        if (connByKey.has(`${to}->${from}`)) {
+          const dx = b.x - a.x, dy = b.y - a.y
+          const len = Math.hypot(dx, dy) || 1
+          const ox = (-dy / len) * EDGE_PARALLEL_OFFSET
+          const oy = (dx / len) * EDGE_PARALLEL_OFFSET
+          a = { x: a.x + ox, y: a.y + oy }
+          b = { x: b.x + ox, y: b.y + oy }
+          mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+        }
         const res = resByConn.get(key)
         const breakerOn = !!res?.circuit_breaker?.enabled
         const live = resilienceState[key]
@@ -1388,8 +1414,8 @@ export default function SystemDiagram({
         const lineClass = kind === 'grpc' ? `grpc-edge${dim}` : `edge${dim}`
         const fromIsService = byId[from]?.type === 'service'
         const clickable = !!onRequestConnectionResilience && fromIsService && !dragMode
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
         const label = breakerOn ? breakerLabel(live) : null
+        const poolText = poolLabel(poolState[key])
         return (
           <g
             key={`conn-${key}`}
@@ -1407,7 +1433,7 @@ export default function SystemDiagram({
               x2={b.x}
               y2={b.y}
               className={lineClass}
-              markerEnd={kind === 'grpc' ? 'url(#grpc-arrow)' : undefined}
+              markerEnd={kind === 'grpc' ? 'url(#grpc-arrow)' : 'url(#edge-arrow)'}
             >
               <title>{kind === 'grpc' ? `gRPC · ${contract}: ${from} → ${to}` : `${from} → ${to}`}</title>
             </line>
@@ -1415,6 +1441,11 @@ export default function SystemDiagram({
             {label && (
               <text x={mid.x} y={mid.y - 11} className="breaker-label" style={{ pointerEvents: 'none' }}>
                 {label}
+              </text>
+            )}
+            {poolText && (
+              <text x={mid.x} y={mid.y + (breakerOn ? 20 : 14)} className="pool-label" style={{ pointerEvents: 'none' }}>
+                {poolText}
               </text>
             )}
           </g>

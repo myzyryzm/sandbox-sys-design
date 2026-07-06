@@ -114,6 +114,7 @@ export default function App() {
   const [showModels, setShowModels] = useState(false)
   const [connectionTarget, setConnectionTarget] = useState(null)
   const [resilienceState, setResilienceState] = useState({})
+  const [poolState, setPoolState] = useState({})
   const [outages, setOutages] = useState({})
   // Set of event-stream cluster ids whose consumers are currently paused (drives a
   // diagram badge). Polled from /api/consumer-pause, mirroring the outage poll.
@@ -313,6 +314,28 @@ export default function App() {
         const res = await fetch(`/api/resilience-state?system=${SYSTEM_ID}`)
         const data = await res.json()
         if (!cancelled && data.ok) setResilienceState(data.connections || {})
+      } catch {
+        /* keep the last good state */
+      }
+    }
+    tick()
+    const id = setInterval(tick, 750)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [])
+
+  // Fast-poll live connection-pool state (active/idle counts) so the diagram can show a
+  // pool badge on the line. Empty until a service exposes /pool/state, so it's harmless
+  // before any pool is wired.
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/connection-pool-state?system=${SYSTEM_ID}`)
+        const data = await res.json()
+        if (!cancelled && data.ok) setPoolState(data.connections || {})
       } catch {
         /* keep the last good state */
       }
@@ -647,6 +670,7 @@ export default function App() {
         onRequestEdit={setEditTarget}
         onRequestConnectionResilience={setConnectionTarget}
         resilienceState={resilienceState}
+        poolState={poolState}
         outages={outages}
         pausedConsumers={pausedConsumers}
         customState={customState}
@@ -736,6 +760,7 @@ export default function App() {
       )}
       {connectionTarget && (
         <ConnectionResilienceModal
+          key={`${connectionTarget.from}->${connectionTarget.to}`}
           systemId={SYSTEM_ID}
           from={connectionTarget.from}
           to={connectionTarget.to}
@@ -743,6 +768,14 @@ export default function App() {
             (manifest.edges || []).find(
               (e) => e.from === connectionTarget.from && e.to === connectionTarget.to,
             )?.resilience || null
+          }
+          initialPool={
+            (manifest.edges || []).find(
+              (e) => e.from === connectionTarget.from && e.to === connectionTarget.to,
+            )?.connection_pool || null
+          }
+          poolEligible={
+            !(manifest.nodes || []).find((n) => n.id === connectionTarget.to)?.external
           }
           onClose={() => setConnectionTarget(null)}
           onLaunch={enqueueSession}
