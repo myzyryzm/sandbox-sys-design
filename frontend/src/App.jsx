@@ -55,6 +55,9 @@ function MoveIcon() {
  *   { [nodeId]: { metrics: { [label]: value|null }, color } }
  */
 async function pollSystem(manifest) {
+  // No Prometheus node on the diagram ⇒ observability is "off": skip every query so all
+  // nodes go gray and their metrics dropdowns read "no metrics" (matches the diagram gate).
+  if (!manifest.nodes.some((n) => n.type === 'prometheus')) return {}
   const base = manifest.prometheus_base
   const state = {}
 
@@ -494,6 +497,22 @@ export default function App() {
     setTerminalSession((s) => (s && s.mode === 'new' ? { ...s, mode: 'resume', prompt: '' } : s))
   }
 
+  // Add the Prometheus node to the diagram (only offered when none exists). No modal —
+  // there's nothing to configure — just a POST; the 3s manifest poll shows the new node.
+  const addPrometheus = async () => {
+    try {
+      const res = await fetch('/api/prom-node', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ system: SYSTEM_ID }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+    } catch (err) {
+      setError(`Failed to add Prometheus: ${err.message}`)
+    }
+  }
+
   if (error) {
     return (
       <div className="app">
@@ -582,6 +601,11 @@ export default function App() {
                 { label: 'Database', onClick: () => setShowCreateDb(true) },
                 { label: 'Event stream', onClick: () => setShowCreateEventStream(true) },
                 { label: 'WebSockets', onClick: () => setShowCreateWebsockets(true) },
+                // Only one Prometheus node may exist — hide the option while one is on the
+                // diagram (the backend also 409s a second add).
+                ...(manifest.nodes.some((n) => n.type === 'prometheus')
+                  ? []
+                  : [{ label: 'Prometheus', onClick: addPrometheus }]),
               ],
             },
             {

@@ -135,11 +135,15 @@ function isLB(node) {
 // Services (incl. the base service-1), external services, clients, databases,
 // event streams, and websocket-tier nodes can be torn down; the nginx LB (and any
 // other infra) cannot. Deleting a websocket tier's own lb cascades the whole tier.
+// Prometheus is deletable too, but it's a VISUAL toggle only — its Delete tab removes
+// the diagram node (+ self-scrape) via /api/prom-node; the container keeps running
+// (all metric polling and every rebuild depend on it). Re-add it from the Add menu.
 function isDeletable(node) {
   return (
     node.type === 'service' ||
     node.type === 'external_service' ||
     node.type === 'client' ||
+    node.type === 'prometheus' ||
     node.origin === 'create-database' ||
     node.origin === 'create-event-stream' ||
     node.origin === 'create-websockets'
@@ -151,12 +155,14 @@ function endpointKey(e) {
   return `${e.method} ${e.path}`
 }
 
-// How many content rows a node draws. For the LB this is its precomputed accordion row
-// count (one header per service group + the methods of each expanded group); `lbRows`
-// is ignored for every other node, which counts its own metrics.
-function rowCount(node, lbRows) {
-  if (isLB(node)) return Math.max(lbRows || 0, 1)
-  return (node.metrics || []).length
+// How many content rows a node draws, given its precomputed body-row count. For the LB
+// this is the accordion count (one header per service group + the methods of each
+// expanded group); for every other metric-bearing node it's the metrics-dropdown count
+// (collapsed = 1 header row; expanded = header + metric/"no metrics" rows). The caller
+// computes it per node via `bodyRowsOf`; the raw metric count is a defensive fallback.
+function rowCount(node, bodyRows) {
+  if (isLB(node)) return Math.max(bodyRows || 0, 1)
+  return bodyRows != null ? bodyRows : (node.metrics || []).length
 }
 
 // Websocket relay servers are an interchangeable fleet: their whole editing surface
@@ -173,8 +179,8 @@ function hasEditButton(node) {
 }
 
 // y where the metric/endpoint rows end.
-function metricsBottom(node, lbRows) {
-  return HEADER_H + PAD + rowCount(node, lbRows) * LINE_H
+function metricsBottom(node, bodyRows) {
+  return HEADER_H + PAD + rowCount(node, bodyRows) * LINE_H
 }
 
 // Height of the on-node API method rows band (the service's callable methods, listed
@@ -185,8 +191,8 @@ function methodsBandHeight(methods) {
 }
 
 // y where the metrics + the method rows end.
-function methodsBottom(node, lbRows, methods) {
-  return metricsBottom(node, lbRows) + methodsBandHeight(methods)
+function methodsBottom(node, bodyRows, methods) {
+  return metricsBottom(node, bodyRows) + methodsBandHeight(methods)
 }
 
 // Height of a custom service-type body band (e.g. a Download Coordinator bitmap grid),
@@ -198,13 +204,13 @@ function customBandHeight(node, runtime) {
 
 // y where all content (metrics + method rows + any custom band) ends — the Edit button
 // sits a gap below.
-function contentBottom(node, lbRows, runtime, methods) {
+function contentBottom(node, bodyRows, runtime, methods) {
   const band = customBandHeight(node, runtime)
-  return methodsBottom(node, lbRows, methods) + (band ? CUSTOM_GAP + band : 0)
+  return methodsBottom(node, bodyRows, methods) + (band ? CUSTOM_GAP + band : 0)
 }
 
-function nodeHeight(node, lbRows, runtime, methods) {
-  const bottom = contentBottom(node, lbRows, runtime, methods)
+function nodeHeight(node, bodyRows, runtime, methods) {
+  const bottom = contentBottom(node, bodyRows, runtime, methods)
   // Reserve the edit band (gap + button + bottom pad) on controllable nodes; others
   // keep the original single trailing pad.
   return hasEditButton(node) ? bottom + EDIT_GAP + EDIT_H + PAD : bottom + PAD
@@ -331,6 +337,10 @@ export default function SystemDiagram({
   // routable endpoints by owning service and draws each group as a collapsible accordion;
   // every group is collapsed by default, so this starts empty.
   const [openLbServices, setOpenLbServices] = useState(() => new Set())
+  // Which nodes have their metrics dropdown expanded (set of node ids). Every metric-bearing
+  // node (service/db/kafka/cdc/prometheus) draws its metrics behind a collapsible "Metrics"
+  // header like the LB's accordion; collapsed by default, so this starts empty.
+  const [openNodeMetrics, setOpenNodeMetrics] = useState(() => new Set())
 
   // Drag-mode layout overrides. `drag` maps nodeId -> {x,y} and `boundaryOverride` holds the
   // in-progress / just-dropped boundary rect. These win over the manifest so a freshly dropped
@@ -391,6 +401,24 @@ export default function SystemDiagram({
     (n, g) => n + 1 + (openLbServices.has(g.serviceId) ? g.endpoints.length : 0),
     0,
   )
+
+  // Whether a Prometheus node is on the diagram. When it isn't, observability is "off":
+  // App polls nothing, and every metrics dropdown reads "no metrics" instead of rows.
+  const hasPrometheus = nodes.some((n) => n.type === 'prometheus')
+
+  // Metric-bearing (non-LB) nodes draw their metrics behind a collapsible "Metrics" header.
+  // Rows the body draws: 0 when the node has no metrics; 1 (just the header) when collapsed;
+  // header + metric rows when expanded (or header + one "no metrics" row when Prometheus is
+  // absent). Feeds the layout helpers so collapsing/expanding actually resizes the box.
+  const metricBodyRows = (n) => {
+    const count = (n.metrics || []).length
+    if (!count) return 0
+    if (!openNodeMetrics.has(n.id)) return 1
+    return 1 + (hasPrometheus ? count : 1)
+  }
+  // The per-node body-row count the layout helpers want: the LB's accordion rows, or a
+  // metric node's dropdown rows.
+  const bodyRowsOf = (n) => (isLB(n) ? lbRows : metricBodyRows(n))
 
   // Each service / external service lists its OWN callable methods on its node (like the
   // LB lists endpoints), so the diagram can trace one straight from the service. Drops
@@ -453,7 +481,7 @@ export default function SystemDiagram({
 
   // Layout helpers that fold in a node's live custom-type runtime (so a custom body band
   // reserves the right vertical space and edges hit the recomputed center).
-  const heightOf = (n) => nodeHeight(n, lbRows, customState[n.id], rowsOf(n))
+  const heightOf = (n) => nodeHeight(n, bodyRowsOf(n), customState[n.id], rowsOf(n))
 
   // Websocket relay servers render as ONE combined body: a rigid vertical stack (one shared
   // column x, cascaded top-to-bottom by height + STACK_GAP) instead of each server floating at
@@ -1461,7 +1489,7 @@ export default function SystemDiagram({
         // On-node clickable rows: a service's callable methods, or a client's attached
         // functions, listed below the metrics.
         const rows = rowsOf(node)
-        const h = nodeHeight(node, lbRows, rt, rows)
+        const h = nodeHeight(node, bodyRowsOf(node), rt, rows)
         // A user-initiated temporary outage paints the node orange and wins over the
         // health-derived color (a deliberate shutdown looks down — but intentionally).
         const inOutage = outages[node.id]
@@ -1586,21 +1614,58 @@ export default function SystemDiagram({
                   return rowsOut
                 })()
               )
-            ) : (
-              /* Metric rows. */
-              (node.metrics || []).map((m, i) => {
-                const y = HEADER_H + PAD + i * LINE_H + 12
-                return (
-                  <g key={m.label}>
-                    <text x={PAD} y={y} className="metric-label">
-                      {m.label}
+            ) : (node.metrics || []).length === 0 ? null : (
+              /* Metrics dropdown: a collapsible "Metrics" header (like the LB's service
+                 accordion) over this node's metric rows. Collapsed by default. When no
+                 Prometheus node is on the diagram there's nothing to query, so an expanded
+                 dropdown reads "no metrics" instead of rows. */
+              (() => {
+                const open = openNodeMetrics.has(node.id)
+                const hy = HEADER_H + PAD
+                const out = [
+                  <g
+                    key="metrics-hdr"
+                    className="endpoint-hit lb-group"
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      setOpenNodeMetrics((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(node.id)) next.delete(node.id)
+                        else next.add(node.id)
+                        return next
+                      })
+                    }}
+                  >
+                    <rect x={4} y={hy - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={hy + 12} className="lb-group-row">
+                      <tspan className="lb-group-caret">{open ? '▾' : '▸'}</tspan> Metrics
                     </text>
-                    <text x={NODE_W - PAD} y={y} className="metric-value">
-                      {formatMetric(data.metrics[m.label], m)}
-                    </text>
-                  </g>
-                )
-              })
+                  </g>,
+                ]
+                if (open && !hasPrometheus) {
+                  out.push(
+                    <text key="no-metrics" x={PAD} y={HEADER_H + PAD + LINE_H + 12} className="endpoint-empty">
+                      no metrics
+                    </text>,
+                  )
+                } else if (open) {
+                  for (let i = 0; i < node.metrics.length; i++) {
+                    const m = node.metrics[i]
+                    const y = HEADER_H + PAD + (i + 1) * LINE_H + 12
+                    out.push(
+                      <g key={m.label}>
+                        <text x={PAD} y={y} className="metric-label">
+                          {m.label}
+                        </text>
+                        <text x={NODE_W - PAD} y={y} className="metric-value">
+                          {formatMetric(data.metrics[m.label], m)}
+                        </text>
+                      </g>,
+                    )
+                  }
+                }
+                return out
+              })()
             )}
 
             {/* On-node clickable rows below the metrics, in one stacked band: a node's callable
@@ -1609,7 +1674,7 @@ export default function SystemDiagram({
                 function traces its whole call path (client → LB → services → downstreams) and
                 highlights each called method on its service. */}
             {rows.map((row, i) => {
-              const y = metricsBottom(node, lbRows) + METHOD_GAP + i * LINE_H
+              const y = metricsBottom(node, bodyRowsOf(node)) + METHOD_GAP + i * LINE_H
               if (row.kind === 'fn') {
                 const fn = row.fn
                 const active = !!functionTrace && functionTrace.client === node.id && functionTrace.name === fn.name
@@ -1717,7 +1782,7 @@ export default function SystemDiagram({
               >
                 <rect
                   x={PAD}
-                  y={contentBottom(node, lbRows, rt, rows) + EDIT_GAP}
+                  y={contentBottom(node, bodyRowsOf(node), rt, rows) + EDIT_GAP}
                   width={NODE_W - 2 * PAD}
                   height={EDIT_H}
                   rx="6"
@@ -1725,7 +1790,7 @@ export default function SystemDiagram({
                 />
                 <text
                   x={NODE_W / 2}
-                  y={contentBottom(node, lbRows, rt, rows) + EDIT_GAP + EDIT_H / 2}
+                  y={contentBottom(node, bodyRowsOf(node), rt, rows) + EDIT_GAP + EDIT_H / 2}
                   className="node-edit-label"
                 >
                   Edit
@@ -1748,7 +1813,7 @@ export default function SystemDiagram({
                     node={node}
                     runtime={rt}
                     width={NODE_W}
-                    top={methodsBottom(node, lbRows, rows) + CUSTOM_GAP}
+                    top={methodsBottom(node, bodyRowsOf(node), rows) + CUSTOM_GAP}
                   />
                 </g>
               )

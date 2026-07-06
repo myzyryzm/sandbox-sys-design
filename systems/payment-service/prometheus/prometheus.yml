@@ -54,5 +54,7 @@ scrape_configs:
     {
         job_name: refund-service,
         static_configs: [ { targets: [ refund-service:8000 ] } ]
-      }
+      },
+    # prometheus — self-scrape (Prometheus node on the diagram)
+    { job_name: prometheus, static_configs: [ { targets: [ prometheus:9090 ] } ] }
   ]

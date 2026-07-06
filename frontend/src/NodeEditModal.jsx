@@ -41,6 +41,10 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   const isDatabase = node.origin === 'create-database'
   const isEventStream = node.origin === 'create-event-stream'
   const isSecondary = !!node.replicaOf
+  // Prometheus is shared infra: its only action is the visual Delete (remove the diagram
+  // node, keep the container). No feature tabs, and NO Shutdown — never offer to stop the
+  // container every other node's metrics depend on.
+  const isPrometheus = node.type === 'prometheus'
 
   const tabs = []
   if (isService) {
@@ -84,8 +88,9 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   for (const t of customTypeOf(node)?.editTabs?.(node) || []) {
     tabs.push({ id: `custom:${t.id}`, label: t.label, Component: t.Component })
   }
-  // A client has no container, so there's nothing to shut down.
-  if (!isClient) tabs.push({ id: 'shutdown', label: 'Shutdown' })
+  // A client has no container, so there's nothing to shut down; Prometheus is shared infra
+  // that must never be shut down from here.
+  if (!isClient && !isPrometheus) tabs.push({ id: 'shutdown', label: 'Shutdown' })
   tabs.push({ id: 'delete', label: 'Delete', danger: true })
 
   const [active, setActive] = useState(tabs[0].id)
