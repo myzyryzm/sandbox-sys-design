@@ -37,6 +37,8 @@ and explain it's a required built-in (you may still add/edit/delete *other* rout
   responseModel, description, downstream:[nodeIds], downstreamDescriptions:{nodeId:"…"},
   downstreamMethods:{nodeId:["METHOD /path", …]}, conversationId } ] }`. `path` is
   **service-local** (e.g. `/items`); the load balancer prefixes `/<service>` at routing.
+  `protocol` is usually `http`; `sse` marks a streaming `text/event-stream` route — author it
+  differently (see "SSE / streaming endpoints" below).
   `downstream` is the list of node ids this endpoint calls — it's what the diagram's
   lifecycle trace draws, so keep it accurate. `downstreamDescriptions` is a map (node id →
   one short line) describing what *this* endpoint uses each downstream connection for; the
@@ -97,6 +99,65 @@ and explain it's a required built-in (you may still add/edit/delete *other* rout
 3. Rebuild that service (command above).
 4. Verify through the lb: `curl -s http://localhost:8080/<service><path>` returns what
    the spec describes, and the route appears in `/<service>/openapi.json`.
+
+### SSE / streaming endpoints (`protocol: sse`)
+
+When an endpoint's `protocol` is `sse` (the modal's "SSE" option, echoed in the seed prompt),
+author it as a **streaming** route that serves `text/event-stream` (Server-Sent Events) instead of
+a single JSON body. The rest of the flow (registry entry, `downstream`, rebuild) is unchanged.
+
+- **Use plain `StreamingResponse`** — no new dependency (do **not** add `sse-starlette`):
+
+  ```python
+  import asyncio, json
+  from fastapi.responses import StreamingResponse
+
+  @app.get("/updates")
+  async def updates():
+      async def gen():
+          # BOUNDED: stop after a finite number of events (or a capped time budget) so the
+          # request terminates — every consumer (curl / lb.stream / the Run panel) waits for
+          # the stream to end before it sees results.
+          for i in range(10):
+              yield f"data: {json.dumps({'seq': i})}\n\n"
+              await asyncio.sleep(1)
+      return StreamingResponse(
+          gen(),
+          media_type="text/event-stream",
+          # nginx (the lb) buffers proxied responses by default; this disables buffering for THIS
+          # response so frames reach the client incrementally — no nginx.conf change needed.
+          headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+      )
+  ```
+
+- **Frame format:** each event is `data: <payload>\n\n` (a blank line ends the event); the
+  endpoint's response schema/model describes one event's `data:` payload. You may add `event:` /
+  `id:` lines.
+- **Keep it bounded.** A never-ending generator hangs every consumer and leaks a coroutine per
+  request. Cap it by event count or a max duration; don't rely solely on client-disconnect
+  detection (it's unreliable behind the metrics middleware).
+- **Method:** prefer `GET` (the client `lb.stream(...)` helper and browser EventSource are
+  GET-only); `POST` works for curl/Python consumers if a request body is needed.
+- **Leave the metrics middleware intact.** It records metrics when the response *starts*, then
+  streams the body — so an SSE request is counted once in `http_requests_total`, but
+  `http_requests_in_flight` / `http_request_duration_seconds` reflect stream **setup (time to first
+  byte)**, not the stream's lifetime. That's intended here — do **not** "fix" it by moving metric
+  recording into the body generator (it would dump multi-second samples into the latency histogram
+  and wreck p95).
+- **Protocol is immutable on edit.** The modal can't flip a unary route to SSE in place (that's a
+  delete + re-add), so an SSE edit is always already a streaming route — modify it in place.
+
+**Verify** (SSE-aware — a plain `curl -s` would hang): read a few frames with a deadline, and
+confirm the content type + incremental delivery through the lb:
+
+```
+curl -N -sS -m 4 -D - http://localhost:8080/<service><path>
+```
+
+Expect a `Content-Type: text/event-stream` response header and `data:` frames arriving
+*incrementally* over the window (not all at once at the end — that would mean the lb buffered
+them). curl exiting 28 (the `-m` deadline) is expected. The route still appears in
+`/<service>/openapi.json`.
 
 ### Editing an existing endpoint
 

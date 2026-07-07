@@ -13,8 +13,13 @@ import { resolveModelTs } from './modelBank.js'
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 
-// Only http/s for now (single option), kept as a dropdown for forward-compat.
-const PROTOCOLS = [{ value: 'http', label: 'HTTP/S' }]
+// `sse` is a streaming HTTP endpoint (a GET that serves `text/event-stream`); the seed prompt
+// gets an SSE guidance block (see buildEndpointPrompt) so the launched session authors a
+// StreamingResponse handler. Protocol is immutable on edit — switch by delete + re-add.
+const PROTOCOLS = [
+  { value: 'http', label: 'HTTP/S' },
+  { value: 'sse', label: 'SSE (text/event-stream)' },
+]
 
 function blankForm() {
   return {
@@ -67,6 +72,28 @@ function parseSchema(text, label) {
   return { value: obj }
 }
 
+// Extra lines appended to the seed prompt when the endpoint's protocol is SSE, so the launched
+// session authors (or keeps) a streaming `text/event-stream` handler. The full procedure lives in
+// the sandbox-endpoint skill's SSE section — this just flags it and names the load-bearing rules.
+// Returns [] for non-SSE endpoints (spread into the prompt array, so it disappears cleanly).
+function sseGuidance(protocol) {
+  if (protocol !== 'sse') return []
+  return [
+    ``,
+    'This is a Server-Sent Events (SSE) endpoint that streams `text/event-stream`. Author/keep it',
+    "as a STREAMING route per the sandbox-endpoint skill's SSE section:",
+    '- return StreamingResponse(<async generator>, media_type="text/event-stream") (from',
+    '  fastapi.responses; no new dependency — do NOT add sse-starlette).',
+    '- set response headers {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"} so the lb',
+    "  (nginx) doesn't buffer the stream.",
+    '- emit each event as `data: <json>\\n\\n` (the response schema/model above describes one',
+    "  event's data payload); optionally include `event:`/`id:` lines.",
+    '- make the generator BOUNDED (a finite event count or a capped asyncio.sleep loop) so it',
+    '  terminates — never rely solely on client-disconnect detection.',
+    '- keep the metrics middleware and the other routes untouched.',
+  ]
+}
+
 // Compose the prompt seeded into the Claude session — the structured spec plus the
 // user's description. The repeatable "how to build in this sandbox" procedure lives
 // in the `sandbox-endpoint` skill (.claude/skills/), so we just point Claude at it.
@@ -87,6 +114,7 @@ function buildEndpointPrompt({ systemId, service, method, path, protocol, alias,
     alias ? `Function name (alias): ${alias}` : `Function name (alias): none`,
     bodyLine('Request', requestModel, request),
     bodyLine('Response', responseModel, response),
+    ...sseGuidance(protocol),
     ``,
     `What it should do:`,
     description.trim() || '(no description given — infer something reasonable)',
@@ -125,6 +153,7 @@ function buildEndpointEditPrompt({ systemId, service, method, path, protocol, al
     alias ? `Function name (alias): ${alias}` : `Function name (alias): none`,
     bodyLine('Request', requestModel, request),
     bodyLine('Response', responseModel, response),
+    ...sseGuidance(protocol),
     ...(schemaChanged
       ? [`NOTE: the request/response contract above was just changed in this edit — reconcile the handler with it.`]
       : []),

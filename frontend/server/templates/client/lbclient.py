@@ -12,6 +12,7 @@ by every client in the system.
 """
 import atexit
 import json
+import time
 import urllib.error
 import urllib.request
 
@@ -64,6 +65,74 @@ def _request(method, path, body=None):
     return parsed
 
 
+def _parse_frame(text):
+    # An SSE event's `data:` payload — JSON when it is, else the raw text (truncated like _request).
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text if len(text) <= _MAX_TEXT else text[:_MAX_TEXT] + "…"
+
+
+def _stream(path, max_events, timeout):
+    """Consume a Server-Sent Events (text/event-stream) GET through the lb, incrementally.
+
+    An SSE route streams until the client goes away, so this is BOUNDED: it stops after
+    `max_events` events OR `timeout` seconds (whichever comes first), and an idle stream unblocks
+    on the socket read timeout. It must terminate well within the runner's 30s budget, because the
+    recorded calls are only emitted when this process exits. Records ONE call whose `response` is
+    the list of collected `data:` payloads (each JSON-parsed when possible) and returns that list.
+    """
+    url = BASE + path
+    req = urllib.request.Request(
+        url, method="GET", headers={"Accept": "text/event-stream"}
+    )
+    frames = []
+    try:
+        # `timeout` doubles as the per-read socket timeout, so a silent stream can't block forever.
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as err:
+        # A 4xx/5xx is a real response the script may branch on — record it like _request does.
+        body = err.read().decode("utf-8", "replace")
+        _record("GET", path, None, err.code, False, _parse_frame(body))
+        return frames
+    except Exception as err:  # connection refused, DNS, connect timeout, …
+        _record("GET", path, None, 0, False, None)
+        raise RuntimeError("GET %s (stream) failed: %s" % (path, err))
+
+    status = resp.status
+    deadline = time.monotonic() + timeout
+    data_lines = []
+    try:
+        for raw_line in resp:  # HTTPResponse yields chunked-decoded lines
+            line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
+            if line == "":  # a blank line terminates one event
+                if data_lines:
+                    frames.append(_parse_frame("\n".join(data_lines)))
+                    data_lines = []
+            elif line.startswith(":"):
+                pass  # SSE comment / heartbeat — ignore
+            elif line.startswith("data:"):
+                data_lines.append(line[5:].lstrip(" "))
+            # other fields (event:/id:/retry:) don't contribute to the recorded payload
+            if len(frames) >= max_events or time.monotonic() >= deadline:
+                break
+    except Exception:
+        # A read timeout on an idle stream (or a mid-stream drop) just ends collection — keep
+        # whatever frames we already have rather than losing the whole call.
+        pass
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+    if data_lines and len(frames) < max_events:  # flush a trailing unterminated event
+        frames.append(_parse_frame("\n".join(data_lines)))
+
+    ok = 200 <= status < 400
+    _record("GET", path, None, status, ok, frames)
+    return frames
+
+
 class _LB:
     """The `lb` object a client script uses to call the system through the load balancer.
 
@@ -73,6 +142,9 @@ class _LB:
         r = lb.post("/orders-service/orders/checkout", {"order_id": order_id})
         if r.get("status") == "valid":
             lb.post("/payments-api/complete-payment", {"token": r["token"]})
+
+    `lb.stream(path)` consumes a Server-Sent Events (text/event-stream) endpoint instead and
+    returns the list of `data:` payloads it collected (bounded — see stream()).
     """
 
     def get(self, path):
@@ -89,6 +161,11 @@ class _LB:
 
     def delete(self, path, body=None):
         return _request("DELETE", path, body)
+
+    def stream(self, path, max_events=20, timeout=5.0):
+        # Consume an SSE (text/event-stream) GET; returns the collected list of `data:` payloads.
+        # Bounded by max_events / timeout so the run always completes (see _stream).
+        return _stream(path, max_events, timeout)
 
 
 lb = _LB()

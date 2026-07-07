@@ -51,8 +51,13 @@ export function scaffoldClientScript(system, id) {
   const dir = clientsDir(system)
   fs.mkdirSync(dir, { recursive: true })
   const lib = path.join(dir, 'lbclient.py')
-  if (!fs.existsSync(lib)) {
-    fs.copyFileSync(path.join(TEMPLATE_DIR, 'lbclient.py'), lib)
+  // Keep the shared helper in lockstep with the template: (re)write it when missing OR drifted
+  // (e.g. an older system predating a new lb.* method like `stream`), so every system auto-upgrades
+  // on the next client op. It's fixed infra — client sessions never edit it — so overwriting a
+  // stale copy is safe.
+  const libTemplate = fs.readFileSync(path.join(TEMPLATE_DIR, 'lbclient.py'))
+  if (!fs.existsSync(lib) || !fs.readFileSync(lib).equals(libTemplate)) {
+    fs.writeFileSync(lib, libTemplate)
   }
   const script = clientScriptPath(system, id)
   if (!fs.existsSync(script)) {
@@ -105,17 +110,21 @@ function functionBody(src, name) {
 // Statically infer a function's call steps by scanning its body for `lb.<method>("/path")`
 // calls — across BOTH if/else branches, in source order. An f-string path like
 // `f"/svc/{order_id}"` keeps its `{order_id}` segment, which matchEndpoint treats as a wildcard
-// (just like a `{param}` route slot). Returns [{ method, path, label }] (label '' — the diagram
-// derives the row from the matched endpoint); [] when the function isn't implemented yet.
+// (just like a `{param}` route slot). `lb.stream(...)` is an SSE consume, recorded as a GET step
+// so it matches the streaming (`protocol: sse`) route, whose method is GET. Returns
+// [{ method, path, label }] (label '' — the diagram derives the row from the matched endpoint);
+// [] when the function isn't implemented yet.
 export function scanFunctionSteps(src, name) {
   const body = functionBody(src, name)
   if (body == null) return []
-  const re = /\blb\.(get|post|put|patch|delete)\s*\(\s*(?:rf|fr|f|r)?(["'])((?:[^"'\\]|\\.)*)\2/gi
+  const re = /\blb\.(get|post|put|patch|delete|stream)\s*\(\s*(?:rf|fr|f|r)?(["'])((?:[^"'\\]|\\.)*)\2/gi
   const steps = []
   const seen = new Set()
   let m
   while ((m = re.exec(body))) {
-    const method = m[1].toUpperCase()
+    // `stream` is an SSE GET consume — normalize it so the step matches the GET route.
+    const verb = m[1].toLowerCase()
+    const method = verb === 'stream' ? 'GET' : verb.toUpperCase()
     const p = m[3]
     if (!p.startsWith('/')) continue // not an LB path — skip
     const key = method + ' ' + p

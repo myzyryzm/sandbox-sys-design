@@ -63,6 +63,13 @@ The shared `lbclient.py` (do **not** edit it) gives you `lb`:
   `lb.delete(path, body)` — each makes a **real** call through the load balancer
   (`http://localhost:8080` + `path`) and **returns the parsed JSON response body** (a dict/list),
   or the raw text if the response wasn't JSON.
+- `lb.stream(path, max_events=20, timeout=5.0)` — consume a **Server-Sent Events**
+  (`text/event-stream`) endpoint (an SSE route, `protocol: sse` in `endpoints.json`). It's a GET
+  that reads the stream incrementally and **returns the list of `data:` payloads** it collected
+  (each parsed to JSON when possible), recording one call. It is **bounded** — it stops after
+  `max_events` events or `timeout` seconds — so the run always finishes. Use it (not `lb.get`)
+  whenever the endpoint streams SSE. The whole client run is killed at 30s, so keep `timeout` well
+  under that.
 - `path` is the **load-balancer path** `/<service>/<local>` — the same path the lb routes and
   the same path under `/<service>/openapi.json` after the `/<service>` prefix (a route defined
   inside `service-1` as `/orders` is called here as `/service-1/orders`).
@@ -94,7 +101,8 @@ def checkout(order_id):
   Never invent a route — if the description needs one that doesn't exist, stop and say so.
 - **Keep paths as string literals** (or f-strings for path params, e.g.
   `f"/orders-service/orders/{order_id}"`). The static scanner reads `lb.<method>("…")` literals
-  to build the diagram trace, so a path assembled by string concatenation won't be traced.
+  (including `lb.stream("…")`) to build the diagram trace, so a path assembled by string
+  concatenation won't be traced.
 - **CLI args arrive as strings.** Coerce where a function declares a number/boolean arg
   (`qty = int(qty)`, `flag = flag == "true"`).
 - Chain calls with plain Python variables (`r = lb.post(...)`, then read `r["field"]`).
@@ -110,4 +118,6 @@ def checkout(order_id):
   `python3 systems/<id>/clients/<module>.py --<name> <args…>` — it should print a
   `__LB_RESULTS__ […]` line with the calls it made. Or use the client's Run panel (its Functions
   tab), which executes the same thing and shows each call's response; the diagram then traces the
-  endpoints your code calls (both branches).
+  endpoints your code calls (both branches). An `lb.stream(...)` consume prints the same line once
+  its bounded stream ends, with the recorded call's `response` set to the list of `data:` frames it
+  collected.

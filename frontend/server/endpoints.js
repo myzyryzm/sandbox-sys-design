@@ -228,7 +228,10 @@ class HttpError extends Error {
 const bad = (msg) => new HttpError(400, msg)
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
-const PROTOCOLS = new Set(['http', 'https'])
+// `sse` is an HTTP GET route that streams `text/event-stream` (Server-Sent Events) —
+// carried as pure metadata here, same as http/https; the diagram/list tag reads it and the
+// endpoint's seed prompt tells the launched session to author a StreamingResponse handler.
+const PROTOCOLS = new Set(['http', 'https', 'sse'])
 const PATH_RE = /^\/[A-Za-z0-9._~\-/{}]*$/ // braces allow path params, e.g. /items/{item_id}
 // An endpoint's optional function-name alias — a code-style identifier. Unique
 // within a service (two services may reuse the same name); see validateEndpoint.
