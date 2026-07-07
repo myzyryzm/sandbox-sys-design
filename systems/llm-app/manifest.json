@@ -1,0 +1,203 @@
+{
+  "system_id": "llm-app",
+  "name": "Llm App",
+  "prometheus_base": "/api/prometheus",
+  "poll_interval_ms": 4000,
+  "nodes": [
+    {
+      "id": "lb",
+      "label": "nginx LB",
+      "type": "load_balancer",
+      "position": {
+        "x": 66,
+        "y": 139
+      },
+      "metrics": []
+    },
+    {
+      "id": "prometheus",
+      "label": "Prometheus",
+      "type": "prometheus",
+      "origin": "create-prometheus",
+      "position": {
+        "x": 908,
+        "y": 120
+      },
+      "metrics": [
+        {
+          "label": "targets up",
+          "query": "sum(up)",
+          "unit": ""
+        },
+        {
+          "label": "series",
+          "query": "prometheus_tsdb_head_series",
+          "unit": ""
+        },
+        {
+          "label": "ingest",
+          "query": "rate(prometheus_tsdb_head_samples_appended_total[1m])",
+          "unit": "/s"
+        },
+        {
+          "label": "api req",
+          "query": "sum(rate(prometheus_http_requests_total[1m]))",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "up{job=\"prometheus\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "user-db",
+      "label": "user-db",
+      "type": "postgres",
+      "origin": "create-database",
+      "position": {
+        "x": 787,
+        "y": 460
+      },
+      "metrics": [
+        {
+          "label": "connections",
+          "query": "sum(pg_stat_database_numbackends{job=\"user-db\"})",
+          "unit": ""
+        },
+        {
+          "label": "commits/s",
+          "query": "sum(rate(pg_stat_database_xact_commit{job=\"user-db\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "rows fetch/s",
+          "query": "sum(rate(pg_stat_database_tup_fetched{job=\"user-db\"}[1m]))",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "pg_up{job=\"user-db\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "schemaModels": [
+        "User"
+      ]
+    },
+    {
+      "id": "chat-db",
+      "label": "chat-db",
+      "type": "postgres",
+      "origin": "create-database",
+      "position": {
+        "x": 765,
+        "y": 273
+      },
+      "metrics": [
+        {
+          "label": "connections",
+          "query": "sum(pg_stat_database_numbackends{job=\"chat-db\"})",
+          "unit": ""
+        },
+        {
+          "label": "commits/s",
+          "query": "sum(rate(pg_stat_database_xact_commit{job=\"chat-db\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "rows fetch/s",
+          "query": "sum(rate(pg_stat_database_tup_fetched{job=\"chat-db\"}[1m]))",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "pg_up{job=\"chat-db\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "schemaModels": [
+        "Chat",
+        "Message"
+      ]
+    },
+    {
+      "id": "chat-service",
+      "label": "chat-service",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 283,
+        "y": 354
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"chat-service\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"chat-service\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"chat-service\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"chat-service\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"chat-service\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"chat-service\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [],
+  "boundary": {
+    "x": 54,
+    "y": 106,
+    "w": 1066,
+    "h": 654
+  }
+}

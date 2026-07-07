@@ -548,7 +548,7 @@ export default function SystemDiagram({
     svcInstancesByEntry.get(n.instanceOf).push(n)
   }
   const svcStackPos = new Map()
-  const SVC_STACK_GAP_X = 120 // horizontal gap between the entry sidecar and its instance column
+  const SVC_STACK_GAP_X = 28 // horizontal gap between the entry sidecar and its instance column — kept tight so the instances read as sitting right next to their load balancer
   for (const [entryId, instances] of svcInstancesByEntry) {
     const entry = byId[entryId]
     if (!entry) continue
@@ -1697,10 +1697,15 @@ export default function SystemDiagram({
             <rect width={NODE_W} height={HEADER_H} rx="8" fill={color} />
             <rect width={NODE_W} height={HEADER_H / 2} fill={color} />
             <text x={PAD} y={HEADER_H / 2 + 5} className="node-label">
-              {node.label}
+              {/* The load-balancer cluster ENTRY keeps its bare id (`<name>`) as the node id so it
+                  still owns endpoints/gRPC, but reads as the service's load balancer — display it as
+                  `<name>-lb` to distinguish it from its `<name>-N` instances. */}
+              {node.type === 'service-lb' ? `${node.label}-lb` : node.label}
             </text>
             <text x={NODE_W - PAD} y={HEADER_H / 2 + 5} className="node-type">
-              {node.type === 'client' ? 'client' : node.external ? 'external' : node.type}
+              {node.type === 'client'
+                ? (node.stateful ? 'client · stateful' : 'client')
+                : node.external ? 'external' : node.type}
             </text>
 
             {isLB(node) ? (

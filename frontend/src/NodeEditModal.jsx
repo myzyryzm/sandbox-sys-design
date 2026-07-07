@@ -8,6 +8,7 @@ import EventStreamModal from './EventStreamModal.jsx'
 import NodeOutageModal from './NodeOutageModal.jsx'
 import ConfirmDelete from './ConfirmDelete.jsx'
 import ClientScenarioTab from './ClientScenarioTab.jsx'
+import ClientStateTab from './ClientStateTab.jsx'
 import WsClientMethodsTab from './WsClientMethodsTab.jsx'
 import ConsumerTab from './ConsumerTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
@@ -84,6 +85,9 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
       tabs.push({ id: 'wsmethods', label: 'WebSocket', Component: WsClientMethodsTab })
     }
     tabs.push({ id: 'functions', label: 'Functions', Component: ClientScenarioTab })
+    // Stateless (default) vs stateful mode + the durable store viewer. Rendered via the generic
+    // Component-tab path below (no `switch` case needed).
+    tabs.push({ id: 'state', label: 'State', Component: ClientStateTab })
   } else if (isDatabase) {
     tabs.push({ id: 'schema', label: isSecondary ? 'Replica' : 'Schema' })
     // CDC + Seed on primaries only (replicas are read-only). Each has its own engine set.

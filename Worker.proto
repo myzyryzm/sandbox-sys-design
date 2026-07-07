@@ -1,0 +1,4 @@
+service Worker {
+  rpc AddSequence(AddSequenceRequest) returns (AddSequenceReply);
+  rpc GetStatus(StatusRequest) returns (StatusReply);
+}

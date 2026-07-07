@@ -35,12 +35,34 @@ export function clientsDir(system) {
 export function clientScriptPath(system, id) {
   return path.join(clientsDir(system), clientScriptFile(id))
 }
+// A STATEFUL client's durable store lives beside its script as <module>.state.json (same
+// hyphen->underscore module mapping). It's written by lbclient.py at exit only when the runner
+// sets LB_CLIENT_STATE to this path (i.e. the client's manifest node has stateful:true); a
+// stateless client never creates it. Shape: { values: {...}, history: [...] }.
+export function clientStatePath(system, id) {
+  return path.join(clientsDir(system), clientModule(id) + '.state.json')
+}
 // The script source, or null if this client has no script yet (a pre-Python-model client).
 export function readClientScript(system, id) {
   try {
     return fs.readFileSync(clientScriptPath(system, id), 'utf8')
   } catch {
     return null
+  }
+}
+
+// A client's accumulated durable state, or an empty store if it has none yet (stateless client,
+// or a stateful one that hasn't run). Tolerates a missing/garbled file — the store is runtime data.
+export function readClientState(system, id) {
+  let data
+  try {
+    data = JSON.parse(fs.readFileSync(clientStatePath(system, id), 'utf8'))
+  } catch {
+    return { values: {}, history: [] }
+  }
+  return {
+    values: data && typeof data.values === 'object' && data.values ? data.values : {},
+    history: Array.isArray(data?.history) ? data.history : [],
   }
 }
 
@@ -68,10 +90,12 @@ export function scaffoldClientScript(system, id) {
   return script
 }
 
-// Remove a client's script (the shared lbclient.py stays for the other clients).
+// Remove a client's script and its durable state file (the shared lbclient.py stays for the
+// other clients).
 export function removeClientScript(system, id) {
   try {
     fs.rmSync(clientScriptPath(system, id), { force: true })
+    fs.rmSync(clientStatePath(system, id), { force: true })
   } catch {
     /* nothing to clean up */
   }

@@ -122,12 +122,25 @@ calls made so far). **Wrap every invocation in try/except** so one bad call neve
 Skeleton (adapt it — don't run verbatim):
 
 ```python
-import json, subprocess, time, urllib.request
+import json, os, subprocess, time, urllib.request
 
 SYSTEM, PID, APIBASE, DURATION = "<id>", "<processId>", "<apiBase>", <durationSeconds>
 deadline = time.time() + DURATION
 next_call = {i: 0.0 for i in range(len(client_list))}
 log = []
+
+# A STATEFUL client (manifest node stateful:true) persists its calls across the run in
+# clients/<module>.state.json — point its subprocess at that store via LB_CLIENT_STATE (absolute,
+# since the orchestrator runs from the repo root). A stateless client gets no override (env=None
+# inherits the environment, i.e. today's behavior).
+STATEFUL = {n["id"] for n in json.load(open(f"systems/{SYSTEM}/manifest.json"))["nodes"]
+            if n.get("type") == "client" and n.get("stateful")}
+
+def run_env(row):
+    if row["client"] not in STATEFUL:
+        return None
+    path = os.path.abspath(f"systems/{SYSTEM}/clients/{module(row)}.state.json")
+    return {**os.environ, "LB_CLIENT_STATE": path}
 
 def still_running():
     try:
@@ -147,7 +160,8 @@ while time.time() < deadline and still_running():
         try:
             out = subprocess.run(["python3", f"systems/{SYSTEM}/clients/{module(row)}.py",
                                   "--" + row["method"], *argv],
-                                 capture_output=True, text=True, timeout=30).stdout
+                                 capture_output=True, text=True, timeout=30,
+                                 env=run_env(row)).stdout   # stateful clients persist across the run
             calls = parse_lb_results(out)
         except Exception as e:
             calls = [{"ok": False, "status": 0, "error": str(e)}]

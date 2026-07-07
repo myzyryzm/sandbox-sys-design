@@ -4,11 +4,22 @@
 // owns named functions whose authored call steps fire real calls through the load balancer.
 //
 //   GET    /api/clients?system=<id>
-//     -> { ok, clients: [{ id }] }   (manifest client nodes)
-//   POST   /api/clients  { system, name }
+//     -> { ok, clients: [{ id, stateful }] }   (manifest client nodes)
+//   POST   /api/clients  { system, name, stateful? }
 //     -> appends a `client` node to manifest.json (instant — no docker). Returns { ok, node }.
+//   PATCH  /api/clients  { system, id, stateful }
+//     -> flip a client's stateful mode on its manifest node. No docker. Returns { ok, node }.
 //   DELETE /api/clients  { system, id }
-//     -> drops the manifest node (and its edges). No docker.
+//     -> drops the manifest node (and its edges) + its script/state file. No docker.
+//   GET    /api/clients/state?system=<id>&id=<client>
+//     -> { ok, state: { values, history }, stateful }   (a stateful client's accumulated store)
+//   DELETE /api/clients/state  { system, id }
+//     -> clears (deletes) that client's on-disk state file. Returns { ok, cleared }.
+//
+// A client is STATELESS by default (fire-and-forget: each function run is a one-shot python3
+// subprocess that persists nothing — today's behavior). A STATEFUL client instead loads + saves a
+// durable per-client store (clients/<module>.state.json) across runs; the runner enables it by
+// setting LB_CLIENT_STATE for that subprocess (scenarios.js), and lbclient.py's `state` reads it.
 //
 // A client is a *caller*, not a callee: it serves nothing, so it has no endpoints, no
 // gRPC, no metrics/health, and no container. Its functions (and their authored call steps)
@@ -17,7 +28,17 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { systemDir, isValidSystem, nextClientPosition } from './systems.js'
 import { bad, NAME_RE, readJsonBody } from './scaffold.js'
-import { scaffoldClientScript, removeClientScript } from './clientScript.js'
+import {
+  scaffoldClientScript,
+  removeClientScript,
+  clientStatePath,
+  readClientState,
+} from './clientScript.js'
+
+// A truthy stateful flag from a request body (accepts a boolean or the string "true").
+function parseStateful(v) {
+  return v === true || v === 'true'
+}
 
 function readManifest(system) {
   return JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
@@ -49,6 +70,8 @@ function createClient(body) {
     type: 'client',
     origin: 'create-client',
     external: true,
+    // Stateless (fire-and-forget) unless the user opts into a durable per-client store.
+    stateful: parseStateful(body.stateful),
     position: nextClientPosition(manifest),
     metrics: [],
   }
@@ -58,6 +81,40 @@ function createClient(body) {
   // helper) now so the file always exists for authoring sessions and the runner.
   scaffoldClientScript(system, name)
   return { ok: true, node }
+}
+
+// Flip a client's stateful mode. Pure manifest edit (no docker). Toggling OFF leaves any existing
+// state file inert on disk (the runner just stops setting LB_CLIENT_STATE) — clear it explicitly
+// via DELETE /api/clients/state, or it's reused if the client is toggled back on.
+function updateClient(body) {
+  const { system, id } = body
+  if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
+  const manifest = readManifest(system)
+  const node = findClient(manifest, id)
+  if (!node) throw bad(`"${id}" is not a client in this system`)
+  node.stateful = parseStateful(body.stateful)
+  writeManifest(system, manifest)
+  return { ok: true, node }
+}
+
+// A stateful client's accumulated store (empty when it has none yet). `stateful` echoes the node's
+// mode so the UI can tell "no state yet" from "not a stateful client".
+function getClientState(system, id) {
+  if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
+  const manifest = readManifest(system)
+  const node = findClient(manifest, id)
+  if (!node) throw bad(`"${id}" is not a client in this system`)
+  return { ok: true, stateful: !!node.stateful, state: readClientState(system, id) }
+}
+
+// Clear a client's durable store (delete the file). Its next stateful run starts fresh.
+function clearClientState(body) {
+  const { system, id } = body
+  if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
+  const manifest = readManifest(system)
+  if (!findClient(manifest, id)) throw bad(`"${id}" is not a client in this system`)
+  fs.rmSync(clientStatePath(system, id), { force: true })
+  return { ok: true, cleared: true }
 }
 
 function deleteClient(body) {
@@ -83,7 +140,7 @@ function listClients(system) {
   const manifest = readManifest(system)
   const clients = manifest.nodes
     .filter((n) => n.type === 'client')
-    .map((n) => ({ id: n.id }))
+    .map((n) => ({ id: n.id, stateful: !!n.stateful }))
   return { ok: true, clients }
 }
 
@@ -103,6 +160,20 @@ export default function clients() {
   return {
     name: 'clients',
     configureServer(server) {
+      // Mount the /state sub-route BEFORE /api/clients — Connect matches by path prefix, so the
+      // broader mount would otherwise swallow it (same ordering the endtoend plugin relies on).
+      server.middlewares.use('/api/clients/state', (req, res, next) => {
+        try {
+          if (req.method === 'GET') {
+            const q = new URL(req.url, 'http://localhost').searchParams
+            return json(res, 200, getClientState(q.get('system'), q.get('id')))
+          }
+          if (req.method === 'DELETE') return wrap(clearClientState)(req, res)
+          return next()
+        } catch (err) {
+          return json(res, err.statusCode || 500, { ok: false, error: err.message })
+        }
+      })
       server.middlewares.use('/api/clients', async (req, res, next) => {
         try {
           if (req.method === 'GET') {
@@ -111,6 +182,7 @@ export default function clients() {
             return json(res, 200, listClients(system))
           }
           if (req.method === 'POST') return wrap(createClient)(req, res)
+          if (req.method === 'PATCH') return wrap(updateClient)(req, res)
           if (req.method === 'DELETE') return wrap(deleteClient)(req, res)
           return next()
         } catch (err) {

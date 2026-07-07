@@ -20,10 +20,21 @@ Use real control flow — if/else, loops, and chaining one call's response into 
 records every call so the web app can show the results and trace them on the diagram. CLI
 arguments arrive as strings; coerce them (int(...), == "true", …) where a function needs a
 number or boolean.
+
+If this client is STATEFUL, use `state` to remember data across runs (a later run reads what an
+earlier one saved) — otherwise `state` is an in-memory scratchpad discarded at exit:
+
+    def login(username, password):
+        r = lb.post("/auth-service/login", {"username": username, "password": password})
+        state.set("token", r.get("token"))   # persisted for the next run (if stateful)
+
+    def get_profile():
+        token = state.get("token")           # value login() saved on an earlier run
+        return lb.get("/auth-service/me?token=" + (token or ""))
 """
 import sys
 
-from lbclient import lb
+from lbclient import lb, state
 
 
 # === functions ===

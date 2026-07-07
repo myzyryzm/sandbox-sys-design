@@ -1,0 +1,67 @@
+{
+  "models": [
+    {
+      "name": "User",
+      "ts": "/*\nid => primary key, snowflake id\n*/\ninterface User {\n  id: number;\n}",
+      "description": "",
+      "createdAt": "2026-07-07T22:27:17.304Z",
+      "updatedAt": "2026-07-07T22:27:17.304Z"
+    },
+    {
+      "name": "Chat",
+      "ts": "\n/*\nid => primary key, snowflake id\nuser_id => create an index\nupdated_at => created at insert time\ncreated_at => created at insert time\n*/\ninterface Chat {\n  id: number;\n  user_id: number;\n  title: string;\n  updated_at: string;\n  created_at: string;\n}",
+      "description": "",
+      "createdAt": "2026-07-07T22:27:27.113Z",
+      "updatedAt": "2026-07-07T22:52:43.599Z"
+    },
+    {
+      "name": "Message",
+      "ts": "/*\nid => primary key, snowflake id\nchat => foreign key; create an index\ncreated_at => created at insert time\n*/\ninterface Message {\n  id: number;\n  chat: Chat;\n  content: string;\n  role: \"user\" | \"assistant\";\n  created_at: string;\n}",
+      "description": "",
+      "createdAt": "2026-07-07T22:27:37.729Z",
+      "updatedAt": "2026-07-07T22:27:37.729Z"
+    },
+    {
+      "name": "CreateChatRequest",
+      "ts": "interface CreateChatRequest {}\n",
+      "description": "",
+      "createdAt": "2026-07-07T22:31:43.673Z",
+      "updatedAt": "2026-07-07T22:31:43.673Z"
+    },
+    {
+      "name": "CreateChatResponse",
+      "ts": "interface CreateChatResponse {\n  id: number;\n}",
+      "description": "",
+      "createdAt": "2026-07-07T22:31:51.207Z",
+      "updatedAt": "2026-07-07T22:31:51.207Z"
+    },
+    {
+      "name": "GetChatsRequest",
+      "ts": "interface GetChatsRequest {\n  cursor?: number;\n  maxChats?: number;\n}",
+      "description": "",
+      "createdAt": "2026-07-07T22:53:20.290Z",
+      "updatedAt": "2026-07-07T22:53:20.290Z"
+    },
+    {
+      "name": "GetChatsResponse",
+      "ts": "interface GetChatsResponse {\n  chats: Chat;\n}",
+      "description": "",
+      "createdAt": "2026-07-07T22:53:40.106Z",
+      "updatedAt": "2026-07-07T22:53:40.106Z"
+    },
+    {
+      "name": "CreateMessageRequest",
+      "ts": "interface CreateMessageRequest {\n  chat_id: number;\n  content: string;\n}",
+      "description": "",
+      "createdAt": "2026-07-07T22:56:00.826Z",
+      "updatedAt": "2026-07-07T22:56:00.826Z"
+    },
+    {
+      "name": "UserMessage",
+      "ts": "/*\nid => primary key, snowflake id\nmessage => foreign key\n*/\ninterface UserMessage {\n  id: number;\n  message: Message;\n}",
+      "description": "",
+      "createdAt": "2026-07-07T23:12:46.170Z",
+      "updatedAt": "2026-07-07T23:12:46.170Z"
+    }
+  ]
+}

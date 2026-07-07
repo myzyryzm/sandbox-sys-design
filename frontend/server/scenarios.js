@@ -34,6 +34,7 @@ import { systemDir, isValidSystem } from './systems.js'
 import { bad, readJsonBody } from './scaffold.js'
 import {
   clientScriptPath,
+  clientStatePath,
   clientScriptFile,
   readClientScript,
   scaffoldClientScript,
@@ -290,7 +291,8 @@ async function runFunction(body) {
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
   // The owner client is part of the function's identity — validate it.
   const manifest = readManifest(system)
-  if (!findClientNode(manifest, client)) throw bad(`"${client}" is not a client in this system`)
+  const clientNode = findClientNode(manifest, client)
+  if (!clientNode) throw bad(`"${client}" is not a client in this system`)
   const fn = readScenarios(system).functions.find((f) => f && f.client === client && f.name === name)
   if (!fn) throw bad(`unknown function "${name}"`)
 
@@ -306,14 +308,22 @@ async function runFunction(body) {
   const argv = (fn.args || []).map((a) => stringifyArg(typed[a.name]))
   const scriptPath = clientScriptPath(system, client)
 
+  // A stateful client persists its calls' outcomes across runs: point lbclient.py at this client's
+  // durable store via LB_CLIENT_STATE (absolute path). A stateless client gets no env override, so
+  // its run is byte-identical to before.
+  const opts = {
+    cwd: systemDir(system),
+    timeout: RUN_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+  }
+  if (clientNode.stateful) {
+    opts.env = { ...process.env, LB_CLIENT_STATE: clientStatePath(system, client) }
+  }
+
   let stdout = ''
   let scriptError = null
   try {
-    const r = await pexec('python3', [scriptPath, '--' + name, ...argv], {
-      cwd: systemDir(system),
-      timeout: RUN_TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024,
-    })
+    const r = await pexec('python3', [scriptPath, '--' + name, ...argv], opts)
     stdout = r.stdout || ''
   } catch (err) {
     if (err.code === 'ENOENT') {

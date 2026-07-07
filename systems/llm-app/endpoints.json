@@ -1,0 +1,66 @@
+{
+  "chat-service": [
+    {
+      "method": "POST",
+      "path": "/chats",
+      "protocol": "http",
+      "alias": "createChat",
+      "request": {},
+      "response": {},
+      "requestModel": "CreateChatRequest",
+      "responseModel": "CreateChatResponse",
+      "description": "creates a chat; user_id will be inferred from the headers in the request and will be used to check if the user exists (via user-db) and then for creating a chat in the chat-db. title will default to 'new chat'",
+      "downstream": [
+        "user-db",
+        "chat-db"
+      ],
+      "downstreamDescriptions": {
+        "user-db": "checks that the X-User-Id header refers to an existing user before creating a chat",
+        "chat-db": "inserts the new chat row (user_id from the header, title defaults to 'new chat')"
+      },
+      "conversationId": "fce1e849-723c-495e-8434-d01009914f68",
+      "history": [
+        {
+          "at": "2026-07-07T22:41:23.175Z",
+          "alias": "createChat",
+          "path": "/chats",
+          "request": {},
+          "response": {},
+          "requestModel": "CreateChatRequest",
+          "responseModel": "CreateChatResponse",
+          "description": "creates a chat; user_id will be inferred from the headers in the request and will be used to check if the user exists (via user-db) and then for creating a chat in the chat-db. title will default to 'new chat'"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/chats",
+      "protocol": "http",
+      "alias": "getChats",
+      "request": {},
+      "response": {},
+      "requestModel": "GetChatsRequest",
+      "responseModel": "GetChatsResponse",
+      "description": "get chats for user; user_id is from header; chats should be ordered by updated_at; cursor is start index (default to 0) and maxChats is how many to query (default to 10)",
+      "downstream": [
+        "chat-db"
+      ],
+      "downstreamDescriptions": {
+        "chat-db": "reads the caller's chat rows (user_id from the X-User-Id header) ordered by updated_at, paged with cursor as offset and maxChats as limit"
+      },
+      "conversationId": "853d1424-4645-4849-8942-d0ca1dcdcb2b",
+      "history": [
+        {
+          "at": "2026-07-07T22:54:54.323Z",
+          "alias": "getChats",
+          "path": "/chats",
+          "request": {},
+          "response": {},
+          "requestModel": "GetChatsRequest",
+          "responseModel": "GetChatsResponse",
+          "description": "get chats for user; user_id is from header; chats should be ordered by updated_at; cursor is start index (default to 0) and maxChats is how many to query (default to 10)"
+        }
+      ]
+    }
+  ]
+}
