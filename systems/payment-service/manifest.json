@@ -67,8 +67,8 @@
       "origin": "create-external-service",
       "external": true,
       "position": {
-        "x": -555,
-        "y": 163
+        "x": -531,
+        "y": 174
       },
       "metrics": []
     },
@@ -316,8 +316,8 @@
       "origin": "create-external-service",
       "external": true,
       "position": {
-        "x": 997,
-        "y": 1012
+        "x": 1086,
+        "y": 869
       },
       "metrics": []
     },
@@ -374,8 +374,8 @@
       "origin": "create-client",
       "external": true,
       "position": {
-        "x": -370,
-        "y": 950
+        "x": -366,
+        "y": 851
       },
       "metrics": []
     },
@@ -591,6 +591,6 @@
     "x": -122,
     "y": -138,
     "w": 1601,
-    "h": 1054
+    "h": 939
   }
 }

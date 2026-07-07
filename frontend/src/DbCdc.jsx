@@ -33,9 +33,12 @@ function buildCdcPrompt({ systemId, dbId, engine, dbNameStr, rules }) {
     '',
     'The backend has ALREADY done the mechanical scaffold — DO NOT redo any of it:',
     `  • wrote systems/${systemId}/${dbId}/cdc.json (the rules below, mounted into the worker at /cdc.json:ro)`,
-    engine === 'postgres'
-      ? `  • set wal_level=logical on ${dbId} and recreated it`
-      : `  • converted ${dbId} to single-node replica set rs0 and initiated it`,
+    {
+      postgres: `  • set wal_level=logical on ${dbId} and recreated it`,
+      mongodb: `  • converted ${dbId} to single-node replica set rs0 and initiated it`,
+      dynamodb: `  • ${dbId}'s tables already have DynamoDB Streams enabled (NEW_AND_OLD_IMAGES) — tail them via boto3 dynamodbstreams`,
+      cassandra: `  • left ${dbId} unchanged — use POLLING capture (no commitlog CDC): periodically query each table and emit new/changed rows`,
+    }[engine],
     `  • added the ${wid} compose service (build ./${wid}), its prometheus scrape job (job ${wid}, target ${wid}:8000),`,
     `    the manifest node + edges (${dbId} → ${wid} → each stream), and registered ${wid} as a producer in streams.json`,
     '',
@@ -46,7 +49,9 @@ function buildCdcPrompt({ systemId, dbId, engine, dbNameStr, rules }) {
     'change capture and produces each captured change event to that rule\'s Kafka topic, then build + verify:',
     `  docker compose -f systems/${systemId}/docker-compose.yml up -d --build ${wid}`,
     '',
-    'Env the worker receives: CDC_ENGINE, CDC_DB_HOST, CDC_DB_PORT, CDC_DB_NAME, CDC_DB_USER, CDC_DB_PASSWORD.',
+    engine === 'dynamodb'
+      ? 'Env the worker receives: CDC_ENGINE, CDC_DB_HOST, CDC_DB_PORT, DDB_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION.'
+      : 'Env the worker receives: CDC_ENGINE, CDC_DB_HOST, CDC_DB_PORT, CDC_DB_NAME, CDC_DB_USER, CDC_DB_PASSWORD.',
     'Each rule\'s Kafka bootstrap is <stream>:9092. Export prometheus metrics on :8000 — cdc_events_captured_total{table,op},',
     'cdc_events_produced_total{topic}, cdc_errors_total. Follow the skill for the per-engine capture details.',
   ].join('\n')
@@ -208,7 +213,7 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
             ) : (
               <>
                 <div className="form-row">
-                  <span>{engine === 'postgres' ? 'Table' : 'Collection'}</span>
+                  <span>{engine === 'mongodb' ? 'Collection' : 'Table'}</span>
                   <select value={table} onChange={(e) => setTable(e.target.value)} disabled={!!busy}>
                     {entities.map((e) => (
                       <option key={e.name} value={e.name}>
@@ -273,11 +278,18 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
 
                 {rules.length === 0 && (
                   <p className="form-hint">
-                    Adding the first rule restarts <code>{node.id}</code>{' '}
-                    {engine === 'postgres'
-                      ? '(enables logical replication)'
-                      : '(converts it to a replica set)'}{' '}
-                    and opens Claude to build the <code>{node.id}-cdc</code> worker.
+                    {engine === 'postgres' || engine === 'mongodb' ? (
+                      <>
+                        Adding the first rule restarts <code>{node.id}</code>{' '}
+                        {engine === 'postgres' ? '(enables logical replication)' : '(converts it to a replica set)'}{' '}
+                        and opens Claude to build the <code>{node.id}-cdc</code> worker.
+                      </>
+                    ) : (
+                      <>
+                        Adding the first rule opens Claude to build the <code>{node.id}-cdc</code> worker{' '}
+                        ({engine === 'dynamodb' ? 'tails DynamoDB Streams' : 'polls for changes'}) — <code>{node.id}</code> is not restarted.
+                      </>
+                    )}
                   </p>
                 )}
 

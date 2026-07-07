@@ -155,18 +155,75 @@ export function buildModelUpdatePrompt({ systemId, edits, impact, allModels }) {
   ].join('\n')
 }
 
+// Per-engine schema-authoring guidance for buildDbSchemaPrompt. Each entry captures
+// the engine-specific prose the DB-authoring session needs. postgres/mongodb reproduce
+// the original SQL-vs-NoSQL binary exactly; dynamodb/cassandra add key-model + no-join
+// (denormalized) guidance, since their data models differ sharply from relational/document.
+const SCHEMA_SPECS = {
+  postgres: {
+    word: 'table',
+    initFile: 'init.sql',
+    seedFile: 'seed.sql',
+    degrade: 'jsonb',
+    refNote: `A field whose type is ANOTHER model below is a FOREIGN KEY to that table`,
+    oneEntity: `- One table per model (snake_case the name). If no field/comment designates a primary key, add a synthetic \`id uuid primary key default gen_random_uuid()\`; otherwise use the designated key with its stated type (e.g. a \`// primary key\` comment on \`id: number\` snowflake → \`id bigint primary key\`).`,
+    refSingular: `- A field \`f: OtherModel\` (singular) → a foreign-key column \`f_id\` referencing that table's primary key; the column's TYPE must match that referenced primary key (per its comments), not assume uuid.`,
+    refArray: `- A field \`f: OtherModel[]\` (array) → a one-to-many: put a foreign-key column on the CHILD table referencing this table's primary key (matching its type).`,
+    typeMap: `- Default type mapping (unless a comment narrows it, e.g. \`integer only\`→\`integer\`, \`max length of 3\`→\`varchar(3)\`): string→text, number→numeric, boolean→boolean, Date→timestamptz, Record<…>/nested object/array-of-primitive→jsonb. A \`?\` (optional) field is nullable.`,
+    idempotentApply: '`CREATE TABLE IF NOT EXISTS …`, and add FK constraints only if absent',
+  },
+  mongodb: {
+    word: 'collection',
+    initFile: 'init.js',
+    seedFile: 'seed.js',
+    degrade: 'object',
+    refNote: `A field whose type is ANOTHER model below is a FOREIGN KEY to that collection`,
+    oneEntity: `- One collection per model (named after the model).`,
+    refSingular: `- A field \`f: OtherModel\` (singular) → a field holding the referenced document's _id.`,
+    refArray: `- A field \`f: OtherModel[]\` (array) → store an array of referenced _ids (or embed the subdocuments).`,
+    typeMap: `- Default type mapping (unless a comment narrows it): string→string, number→number, boolean→boolean, Date→date, Record<…>/nested object→object, array-of-primitive→array.`,
+    idempotentApply: 'guard `createCollection` with `getCollectionNames()`',
+  },
+  dynamodb: {
+    word: 'table',
+    initFile: 'init.sh',
+    seedFile: 'seed.sh',
+    degrade: 'map attribute',
+    refNote: `DynamoDB has NO joins — a field whose type is ANOTHER model below is a DENORMALIZED reference (embed it), never a foreign key`,
+    oneEntity: `- One DynamoDB table per model. Pick the partition (HASH) key from a \`// PK\`/\`// partition key\` comment, else a field named \`id\`; if a \`// SK\`/\`// sort key\` comment names a field, add it as the RANGE key. Only key attributes are declared (DynamoDB is schemaless otherwise). Create each table with \`--billing-mode PAY_PER_REQUEST\` and \`--stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES\` (so CDC can tail it).`,
+    refSingular: `- A field \`f: OtherModel\` (singular) → denormalize: embed the referenced item as a nested map attribute (or store its key). Do NOT create a foreign key.`,
+    refArray: `- A field \`f: OtherModel[]\` (array) → store a list of nested maps (or a list of keys). No join table.`,
+    typeMap: `- Attribute types are per-item at write time, not in the schema; only KEY attributes need a declared type (S=string, N=number, B=binary). Use S for string/uuid keys, N for numeric keys.`,
+    idempotentApply: '`aws dynamodb create-table`, ignoring a ResourceInUseException (table already exists)',
+  },
+  cassandra: {
+    word: 'table',
+    initFile: 'init.cql',
+    seedFile: 'seed.cql',
+    degrade: 'text',
+    refNote: `Cassandra has NO joins — a field whose type is ANOTHER model below is a DENORMALIZED reference, never a foreign key`,
+    oneEntity: `- One Cassandra table per model in keyspace \`${'${dbName}'}\` (query-driven, denormalized). Define the PRIMARY KEY from comments — partition key from \`// PK\`/\`// partition key\`, clustering columns from \`// CK\`/\`// clustering key\` in order; if none given, use \`id text\` as the partition key.`,
+    refSingular: `- A field \`f: OtherModel\` (singular) → denormalize: flatten the referenced model's columns into this table (prefixed), or model it as a UDT (\`CREATE TYPE\`). Do NOT create a foreign key.`,
+    refArray: `- A field \`f: OtherModel[]\` (array) → a collection column (\`list<…>\`/\`set<…>\` of a frozen UDT), or a separate query-optimized table. No join table.`,
+    typeMap: `- Default CQL type mapping (unless a comment narrows it): string→text, number→bigint (int/decimal per comment), boolean→boolean, Date→timestamp, uuid→uuid, Record<…>/nested object→a UDT or \`text\` (JSON), array-of-primitive→\`list<…>\`.`,
+    idempotentApply: '`CREATE TABLE IF NOT EXISTS …` / `CREATE TYPE IF NOT EXISTS …`',
+  },
+}
+
 // Build the Claude prompt that authors a database's schema from selected models. The
 // backend has already provisioned the container (create) or it already exists (update);
-// this session writes the actual tables/collections + foreign keys via the sandbox-database
-// skill. `allModels` is the whole bank (so referenced-but-unselected models still resolve).
+// this session writes the actual tables/collections + keys/references via the
+// sandbox-database skill. `allModels` is the whole bank (so referenced-but-unselected
+// models still resolve).
 export function buildDbSchemaPrompt({ systemId, dbId, engine, models, allModels, update }) {
   const needed = collectModels(models, allModels)
   const tsBlock = needed.length
     ? needed.map((m) => (m.ts || '').trim()).join('\n\n')
     : '// (no model definitions found in the bank)'
-  const isPg = engine === 'postgres'
-  const word = isPg ? 'table' : 'collection'
-  const initFile = isPg ? 'init.sql' : 'init.js'
+  const spec = SCHEMA_SPECS[engine] || SCHEMA_SPECS.postgres
+  const dbName = dbId.replace(/-/g, '_')
+  const { word, initFile, seedFile } = spec
+  const oneEntity = spec.oneEntity.replace('${dbName}', dbName)
 
   return [
     `Use the sandbox-database skill to ${update ? 'update the' : 'set up the'} schema of the ${engine} database "${dbId}" in the "${systemId}" system from models in the model bank.`,
@@ -177,31 +234,23 @@ export function buildDbSchemaPrompt({ systemId, dbId, engine, models, allModels,
     ``,
     `Models — each becomes one ${word} (in selection order): ${models.join(', ')}`,
     ``,
-    `Definitions (TypeScript). A field whose type is ANOTHER model below is a FOREIGN KEY to that ${word}:`,
+    `Definitions (TypeScript). ${spec.refNote}:`,
     '```ts',
     tsBlock,
     '```',
     ``,
     `Rules:`,
     `- The \`//\` comments in the definitions above are AUTHORITATIVE schema directives — read them and apply exactly what they state: primary keys, foreign keys, unique constraints, indexes, column lengths/precision, check constraints, defaults, datetime/uuid/serial types, nullability. A comment may sit on the line(s) ABOVE the interface (often \`// field => …\`, or a table-level note like \`// unique constraint on (owner_id, name)\`) or TRAIL a field. These directives OVERRIDE the generic defaults below whenever they conflict.`,
-    isPg
-      ? `- One table per model (snake_case the name). If no field/comment designates a primary key, add a synthetic \`id uuid primary key default gen_random_uuid()\`; otherwise use the designated key with its stated type (e.g. a \`// primary key\` comment on \`id: number\` snowflake → \`id bigint primary key\`).`
-      : `- One collection per model (named after the model).`,
-    isPg
-      ? `- A field \`f: OtherModel\` (singular) → a foreign-key column \`f_id\` referencing that table's primary key; the column's TYPE must match that referenced primary key (per its comments), not assume uuid.`
-      : `- A field \`f: OtherModel\` (singular) → a field holding the referenced document's _id.`,
-    isPg
-      ? `- A field \`f: OtherModel[]\` (array) → a one-to-many: put a foreign-key column on the CHILD table referencing this table's primary key (matching its type).`
-      : `- A field \`f: OtherModel[]\` (array) → store an array of referenced _ids (or embed the subdocuments).`,
-    isPg
-      ? `- Default type mapping (unless a comment narrows it, e.g. \`integer only\`→\`integer\`, \`max length of 3\`→\`varchar(3)\`): string→text, number→numeric, boolean→boolean, Date→timestamptz, Record<…>/nested object/array-of-primitive→jsonb. A \`?\` (optional) field is nullable.`
-      : `- Default type mapping (unless a comment narrows it): string→string, number→number, boolean→boolean, Date→date, Record<…>/nested object→object, array-of-primitive→array.`,
-    `- A reference to a model that is NOT in the selected set degrades to a plain ${isPg ? 'jsonb' : 'object'} field (no foreign key).`,
+    oneEntity,
+    spec.refSingular,
+    spec.refArray,
+    spec.typeMap,
+    `- A reference to a model that is NOT in the selected set degrades to a plain ${spec.degrade} field (no foreign key).`,
     ``,
     update
-      ? `Apply with idempotent DDL against the live container (${isPg ? '`CREATE TABLE IF NOT EXISTS …`, and add FK constraints only if absent' : 'guard `createCollection` with `getCollectionNames()`'}) AND append the new ${word}s to systems/${systemId}/${dbId}/${initFile} so a fresh rebuild reproduces them. Then verify per the skill.`
+      ? `Apply with idempotent DDL against the live container (${spec.idempotentApply}) AND append the new ${word}s to systems/${systemId}/${dbId}/${initFile} so a fresh rebuild reproduces them. Then verify per the skill.`
       : `Write systems/${systemId}/${dbId}/${initFile} with the full schema, apply it to the live container, and verify per the skill.`,
     ``,
-    `Finally, if systems/${systemId}/${dbId}/${isPg ? 'seed.sql' : 'seed.js'} exists, re-run it against the live container after the migration (it is idempotent) so any seeded data is preserved.`,
+    `Finally, if systems/${systemId}/${dbId}/${seedFile} exists, re-run it against the live container after the migration (it is idempotent) so any seeded data is preserved.`,
   ].join('\n')
 }

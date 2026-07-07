@@ -36,8 +36,10 @@ const skipDocker = () => process.env.CREATE_DB_SKIP_REBUILD === '1'
 const NODE_W = 190 // keep secondaries near their primary (matches the diagram)
 const DB_ID_RE = /^[a-z][a-z0-9-]*$/
 
-// Engines that support replicas (object-store excluded — no read-replica concept).
-const ENGINE_LABEL = { postgres: 'PostgreSQL', mongodb: 'MongoDB', redis: 'Redis' }
+// Engines that support replicas. object-store + dynamodb are excluded (no replica
+// concept). Cassandra's "replica" is a second cluster node joining the ring (not a
+// read-only standby) — see buildCassandraReplica / prepCassandraPrimary.
+const ENGINE_LABEL = { postgres: 'PostgreSQL', mongodb: 'MongoDB', redis: 'Redis', cassandra: 'Cassandra' }
 
 // ---------------------------------------------------------------------------
 // Manifest + compose helpers
@@ -200,10 +202,44 @@ function buildMongoReplica({ secondaryId, primary }) {
   }
 }
 
+// A Cassandra "replica" is a second node that JOINS the primary's ring (via
+// CASSANDRA_SEEDS + a shared cluster name), not a read-only standby — it accepts
+// writes like any Cassandra node. It reuses the primary's custom exporter build
+// context (created by buildCassandra) pointed at itself.
+function buildCassandraReplica({ secondaryId, primary }) {
+  return {
+    services: {
+      [secondaryId]: {
+        image: 'cassandra:5',
+        depends_on: [primary],
+        environment: {
+          CASSANDRA_CLUSTER_NAME: 'sandbox', // must match the primary to join its ring
+          CASSANDRA_SEEDS: primary,
+          MAX_HEAP_SIZE: '512M',
+          HEAP_NEWSIZE: '128M',
+        },
+      },
+      [`${secondaryId}-exporter`]: {
+        build: `./${primary}/exporter`,
+        depends_on: [secondaryId],
+        environment: { CASSANDRA_HOST: secondaryId, CASSANDRA_PORT: '9042' },
+      },
+    },
+    scrapeJob: { job_name: secondaryId, static_configs: [{ targets: [`${secondaryId}-exporter:9100`] }] },
+    metrics: [
+      { label: 'nodes seen', query: `cassandra_node_count{job="${secondaryId}"}`, unit: '' },
+      { label: 'tables', query: `sum(cassandra_table_count{job="${secondaryId}"})`, unit: '' },
+      { label: 'probe', query: `cassandra_probe_latency_seconds{job="${secondaryId}"}`, unit: 'ms', scale: 1000 },
+    ],
+    health: { query: `cassandra_up{job="${secondaryId}"}`, rules: HEALTH_RULES },
+  }
+}
+
 const BUILDERS = {
   postgres: buildPostgresReplica,
   redis: buildRedisReplica,
   mongodb: buildMongoReplica,
+  cassandra: buildCassandraReplica,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +285,26 @@ async function prepPostgresPrimary(system, primary) {
 // primary `--replSet rs0` (recreated below). Returns whether it changed.
 function prepMongoPrimary(system, primary) {
   return setServiceCommand(system, primary, ['mongod', '--replSet', 'rs0', '--bind_ip_all'])
+}
+
+// Cassandra: raise the keyspace replication factor to 2 BEFORE the new node
+// bootstraps, so it streams the existing data as it joins. Best-effort + live only;
+// a from-scratch rebuild recreates the keyspace at RF=1 (init.cql), so re-adding a
+// replica (or a manual ALTER + `nodetool repair`) is needed after such a rebuild.
+async function prepCassandraPrimary(system, primary) {
+  if (skipDocker()) return ''
+  const ks = primary.replace(/-/g, '_')
+  const cql = `ALTER KEYSPACE ${ks} WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 2};`
+  try {
+    const r = await pexec(
+      'docker',
+      ['compose', '-f', composePath(system), 'exec', '-T', primary, 'cqlsh', '-e', cql],
+      execOpts(),
+    )
+    return r.stdout + r.stderr
+  } catch (err) {
+    return `(warning: could not raise ${ks} replication factor: ${err.stderr || err.message})`
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +418,7 @@ export async function handleCreateReplica(body) {
   let mongoFirst = false
   if (engine === 'postgres') await prepPostgresPrimary(system, primary)
   else if (engine === 'mongodb') mongoFirst = prepMongoPrimary(system, primary)
+  else if (engine === 'cassandra') await prepCassandraPrimary(system, primary)
 
   // 2. Compose services + scrape job.
   addComposeServices(system, built.services, secondaryId, ENGINE_LABEL[engine], 'Add read replica')
@@ -369,17 +426,20 @@ export async function handleCreateReplica(body) {
 
   // 3. Manifest: mark the primary, add the secondary node.
   primaryNode.role = 'primary'
+  // Cassandra's secondary is a ring peer (accepts writes), not a read-only standby —
+  // reflect that in the label/flags the diagram + Schema tab read.
+  const isCassandra = engine === 'cassandra'
   const node = {
     id: secondaryId,
     // Engine is shown by the node `type` in the header's upper-right corner, so the
-    // label is just the name + the meaningful "(replica)" qualifier (no engine prefix).
-    label: `${secondaryId} (replica)`,
+    // label is just the name + the meaningful qualifier (no engine prefix).
+    label: `${secondaryId} (${isCassandra ? 'cluster node' : 'replica'})`,
     type: engine,
     origin: 'create-database',
     role: 'secondary',
     replicaOf: primary,
-    replication: mode,
-    readonly: true,
+    replication: isCassandra ? 'peer' : mode,
+    readonly: !isCassandra,
     position: replicaPosition(primaryNode, ordinal),
     metrics: built.metrics,
     health: built.health,

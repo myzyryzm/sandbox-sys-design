@@ -122,11 +122,71 @@ async function introspectBlob(system, id) {
     .map((name) => ({ name, fields: [] }))
 }
 
+async function introspectDynamo(system, id) {
+  // DynamoDB Local has no CLI in its container, so introspect via the boto3-equipped
+  // exporter sidecar. DynamoDB is schemaless beyond its keys, so "fields" are the
+  // table's key attributes (partition/sort) with their role + attribute type.
+  const py =
+    'import os, boto3\n' +
+    'c = boto3.client("dynamodb", endpoint_url=os.environ["DDB_ENDPOINT"], region_name="us-east-1",' +
+    ' aws_access_key_id="sandbox", aws_secret_access_key="sandbox")\n' +
+    'for name in c.list_tables().get("TableNames", []):\n' +
+    '    d = c.describe_table(TableName=name)["Table"]\n' +
+    '    types = {a["AttributeName"]: a["AttributeType"] for a in d.get("AttributeDefinitions", [])}\n' +
+    '    parts = [k["AttributeName"] + ":" + k["KeyType"] + "(" + types.get(k["AttributeName"], "?") + ")" for k in d.get("KeySchema", [])]\n' +
+    '    print(name + "\\t" + ",".join(parts))\n'
+  const { stdout } = await composeExec(system, `${id}-exporter`, { envFlags: [], argv: ['python', '-c', py] })
+  return parseTabbed(stdout)
+}
+
+async function introspectCassandra(system, id) {
+  // Introspect via the cassandra-driver-equipped exporter sidecar: read the columns
+  // of the db's keyspace from system_schema, reporting each column's type + kind
+  // (partition_key / clustering / regular).
+  const dbName = id.replace(/-/g, '_')
+  const py =
+    'import os\n' +
+    'from collections import defaultdict\n' +
+    'from cassandra.cluster import Cluster\n' +
+    's = Cluster([os.environ["CASSANDRA_HOST"]], port=int(os.environ.get("CASSANDRA_PORT", "9042"))).connect()\n' +
+    'rows = s.execute("SELECT table_name, column_name, type, kind FROM system_schema.columns WHERE keyspace_name=%s", (os.environ["KS"],))\n' +
+    'cols = defaultdict(list)\n' +
+    'for r in rows:\n' +
+    '    cols[r.table_name].append(r.column_name + ":" + r.type + "(" + r.kind + ")")\n' +
+    'for t, fs in cols.items():\n' +
+    '    print(t + "\\t" + ",".join(fs))\n'
+  const { stdout } = await composeExec(system, `${id}-exporter`, { envFlags: ['-e', `KS=${dbName}`], argv: ['python', '-c', py] })
+  return parseTabbed(stdout)
+}
+
+// Parse `table\tname:type,name:type` lines (shared by the dynamo/cassandra probes).
+function parseTabbed(stdout) {
+  const entities = []
+  for (const line of stdout.split('\n')) {
+    const t = line.indexOf('\t')
+    if (t < 0) continue
+    const name = line.slice(0, t).trim()
+    if (!name) continue
+    const fields = line
+      .slice(t + 1)
+      .split(',')
+      .filter(Boolean)
+      .map((pair) => {
+        const i = pair.indexOf(':')
+        return i < 0 ? { name: pair, type: '' } : { name: pair.slice(0, i), type: pair.slice(i + 1) }
+      })
+    entities.push({ name, fields })
+  }
+  return entities
+}
+
 const INTROSPECTORS = {
   postgres: introspectPostgres,
   mongodb: introspectMongo,
   redis: introspectRedis,
   'object-store': introspectBlob,
+  dynamodb: introspectDynamo,
+  cassandra: introspectCassandra,
 }
 
 export async function getSchema(system, id) {

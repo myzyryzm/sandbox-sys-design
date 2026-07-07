@@ -2,11 +2,12 @@
 name: sandbox-database-cdc
 description: >-
   Build the Change Data Capture (CDC) worker for a database in a "Distributed Systems
-  Sandbox" system (systems/<id>/). Use when a CDC rule was added to a postgres/mongodb
-  database and a real per-database worker container (`<db>-cdc`) must be authored to
-  stream row changes (INSERT/UPDATE/DELETE) to a Kafka topic. Covers the worker's
-  Dockerfile/app.py, postgres logical replication / mongo change streams, Kafka
-  production, the metrics it exports, and the docker rebuild/verify steps.
+  Sandbox" system (systems/<id>/). Use when a CDC rule was added to a
+  postgres/mongodb/dynamodb/cassandra database and a real per-database worker container
+  (`<db>-cdc`) must be authored to stream row changes (INSERT/UPDATE/DELETE) to a Kafka
+  topic. Covers the worker's Dockerfile/app.py, postgres logical replication / mongo
+  change streams / DynamoDB Streams / Cassandra polling capture, Kafka production, the
+  metrics it exports, and the docker rebuild/verify steps.
 ---
 
 # Building a sandbox CDC worker
@@ -27,10 +28,14 @@ already performed the mechanical scaffold:
 
 - Wrote `systems/<id>/<db>/cdc.json` — the rule list, **mounted into the worker at
   `/cdc.json:ro`**.
-- **Enabled the engine for CDC** and recreated the database container:
+- **Enabled the engine for CDC** (postgres/mongodb only) and recreated the database container:
   - postgres → added `command: postgres -c wal_level=logical -c max_wal_senders=10 -c max_replication_slots=10`.
   - mongodb → added `command: mongod --replSet rs0 --bind_ip_all` and ran `rs.initiate(...)`
     (single-node replica set `rs0`).
+  - dynamodb → **nothing to enable**: the tables were created with DynamoDB Streams on
+    (`StreamViewType=NEW_AND_OLD_IMAGES`), so the db container is untouched — tail the streams.
+  - cassandra → **nothing to enable**: the db container is untouched. Use **polling capture**
+    (query each table on an interval and diff), NOT commitlog CDC — see the Cassandra section.
 - Added the `<db>-cdc` compose service (`build: ./<db>-cdc`, the env below, the cdc.json
   mount), its Prometheus scrape job (job `<db>-cdc`, target `<db>-cdc:8000`), the manifest
   node (`type: "cdc"`, `origin: "create-cdc"`, `cdcOf: "<db>"`) and edges
@@ -53,6 +58,8 @@ Author three files, then build. Working directory is the repo root.
 - `requirements.txt` — engine driver + Kafka client + metrics:
   - postgres: `psycopg2-binary`, `kafka-python`, `prometheus_client`
   - mongodb: `pymongo`, `kafka-python`, `prometheus_client`
+  - dynamodb: `boto3`, `kafka-python`, `prometheus_client`
+  - cassandra: `cassandra-driver`, `kafka-python`, `prometheus_client` (set `ENV CASS_DRIVER_NO_EXTENSIONS=1` in the Dockerfile to skip the C-extension build)
 - `Dockerfile`:
   ```dockerfile
   FROM python:3.12-slim
@@ -71,8 +78,10 @@ Author three files, then build. Working directory is the repo root.
   Read it at startup; **do not hardcode** the list. Each rule routes one table's
   `operations` to `stream`/`topic`.
 - **Connection** comes from env: `CDC_ENGINE`, `CDC_DB_HOST`, `CDC_DB_PORT`, `CDC_DB_NAME`,
-  `CDC_DB_USER`, `CDC_DB_PASSWORD` (postgres), and `CDC_PG_SLOT` (postgres — the logical
-  replication slot name you MUST use, so the backend can drop it on teardown).
+  `CDC_DB_USER`, `CDC_DB_PASSWORD`, and `CDC_PG_SLOT` (postgres — the logical replication
+  slot name you MUST use, so the backend can drop it on teardown). **DynamoDB** instead gets
+  `DDB_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` (no
+  `CDC_DB_NAME`). **Cassandra** uses `CDC_DB_NAME` as the keyspace.
 - **Kafka**: each rule's broker bootstrap is `<stream>:9092` (PLAINTEXT). Keep one producer
   per distinct stream. Auto-create is OFF, so ensure the topic exists (create it with
   `kafka-python`'s `KafkaAdminClient` if missing — ignore "already exists").
@@ -226,6 +235,146 @@ with db.watch(full_document='updateLookup') as stream:
 Notes: DELETE change events carry only `documentKey` (the `_id`) unless pre-images are
 enabled on the collection (`changeStreamPreAndPostImages`) — fine for "a row was deleted".
 
+## DynamoDB — Streams
+
+The tables already have Streams on (`NEW_AND_OLD_IMAGES`). Tail them with the
+**`dynamodbstreams`** boto3 client: for each captured table, find `LatestStreamArn` from
+`describe_table`, list its shards, take a `LATEST` (or `TRIM_HORIZON`) iterator per shard,
+and poll `get_records`. `eventName` maps `INSERT→INSERT`, `MODIFY→UPDATE`, `REMOVE→DELETE`.
+
+```python
+import os, json, time
+import boto3
+from prometheus_client import Counter, start_http_server
+from kafka import KafkaProducer
+from kafka.admin import KafkaAdminClient, NewTopic
+
+CAPTURED = Counter('cdc_events_captured_total', 'changes captured', ['table', 'op'])
+PRODUCED = Counter('cdc_events_produced_total', 'events produced', ['topic'])
+ERRORS = Counter('cdc_errors_total', 'cdc errors')
+
+rules = json.load(open('/cdc.json'))['rules']
+routes = {}
+for r in rules:
+    routes.setdefault(r['table'], []).append({'ops': set(r['operations']), 'stream': r['stream'], 'topic': r['topic']})
+
+producers = {}  # stream -> KafkaProducer (create topic on first use; see the postgres example)
+def producer_for(stream, topic): ...  # same shape as the other engines
+
+REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+ep = os.environ['DDB_ENDPOINT']
+ddb = boto3.client('dynamodb', endpoint_url=ep, region_name=REGION)
+streams = boto3.client('dynamodbstreams', endpoint_url=ep, region_name=REGION)
+OP_MAP = {'INSERT': 'INSERT', 'MODIFY': 'UPDATE', 'REMOVE': 'DELETE'}
+
+def shard_iters(table):
+    arn = ddb.describe_table(TableName=table)['Table'].get('LatestStreamArn')
+    if not arn:
+        return {}
+    shards = streams.describe_stream(StreamArn=arn)['StreamDescription'].get('Shards', [])
+    return {sh['ShardId']: streams.get_shard_iterator(
+        StreamArn=arn, ShardId=sh['ShardId'], ShardIteratorType='LATEST')['ShardIterator'] for sh in shards}
+
+start_http_server(8000)
+iters = {t: shard_iters(t) for t in routes}
+while True:
+    for table, sh in iters.items():
+        for sid, it in list(sh.items()):
+            if not it:
+                continue
+            try:
+                resp = streams.get_records(ShardIterator=it, Limit=100)
+            except Exception:
+                ERRORS.inc(); sh[sid] = None; continue
+            for rec in resp.get('Records', []):
+                op = OP_MAP.get(rec['eventName'])
+                img = rec.get('dynamodb', {})
+                for route in routes.get(table, []):
+                    if op and op in route['ops']:
+                        CAPTURED.labels(table, op).inc()
+                        producer_for(route['stream'], route['topic']).send(route['topic'],
+                            {'table': table, 'op': op, 'keys': img.get('Keys'),
+                             'new': img.get('NewImage'), 'old': img.get('OldImage')})
+                        PRODUCED.labels(route['topic']).inc()
+            sh[sid] = resp.get('NextShardIterator')
+    time.sleep(2)
+```
+
+Notes: dynamodb-local usually has a single shard per table; re-discover shards periodically
+if you want to survive shard splits. `LATEST` captures only changes after the worker starts
+(use `TRIM_HORIZON` to replay from the beginning).
+
+## Cassandra — polling capture (no commitlog CDC)
+
+Cassandra's native commitlog CDC needs a binary commitlog reader and is too heavy for the
+sandbox. Use **polling**: on an interval, `SELECT *` each captured table and diff against
+the previous snapshot — new primary keys are INSERTs, changed rows are UPDATEs, vanished
+keys are DELETEs. Sandbox tables are tiny, so a full scan is fine. This is an approximation
+(it can miss rapid intermediate states between polls) — say so if asked.
+
+```python
+import os, json, time
+from cassandra.cluster import Cluster
+from prometheus_client import Counter, start_http_server
+from kafka import KafkaProducer
+from kafka.admin import KafkaAdminClient, NewTopic
+
+CAPTURED = Counter('cdc_events_captured_total', 'changes captured', ['table', 'op'])
+PRODUCED = Counter('cdc_events_produced_total', 'events produced', ['topic'])
+ERRORS = Counter('cdc_errors_total', 'cdc errors')
+
+KS = os.environ['CDC_DB_NAME']
+rules = json.load(open('/cdc.json'))['rules']
+routes = {}
+for r in rules:
+    routes.setdefault(r['table'], []).append({'ops': set(r['operations']), 'stream': r['stream'], 'topic': r['topic']})
+
+producers = {}
+def producer_for(stream, topic): ...  # same shape as the other engines
+
+session = Cluster([os.environ['CDC_DB_HOST']], port=int(os.environ.get('CDC_DB_PORT', 9042))).connect(KS)
+
+def pk_cols(table):
+    rows = session.execute(
+        "SELECT column_name, kind FROM system_schema.columns WHERE keyspace_name=%s AND table_name=%s", (KS, table))
+    return [r.column_name for r in rows if r.kind in ('partition_key', 'clustering')]
+
+def emit(table, op, row):
+    for route in routes.get(table, []):
+        if op in route['ops']:
+            CAPTURED.labels(table, op).inc()
+            producer_for(route['stream'], route['topic']).send(route['topic'], {'table': table, 'op': op, 'row': row})
+            PRODUCED.labels(route['topic']).inc()
+
+start_http_server(8000)
+pks = {t: pk_cols(t) for t in routes}
+state = {}  # table -> { pk_tuple: row_json }
+while True:
+    for table in routes:
+        try:
+            rows = list(session.execute(f'SELECT * FROM {table}'))
+        except Exception:
+            ERRORS.inc(); continue
+        prev, seen = state.get(table, {}), {}
+        for r in rows:
+            d = r._asdict()
+            key = tuple(str(d[c]) for c in pks[table])
+            js = json.dumps(d, sort_keys=True, default=str)
+            seen[key] = js
+            if key not in prev:
+                emit(table, 'INSERT', d)
+            elif prev[key] != js:
+                emit(table, 'UPDATE', d)
+        for key in prev:
+            if key not in seen:
+                emit(table, 'DELETE', dict(zip(pks[table], key)))
+        state[table] = seen
+    time.sleep(int(os.environ.get('CDC_POLL_SECONDS', '3')))
+```
+
+Notes: seed the snapshot on the first pass without emitting if you don't want the initial
+table contents treated as INSERTs — or embrace it (a fresh worker replays current rows once).
+
 ## Build + verify
 
 ```
@@ -235,9 +384,11 @@ docker compose -f systems/<id>/docker-compose.yml up -d --build <db>-cdc
 Then:
 1. `docker compose -f systems/<id>/docker-compose.yml ps` → `<db>-cdc` is Up; its Prometheus
    target is UP at `http://localhost:9090/targets`.
-2. Make a change the rules cover — e.g. the db's **Seed** tab, or
-   `docker compose -f systems/<id>/docker-compose.yml exec -T <db> psql -U sandbox -d <dbname> -c "INSERT …"`
-   (postgres) / `… exec -T <db> mongosh <dbname> --eval 'db.<coll>.insertOne({…})'` (mongo).
+2. Make a change the rules cover — e.g. the db's **Seed** tab, or:
+   - postgres: `… exec -T <db> psql -U sandbox -d <dbname> -c "INSERT …"`
+   - mongodb: `… exec -T <db> mongosh <dbname> --eval 'db.<coll>.insertOne({…})'`
+   - cassandra: `… exec -T <db> cqlsh -e "INSERT INTO <dbname>.<table> (id) VALUES ('x');"`
+   - dynamodb: `… exec -T <db>-exporter python -c "import os,boto3;boto3.client('dynamodb',endpoint_url=os.environ['DDB_ENDPOINT'],region_name='us-east-1').put_item(TableName='<table>',Item={'id':{'S':'x'}})"`
 3. Consume the topic:
    `docker compose -f systems/<id>/docker-compose.yml exec -T <stream> /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server <stream>:9092 --topic <topic> --from-beginning`
    → the change event appears.

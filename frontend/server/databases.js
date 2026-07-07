@@ -56,6 +56,9 @@ export const HEALTH_RULES = [
   { color: 'green', when: 'value >= 1' },
 ]
 
+// Engines whose schema can be authored from the model bank by a launched session.
+export const MODEL_ENGINES = new Set(['postgres', 'mongodb', 'dynamodb', 'cassandra'])
+
 export function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let data = ''
@@ -258,11 +261,259 @@ function buildBlob({ name, entities }) {
   }
 }
 
+// --- Custom exporters for engines with no off-the-shelf Prometheus exporter ---
+// DynamoDB Local and Cassandra don't expose Prometheus metrics that fit the
+// "separate exporter container" pattern (Dynamo has none; Cassandra only via
+// fragile JMX), so each ships a tiny Python prometheus_client sidecar built from
+// these files under <name>/exporter/. Each sets a `<engine>_up` gauge to 1/0 so
+// the shared HEALTH_RULES work exactly like the image-based exporters.
+
+const DDB_EXPORTER_DOCKERFILE = `FROM python:3.12-slim
+RUN pip install --no-cache-dir boto3 prometheus_client
+COPY exporter.py /exporter.py
+CMD ["python", "/exporter.py"]
+`
+
+const DDB_EXPORTER_PY = `# Tiny Prometheus exporter for DynamoDB Local (no native metrics endpoint).
+import os, time
+import boto3
+from botocore.config import Config
+from prometheus_client import start_http_server, Gauge
+
+ENDPOINT = os.environ.get("DDB_ENDPOINT", "http://localhost:8000")
+REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+
+up = Gauge("dynamodb_up", "DynamoDB endpoint reachable (1) or not (0)")
+tables = Gauge("dynamodb_table_count", "Number of tables")
+items = Gauge("dynamodb_item_count", "Item count per table", ["table"])
+latency = Gauge("dynamodb_probe_latency_seconds", "Latency of the list-tables probe")
+
+CFG = Config(connect_timeout=2, read_timeout=3, retries={"max_attempts": 0})
+
+def client():
+    return boto3.client(
+        "dynamodb", endpoint_url=ENDPOINT, region_name=REGION,
+        aws_access_key_id="sandbox", aws_secret_access_key="sandbox", config=CFG)
+
+def count_items(c, name):
+    total, kwargs = 0, {"TableName": name, "Select": "COUNT"}
+    while True:
+        resp = c.scan(**kwargs)
+        total += resp.get("Count", 0)
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            return total
+        kwargs["ExclusiveStartKey"] = lek
+
+def collect():
+    try:
+        c = client()
+        t0 = time.monotonic()
+        names = c.list_tables().get("TableNames", [])
+        latency.set(time.monotonic() - t0)
+        tables.set(len(names))
+        for name in names:
+            try:
+                items.labels(table=name).set(count_items(c, name))
+            except Exception:
+                pass
+        up.set(1)
+    except Exception:
+        up.set(0)
+
+if __name__ == "__main__":
+    start_http_server(9100)
+    while True:
+        collect()
+        time.sleep(5)
+`
+
+const CASS_EXPORTER_DOCKERFILE = `FROM python:3.12-slim
+ENV CASS_DRIVER_NO_EXTENSIONS=1
+RUN pip install --no-cache-dir cassandra-driver prometheus_client
+COPY exporter.py /exporter.py
+CMD ["python", "/exporter.py"]
+`
+
+const CASS_EXPORTER_PY = `# Tiny Prometheus exporter for Cassandra (JMX-free; reads system tables).
+import os, time
+from prometheus_client import start_http_server, Gauge
+from cassandra.cluster import Cluster
+
+HOST = os.environ.get("CASSANDRA_HOST", "localhost")
+PORT = int(os.environ.get("CASSANDRA_PORT", "9042"))
+
+up = Gauge("cassandra_up", "Cassandra reachable (1) or not (0)")
+nodes = Gauge("cassandra_node_count", "Nodes in the cluster (local + peers)")
+tables = Gauge("cassandra_table_count", "Tables per keyspace", ["keyspace"])
+latency = Gauge("cassandra_probe_latency_seconds", "Latency of the schema probe query")
+
+SYSTEM_KS = {
+    "system", "system_schema", "system_auth", "system_distributed",
+    "system_traces", "system_views", "system_virtual_schema",
+}
+
+def collect(session):
+    t0 = time.monotonic()
+    rows = list(session.execute("SELECT keyspace_name FROM system_schema.tables"))
+    latency.set(time.monotonic() - t0)
+    counts = {}
+    for r in rows:
+        if r.keyspace_name in SYSTEM_KS:
+            continue
+        counts[r.keyspace_name] = counts.get(r.keyspace_name, 0) + 1
+    for ks, n in counts.items():
+        tables.labels(keyspace=ks).set(n)
+    peers = list(session.execute("SELECT peer FROM system.peers"))
+    nodes.set(len(peers) + 1)
+
+def main():
+    start_http_server(9100)
+    session = None
+    while True:
+        try:
+            if session is None:
+                session = Cluster([HOST], port=PORT, connect_timeout=5).connect()
+            collect(session)
+            up.set(1)
+        except Exception:
+            up.set(0)
+            session = None
+        time.sleep(5)
+
+if __name__ == "__main__":
+    main()
+`
+
+function buildDynamo({ name, entities }) {
+  // DynamoDB Local has no init-dir; a one-shot aws-cli sidecar creates a table per
+  // entity (id partition key). Streams are enabled so a CDC worker can tail them.
+  // -sharedDb makes every client (init, exporter, services) see one shared DB
+  // regardless of creds/region; -inMemory keeps it lightweight (seeds give
+  // rebuild-durability, matching the other engines' ephemeral-on-recreate model).
+  // init.sh is MOUNTED (not inline) so the model-schema + seeding flows can rewrite
+  // it and a rebuild reproduces the tables — mirroring Cassandra's init.cql.
+  const create =
+    '#!/bin/sh\nset -e\n' +
+    `until aws dynamodb list-tables --endpoint-url http://${name}:8000 >/dev/null 2>&1; do sleep 1; done\n` +
+    entities
+      .map((e) =>
+        `aws dynamodb create-table --endpoint-url http://${name}:8000 --table-name "${e.name}" ` +
+        '--attribute-definitions AttributeName=id,AttributeType=S ' +
+        '--key-schema AttributeName=id,KeyType=HASH --billing-mode PAY_PER_REQUEST ' +
+        '--stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES || true')
+      .join('\n') +
+    // The Seed tab mounts seed.sh here (if any); replay it after tables exist.
+    '\n[ -f /seed.sh ] && sh /seed.sh || true\n'
+
+  const awsEnv = {
+    AWS_ACCESS_KEY_ID: 'sandbox',
+    AWS_SECRET_ACCESS_KEY: 'sandbox',
+    AWS_DEFAULT_REGION: 'us-east-1',
+  }
+
+  return {
+    nodeType: 'dynamodb',
+    services: {
+      [name]: {
+        image: 'amazon/dynamodb-local:latest',
+        command: ['-jar', 'DynamoDBLocal.jar', '-sharedDb', '-inMemory'],
+      },
+      [`${name}-init`]: {
+        image: 'amazon/aws-cli:latest',
+        depends_on: [name],
+        restart: 'no',
+        environment: awsEnv,
+        volumes: [`./${name}/init.sh:/init.sh:ro`],
+        entrypoint: ['sh', '/init.sh'],
+      },
+      [`${name}-exporter`]: {
+        build: `./${name}/exporter`,
+        depends_on: [name],
+        environment: { DDB_ENDPOINT: `http://${name}:8000`, ...awsEnv },
+      },
+    },
+    scrapeJob: { job_name: name, static_configs: [{ targets: [`${name}-exporter:9100`] }] },
+    metrics: [
+      { label: 'tables', query: `dynamodb_table_count{job="${name}"}`, unit: '' },
+      { label: 'items', query: `sum(dynamodb_item_count{job="${name}"})`, unit: '' },
+      { label: 'probe', query: `dynamodb_probe_latency_seconds{job="${name}"}`, unit: 'ms', scale: 1000 },
+    ],
+    health: { query: `dynamodb_up{job="${name}"}`, rules: HEALTH_RULES },
+    files: [
+      { rel: 'init.sh', content: create },
+      { rel: 'exporter/Dockerfile', content: DDB_EXPORTER_DOCKERFILE },
+      { rel: 'exporter/exporter.py', content: DDB_EXPORTER_PY },
+    ],
+  }
+}
+
+function buildCassandra({ name, dbName, entities }) {
+  // Cassandra has no init-dir either; a one-shot sidecar waits for CQL then applies
+  // init.cql (a keyspace + a table per entity with an `id text` partition key).
+  const tables = entities
+    .map((e) => `CREATE TABLE IF NOT EXISTS ${dbName}.${e.name} (id text PRIMARY KEY);`)
+    .join('\n')
+  const initCql =
+    `-- Generated by "Add database". Applied once ${name} accepts CQL.\n` +
+    `CREATE KEYSPACE IF NOT EXISTS ${dbName} WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};\n` +
+    tables + '\n'
+
+  const wait = [
+    'set -e',
+    `until cqlsh ${name} -e 'describe keyspaces' >/dev/null 2>&1; do echo "waiting for cassandra"; sleep 5; done`,
+    `cqlsh ${name} -f /init.cql`,
+    // The Seed tab mounts seed.cql here (if any); replay it after the schema.
+    `[ -f /seed.cql ] && cqlsh ${name} -f /seed.cql || true`,
+  ].join('\n')
+
+  return {
+    nodeType: 'cassandra',
+    services: {
+      [name]: {
+        image: 'cassandra:5',
+        environment: {
+          CASSANDRA_CLUSTER_NAME: 'sandbox',
+          // Cap the JVM so a sandbox host isn't swamped by Cassandra's defaults.
+          MAX_HEAP_SIZE: '512M',
+          HEAP_NEWSIZE: '128M',
+        },
+      },
+      [`${name}-init`]: {
+        image: 'cassandra:5',
+        depends_on: [name],
+        restart: 'no',
+        volumes: [`./${name}/init.cql:/init.cql:ro`],
+        entrypoint: ['sh', '-c', wait],
+      },
+      [`${name}-exporter`]: {
+        build: `./${name}/exporter`,
+        depends_on: [name],
+        environment: { CASSANDRA_HOST: name, CASSANDRA_PORT: '9042' },
+      },
+    },
+    scrapeJob: { job_name: name, static_configs: [{ targets: [`${name}-exporter:9100`] }] },
+    metrics: [
+      { label: 'tables', query: `sum(cassandra_table_count{job="${name}"})`, unit: '' },
+      { label: 'nodes', query: `cassandra_node_count{job="${name}"}`, unit: '' },
+      { label: 'probe', query: `cassandra_probe_latency_seconds{job="${name}"}`, unit: 'ms', scale: 1000 },
+    ],
+    health: { query: `cassandra_up{job="${name}"}`, rules: HEALTH_RULES },
+    files: [
+      { rel: 'init.cql', content: initCql },
+      { rel: 'exporter/Dockerfile', content: CASS_EXPORTER_DOCKERFILE },
+      { rel: 'exporter/exporter.py', content: CASS_EXPORTER_PY },
+    ],
+  }
+}
+
 const TYPES = {
   postgres: { label: 'PostgreSQL', fieldTypes: SQL_FIELD_TYPES, entityRe: IDENT_RE, build: buildPostgres },
   mongodb: { label: 'MongoDB', fieldTypes: MONGO_FIELD_TYPES, entityRe: IDENT_RE, build: buildMongo },
   redis: { label: 'Redis', fieldTypes: null, entityRe: IDENT_RE, build: buildRedis },
   blob: { label: 'Blob (S3)', fieldTypes: null, entityRe: BUCKET_RE, build: buildBlob },
+  dynamodb: { label: 'DynamoDB', fieldTypes: null, entityRe: IDENT_RE, build: buildDynamo },
+  cassandra: { label: 'Cassandra', fieldTypes: null, entityRe: IDENT_RE, build: buildCassandra },
 }
 
 // ---------------------------------------------------------------------------
@@ -291,8 +542,8 @@ function validate(body) {
   // record the chosen models on the node. Entities are not used in this mode.
   const models = Array.isArray(body.models) ? body.models : null
   if (models && models.length) {
-    if (type !== 'postgres' && type !== 'mongodb') {
-      throw bad('selecting models is only supported for postgres and mongodb')
+    if (!MODEL_ENGINES.has(type)) {
+      throw bad('selecting models is not supported for this engine')
     }
     const bank = new Set(readModelsFile(system).models.map((m) => m.name))
     for (const n of models) {
@@ -404,9 +655,10 @@ export async function handleCreate(body) {
   //    placeholder — the launched Claude session writes the real schema).
   const dir = systemDir(system)
   if (built.files.length) {
-    fs.mkdirSync(path.join(dir, name), { recursive: true })
     for (const f of built.files) {
-      fs.writeFileSync(path.join(dir, name, f.rel), f.content)
+      const dest = path.join(dir, name, f.rel)
+      fs.mkdirSync(path.dirname(dest), { recursive: true }) // f.rel may be nested (e.g. exporter/Dockerfile)
+      fs.writeFileSync(dest, f.content)
     }
   }
 
@@ -433,8 +685,8 @@ export function handleSetModels(body) {
     throw bad(`"${id}" is not a database in this system`)
   }
   if (node.replicaOf) throw bad('cannot author schema on a read replica')
-  if (node.type !== 'postgres' && node.type !== 'mongodb') {
-    throw bad('selecting models is only supported for postgres and mongodb')
+  if (!MODEL_ENGINES.has(node.type)) {
+    throw bad('selecting models is not supported for this engine')
   }
   const models = Array.isArray(body.models) ? body.models : []
   if (!models.length) throw bad('select at least one model')

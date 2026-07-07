@@ -3,9 +3,9 @@ name: sandbox-database
 description: >-
   Add, update, or delete a database in a "Distributed Systems Sandbox" system
   (systems/<id>/). Use whenever the task is to provision a new datastore (postgres,
-  mongodb, redis, or object-store/MinIO), change an existing one's schema or metrics,
-  or remove it — it covers the compose service + exporter, the Prometheus scrape job,
-  the manifest node, the init script, and the docker rebuild/verify steps.
+  mongodb, redis, object-store/MinIO, dynamodb, or cassandra), change an existing one's
+  schema or metrics, or remove it — it covers the compose service + exporter, the
+  Prometheus scrape job, the manifest node, the init script, and the docker rebuild/verify steps.
 ---
 
 # Working on a sandbox database
@@ -26,9 +26,12 @@ a terminal session, reproduce the same shape.
 1. `systems/<id>/<db>/` — the datastore's init script (first-boot seeding):
    - **postgres** → `init.sql`, mounted at `/docker-entrypoint-initdb.d/init.sql`
    - **mongodb** → `init.js`, mounted at `/docker-entrypoint-initdb.d/init.js`
-   - **redis** / **object-store** → no init dir; a one-shot sidecar seeds them instead.
+   - **cassandra** → `init.cql` (keyspace + tables), run by a `<db>-init` sidecar via `cqlsh -f`.
+   - **redis** / **object-store** / **dynamodb** → no init dir; a one-shot `<db>-init` sidecar
+     seeds them instead (dynamodb runs a mounted `init.sh` of `aws dynamodb create-table` calls).
 2. `systems/<id>/docker-compose.yml` — the db service, plus a Prometheus **exporter**
-   service (and an **`-init`** sidecar for redis/object-store). See the engine table below.
+   service (and an **`-init`** sidecar for redis/object-store/dynamodb/cassandra). See the engine
+   table below.
 3. `systems/<id>/prometheus/prometheus.yml` — a **scrape job** named exactly `<db>` whose
    target is the exporter. The `job_name` is the `job="<db>"` label every metric query uses.
 4. `systems/<id>/manifest.json` — a **node** the diagram draws: `{ id:<db>, label, type,
@@ -62,6 +65,25 @@ a terminal session, reproduce the same shape.
   creds `sandbox`/`sandbox123`, `MINIO_PROMETHEUS_AUTH_TYPE=public`); **no separate exporter** —
   scrape MinIO directly with `metrics_path: /minio/v2/metrics/cluster` at `<db>:9000`; a
   `<db>-init` `minio/mc:latest` sidecar makes the buckets; health `up{job="<db>"}`.
+- **dynamodb**: `amazon/dynamodb-local:latest` (`command: -jar DynamoDBLocal.jar -sharedDb
+  -inMemory`; `-sharedDb` so every client sees one DB, `-inMemory` = ephemeral, seeds give
+  rebuild-durability). No off-the-shelf exporter → a **custom exporter** `<db>-exporter` built
+  from `<db>/exporter/{Dockerfile,exporter.py}` (python + boto3, `start_http_server(9100)`,
+  emits `dynamodb_up`/`dynamodb_table_count`/`dynamodb_item_count`); scrape `<db>-exporter:9100`.
+  A `<db>-init` `amazon/aws-cli:latest` sidecar runs a mounted `init.sh` (`aws dynamodb
+  create-table … --stream-specification …`, streams on for CDC); health `dynamodb_up{job="<db>"}`.
+- **cassandra**: `cassandra:5` (`CASSANDRA_CLUSTER_NAME=sandbox`, cap `MAX_HEAP_SIZE`/`HEAP_NEWSIZE`;
+  slow ~30–90s start). Custom exporter `<db>-exporter` from `<db>/exporter/` (python +
+  cassandra-driver, `CASS_DRIVER_NO_EXTENSIONS=1`, emits `cassandra_up`/`cassandra_node_count`/
+  `cassandra_table_count`); scrape `<db>-exporter:9100`. A `<db>-init` `cassandra:5` sidecar waits
+  for CQL then `cqlsh -f /init.cql`; health `cassandra_up{job="<db>"}`.
+
+> **Custom exporters** (dynamodb/cassandra): neither engine has a drop-in Prometheus exporter that
+> fits the "separate exporter container" pattern here (DynamoDB Local has none; Cassandra only via
+> fragile JMX), so each ships a tiny python `prometheus_client` sidecar built from
+> `<db>/exporter/{Dockerfile,exporter.py}` that probes the DB and sets a `<engine>_up` 0/1 gauge.
+> The `<db>-init` sidecar also replays a seed file if the Seed tab mounted one (dynamodb `seed.sh`
+> after `init.sh`; cassandra `seed.cql` after `init.cql`).
 
 ## Rebuilding (you run INSIDE the web app's dev server)
 
@@ -93,13 +115,26 @@ a terminal session, reproduce the same shape.
    `<db>-exporter` up, and the node appears on the diagram with live metrics (target is UP
    at `http://localhost:9090/targets`).
 
-## Authoring schema from models (postgres / mongodb)
+## Authoring schema from models (postgres / mongodb / dynamodb / cassandra)
 
 The web app can build a db's schema from the **model bank** (`systems/<id>/models.json`, each model a
 TypeScript interface). "Add database ▸ From model bank" provisions an **empty** container and records
 the chosen models on the node as `schemaModels`; the **Schema** tab's "Apply models" does the same for
 an existing db (additive). Either way it launches a session (this skill) to write the actual schema.
-When that's the task:
+The launched prompt inlines the right per-engine rules; the postgres/mongodb rules below are the
+relational/document case. **The NoSQL engines differ sharply — follow the prompt's guidance:**
+
+- **dynamodb** — schemaless beyond keys. Each model → a table; pick the partition (HASH) key from a
+  `// PK` comment (else `id`), optional sort (RANGE) key from `// SK`. NO joins: a referenced model is
+  DENORMALIZED (embed as a map attribute), never a foreign key. The "schema" is table + key
+  definitions authored into `<db>/init.sh` (`aws dynamodb create-table … --stream-specification …`),
+  applied live via the same `aws` calls (ignore ResourceInUseException).
+- **cassandra** — query-driven, denormalized. Each model → a table in keyspace `<dbname>`; PRIMARY KEY
+  from `// PK` (partition) + `// CK` (clustering) comments (else `id text`). NO joins: denormalize a
+  referenced model into columns or a UDT. Author `<db>/init.cql` (`CREATE TABLE IF NOT EXISTS …`),
+  apply live via `cqlsh -f`.
+
+For postgres / mongodb:
 
 - **`//` comments in the model definitions are authoritative schema directives** — honor them
   (PK/FK/unique/index/length/check/default/nullable/type) and let them **override** the defaults below.
@@ -133,8 +168,11 @@ node's `schemaModels` list and the on-disk schema in sync.
 
 ## Seeding data (auto-replayed fixtures)
 
-A postgres/mongodb database can carry **seed rows** that survive resets. The web app's **Seed** tab
-(`/api/db-seed`) writes these — by hand, reproduce the same shape:
+A postgres/mongodb/cassandra/dynamodb database can carry **seed rows** that survive resets. The web
+app's **Seed** tab (`/api/db-seed`) writes these — by hand, reproduce the same shape. The idempotent
+artifact + replay path is engine-specific: postgres `seed.sql` / mongodb `seed.js` mount into the init
+dir; **cassandra `seed.cql`** and **dynamodb `seed.sh`** have no init dir, so they mount into the
+`<db>-init` sidecar, which runs them AFTER the schema (see the exporter note above). For pg/mongo:
 
 - **`systems/<id>/<db>/seeds.json`** is the source of truth:
   `{ "tables": [ { "table": "<name>", "rows": [ { "<field>": "<value>", … } ] } ] }`. `tables[]` is
@@ -158,6 +196,8 @@ A postgres/mongodb database can carry **seed rows** that survive resets. The web
   - mongodb: `docker compose -f systems/<id>/docker-compose.yml exec -T <db> mongosh <dbname> --quiet --eval "<JS>"`
   - redis: `docker compose -f systems/<id>/docker-compose.yml exec -T <db> redis-cli ...`
   - object-store: `docker compose -f systems/<id>/docker-compose.yml exec -T <db> ls -1 /data` (one dir per bucket)
+  - cassandra: `docker compose -f systems/<id>/docker-compose.yml exec -T <db> cqlsh -e "<CQL>"` (keyspace-qualify, e.g. `<dbname>.<table>`)
+  - dynamodb: the db container has no CLI — run boto3 in the exporter: `docker compose -f systems/<id>/docker-compose.yml exec -T <db>-exporter python -c "import os,boto3;c=boto3.client('dynamodb',endpoint_url=os.environ['DDB_ENDPOINT'],region_name='us-east-1');print(c.list_tables())"`
   (If you'd rather start clean, `docker compose ... down -v <db>` drops its volume so the
   init script re-runs on the next `up -d` — destroys existing data.)
 - **Change which metrics/health the diagram shows**: edit the node's `metrics`/`health` in
@@ -168,10 +208,16 @@ A postgres/mongodb database can carry **seed rows** that survive resets. The web
 ## Read replicas (primary / secondary)
 
 A database can have **read replicas**: a primary that keeps taking writes plus one or more
-**real, read-only streaming standbys**. Supported for **postgres, mongodb, redis** (an
-object-store has no replica concept). The web app's per-database modal ("Add read replica") and
-`POST /api/db-replicas { system, primary, mode }` do all of the below automatically; reproduce
-the same shape by hand.
+**real, read-only streaming standbys**. Supported for **postgres, mongodb, redis**; **object-store
+and dynamodb have no replica concept** (DynamoDB Local has zero replication — no option is offered).
+**Cassandra is different**: its "replica" is a **second node that JOINS the ring** (via
+`CASSANDRA_SEEDS=<primary>` + the shared cluster name), NOT a read-only standby — it accepts writes
+like any Cassandra node (`readonly:false`, `replication:"peer"`, labeled "cluster node"). The backend
+raises the keyspace RF to 2 before the node bootstraps so it streams existing data; after a
+from-scratch rebuild the keyspace is recreated at RF=1, so re-add the node (or `ALTER KEYSPACE` +
+`nodetool repair`) to restore RF=2. The web app's per-database modal ("Add read replica") and
+`POST /api/db-replicas { system, primary, mode }` do all of the below automatically; reproduce the
+same shape by hand.
 
 ### Conventions
 - **Secondary id = `<primary>-<N>`** (`catalog-db-1`, `catalog-db-2`, …), `N` = max existing
@@ -207,6 +253,11 @@ the same shape by hand.
   `--mongodb.uri=mongodb://<id>:27017/?directConnection=true`.
 - **redis** — the secondary runs `redis-server --replicaof <primary> 6379 --replica-read-only yes`
   (`replica-read-only` is the default). No primary change.
+- **cassandra** — the second node runs `cassandra:5` with `CASSANDRA_SEEDS=<primary>` and the same
+  `CASSANDRA_CLUSTER_NAME=sandbox`; it bootstraps into the ring automatically (no primary recreate).
+  Reuse the primary's exporter build (`build: ./<primary>/exporter`, `CASSANDRA_HOST=<secondaryId>`).
+  Before bringing it up, `ALTER KEYSPACE <ks> … replication_factor: 2` on the primary. It is a ring
+  peer (accepts writes), NOT read-only. Verify with `nodetool status` (two `UN` nodes).
 
 ### Rebuild + verify
 - Bring up **only the new services** so the running primary isn't disrupted:

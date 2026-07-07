@@ -14,6 +14,11 @@ import ServiceCallsTab from './ServiceCallsTab.jsx'
 import ServiceLbTab from './ServiceLbTab.jsx'
 import { customTypeOf } from './customTypes/index.js'
 
+// Which database engines expose the CDC / Seed tabs (must match the backend's
+// CDC_ENGINES in cdc.js and SEED_ENGINES in dbseed.js).
+const CDC_ENGINES = ['postgres', 'mongodb', 'dynamodb', 'cassandra']
+const SEED_ENGINES = ['postgres', 'mongodb', 'cassandra', 'dynamodb']
+
 /**
  * Single "Edit" modal for a service / database / event-stream node. It replaces the
  * cluster of header icons that used to sit on each node (≡ endpoints, ⇄ gRPC, ⏻
@@ -81,11 +86,9 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     tabs.push({ id: 'functions', label: 'Functions', Component: ClientScenarioTab })
   } else if (isDatabase) {
     tabs.push({ id: 'schema', label: isSecondary ? 'Replica' : 'Schema' })
-    // CDC + Seed (postgres/mongodb primaries only; replicas are read-only).
-    if (!isSecondary && (node.type === 'postgres' || node.type === 'mongodb')) {
-      tabs.push({ id: 'cdc', label: 'CDC' })
-      tabs.push({ id: 'seed', label: 'Seed' })
-    }
+    // CDC + Seed on primaries only (replicas are read-only). Each has its own engine set.
+    if (!isSecondary && CDC_ENGINES.includes(node.type)) tabs.push({ id: 'cdc', label: 'CDC' })
+    if (!isSecondary && SEED_ENGINES.includes(node.type)) tabs.push({ id: 'seed', label: 'Seed' })
   } else if (isEventStream) {
     tabs.push({ id: 'topics', label: 'Topics' })
     // Consumer functions: internal services that consume this cluster's topics. Rendered via the

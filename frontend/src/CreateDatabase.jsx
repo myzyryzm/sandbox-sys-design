@@ -36,7 +36,23 @@ const TYPE_META = {
     hasFields: false,
     defaultName: 'app-blob',
   },
+  dynamodb: {
+    label: 'DynamoDB (NoSQL key-value)',
+    entityWord: 'Table',
+    hasFields: false,
+    defaultName: 'app-ddb',
+  },
+  cassandra: {
+    label: 'Cassandra (wide-column)',
+    entityWord: 'Table',
+    hasFields: false,
+    defaultName: 'app-cass',
+  },
 }
+
+// Engines whose schema can be authored from the model bank (a launched Claude session
+// turns selected models into tables/collections). Others use manual entities only.
+const MODEL_ENGINES = ['postgres', 'mongodb', 'dynamodb', 'cassandra']
 
 function blankEntity(meta) {
   return { name: '', fields: meta.hasFields ? [{ name: '', type: meta.fieldTypes[0] }] : [] }
@@ -57,7 +73,7 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
   const meta = TYPE_META[type]
   const busy = status === 'submitting'
   const nameErr = nodeNameError(name)
-  const supportsModels = type === 'postgres' || type === 'mongodb'
+  const supportsModels = MODEL_ENGINES.includes(type)
   const modelMode = supportsModels && schemaSource === 'models'
 
   // The model bank powers the "From model bank" picker.
@@ -73,8 +89,8 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
     setName(TYPE_META[next].defaultName)
     setEntities([blankEntity(TYPE_META[next])])
     setError(null)
-    // Model schemas are postgres/mongodb only — fall back to manual for redis/blob.
-    if (next !== 'postgres' && next !== 'mongodb') setSchemaSource('manual')
+    // Model-bank schemas aren't offered for every engine (e.g. redis/blob) — fall back to manual.
+    if (!MODEL_ENGINES.includes(next)) setSchemaSource('manual')
   }
 
   const toggleModel = (n) =>

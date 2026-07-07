@@ -33,7 +33,8 @@ import { getSchema } from './dbschema.js'
 const pexec = promisify(execFile)
 const skipDocker = () => process.env.CDC_SKIP_REBUILD === '1'
 
-const CDC_ENGINES = new Set(['postgres', 'mongodb'])
+const CDC_ENGINES = new Set(['postgres', 'mongodb', 'dynamodb', 'cassandra'])
+const CDC_DB_PORTS = { postgres: 5432, mongodb: 27017, dynamodb: 8000, cassandra: 9042 }
 const CANON_OPS = ['INSERT', 'UPDATE', 'DELETE'] // canonical change-event order
 const OPS = new Set(CANON_OPS)
 const TOPIC_RE = /^[a-zA-Z0-9._-]+$/ // Kafka topic naming (also keeps it shell-safe)
@@ -61,7 +62,7 @@ function resolve(system, id) {
   const node = (manifest.nodes || []).find((n) => n.id === id)
   if (!node || node.origin !== 'create-database') throw bad(`"${id}" is not a database in this system`)
   if (node.replicaOf) throw bad('cannot configure CDC on a read replica')
-  if (!CDC_ENGINES.has(node.type)) throw bad('CDC is only supported for postgres and mongodb')
+  if (!CDC_ENGINES.has(node.type)) throw bad(`CDC is not supported for ${node.type}`)
   return { node, manifest }
 }
 
@@ -205,14 +206,21 @@ function workerService(engine, dbId, streams) {
   const environment = {
     CDC_ENGINE: engine,
     CDC_DB_HOST: dbId,
-    CDC_DB_PORT: engine === 'postgres' ? 5432 : 27017,
-    CDC_DB_NAME: dbName(dbId),
+    CDC_DB_PORT: CDC_DB_PORTS[engine],
+    CDC_DB_NAME: dbName(dbId), // postgres db / mongo db / cassandra keyspace (unused by dynamodb)
     CDC_DB_USER: 'sandbox',
     CDC_DB_PASSWORD: 'sandbox',
   }
   // The worker must name its logical replication slot CDC_PG_SLOT so the backend
   // can drop it on teardown (an orphan slot makes postgres retain WAL forever).
   if (engine === 'postgres') environment.CDC_PG_SLOT = pgSlot(dbId)
+  // DynamoDB Streams: the worker tails via boto3, so it needs the endpoint + creds.
+  if (engine === 'dynamodb') {
+    environment.DDB_ENDPOINT = `http://${dbId}:8000`
+    environment.AWS_ACCESS_KEY_ID = 'sandbox'
+    environment.AWS_SECRET_ACCESS_KEY = 'sandbox'
+    environment.AWS_DEFAULT_REGION = 'us-east-1'
+  }
   return {
     build: `./${workerOf(dbId)}`,
     depends_on: [dbId, ...streams],
@@ -363,7 +371,7 @@ async function handleAdd(body) {
 
   const schema = await getSchema(system, id)
   if (!schema.entities.find((e) => e.name === table)) {
-    throw bad(`unknown ${engine === 'postgres' ? 'table' : 'collection'} "${table}"`)
+    throw bad(`unknown ${engine === 'mongodb' ? 'collection' : 'table'} "${table}"`)
   }
 
   const stream = String(body.stream || '')
@@ -389,18 +397,21 @@ async function handleAdd(body) {
   const warnings = []
 
   if (!workerExists) {
-    // FIRST RULE: enable the engine for CDC, scaffold the worker (NOT built here —
-    // the spawned skill session authors + builds it), recreate the db.
+    // FIRST RULE: enable the engine for CDC (postgres/mongodb only), scaffold the worker
+    // (NOT built here — the spawned skill session authors + builds it). DynamoDB already
+    // has per-table Streams (set at table creation) and Cassandra uses a polling worker,
+    // so neither mutates or recreates the db container.
+    const dbCommandChanged = engine === 'postgres' || engine === 'mongodb'
     if (engine === 'postgres') {
       setServiceCommand(system, id, ['postgres', '-c', 'wal_level=logical', '-c', 'max_wal_senders=10', '-c', 'max_replication_slots=10'])
-    } else {
+    } else if (engine === 'mongodb') {
       setServiceCommand(system, id, ['mongod', '--replSet', 'rs0', '--bind_ip_all'])
     }
     const streams = [...new Set(cdc.rules.map((r) => r.stream))]
     scaffoldWorker(system, manifest, id, engine, streams)
 
     if (!skipDocker()) {
-      await run(system, ['up', '-d', id]) // recreate db with the new command
+      if (dbCommandChanged) await run(system, ['up', '-d', id]) // recreate db with the new command
       if (engine === 'mongodb') {
         const w = await initMongoReplSet(system, id)
         if (w) warnings.push(w)
