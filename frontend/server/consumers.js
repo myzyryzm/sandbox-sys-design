@@ -10,7 +10,7 @@
 //        consumer's loop CALLS/reads/writes — e.g. an API it POSTs to, a db it touches) is
 //        Claude-managed connection metadata: the diagram draws a persistent service->downstream
 //        line for each, exactly as it does for an endpoint's `downstream` (the consume edge
-//        cluster->service is separate, from the manifest). `downstreamDescriptions` (node id ->
+//        service->cluster is separate, from the manifest). `downstreamDescriptions` (node id ->
 //        one short line) is the matching Claude-authored blurb the diagram prints on each of those
 //        trace lines when the CONS row is clicked. Both are edited directly in consumers.json by a
 //        launched session and preserved across modal upserts (see upsertConsumer's ...prev).
@@ -19,14 +19,14 @@
 //        the service's app.py is authored by a launched Claude session (sandbox-event-stream
 //        skill) — like the endpoint flow. This plugin only does the MECHANICAL scaffold (no
 //        docker rebuild): register the consumer group in the cluster's streams.json and add the
-//        manifest edge cluster->service so the diagram draws + can trace the relationship.
+//        manifest edge service->cluster so the diagram draws + can trace the relationship.
 //   DELETE /api/consumers  { system, service, name }
 //     -> remove the (service, name) function, its streams.json consumer group, and the
-//        cluster->service edge (when nothing else needs it). Returns { ok, removed, wasImplemented }.
+//        service->cluster edge (when nothing else needs it). Returns { ok, removed, wasImplemented }.
 //
 // Mirrors scenarios.js (pure-JSON registry, no rebuild) but the owner is a service and the
 // relationship is "consumes topic X of cluster Y". The CONS rows on the service node and the
-// cluster->service trace are derived from this registry + the manifest edge.
+// service->cluster trace are derived from this registry + the manifest edge.
 import fs from 'node:fs'
 import path from 'node:path'
 import { systemDir, isValidSystem } from './systems.js'
@@ -128,18 +128,20 @@ function removeConsumerGroup(system, cluster, groupId) {
   return changed
 }
 
-// --- manifest edge cluster->service --------------------------------------------
+// --- manifest edge service->cluster --------------------------------------------
 
-// Ensure a {from:cluster, to:service, origin:"consumer-fn"} edge exists (so the diagram draws a
-// persistent dep line + can trace it). Tagged with `origin` so delete knows it's ours to remove.
+// Ensure a {from:service, to:cluster, origin:"consumer-fn"} edge exists (so the diagram draws a
+// persistent dep line + can trace it). The consumer subscribes to / reads from the cluster, so the
+// arrow points from the consuming service to the stream. Tagged with `origin` so delete knows it's
+// ours to remove.
 function addConsumerEdge(system, manifest, cluster, service) {
   if (!Array.isArray(manifest.edges)) manifest.edges = []
-  if (manifest.edges.some((e) => e && e.from === cluster && e.to === service)) return false
-  manifest.edges.push({ from: cluster, to: service, origin: 'consumer-fn' })
+  if (manifest.edges.some((e) => e && e.from === service && e.to === cluster)) return false
+  manifest.edges.push({ from: service, to: cluster, origin: 'consumer-fn' })
   return true
 }
 
-// Remove the cluster->service edge IFF we added it (origin "consumer-fn") and no remaining
+// Remove the service->cluster edge IFF we added it (origin "consumer-fn") and no remaining
 // consumer function still pairs this (cluster, service). Returns true if changed.
 function removeConsumerEdge(system, manifest, cluster, service, remaining) {
   if (!Array.isArray(manifest.edges)) return false
@@ -147,7 +149,7 @@ function removeConsumerEdge(system, manifest, cluster, service, remaining) {
   if (stillNeeded) return false
   const before = manifest.edges.length
   manifest.edges = manifest.edges.filter(
-    (e) => !(e && e.from === cluster && e.to === service && e.origin === 'consumer-fn'),
+    (e) => !(e && e.from === service && e.to === cluster && e.origin === 'consumer-fn'),
   )
   return manifest.edges.length !== before
 }

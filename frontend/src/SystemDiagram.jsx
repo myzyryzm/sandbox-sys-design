@@ -57,6 +57,9 @@ const COLOR_HEX = {
 const TRACE_COLOR = '#6ea8fe'
 const GRPC_COLOR = '#b18cf2'
 const REPLICA_COLOR = '#3fb6a8'
+// Kafka "consume" edge (a consumer service → the cluster it reads from). Amber + dashed so it
+// reads as distinct from a solid-gray producer/dep edge that points the same way (into the cluster).
+const CONSUME_COLOR = '#e0a44f'
 // Base dependency-edge color (matches `.edge` in styles.css) — reused for the arrowhead
 // on the collapsed websocket-fleet in/out edges.
 const EDGE_COLOR = '#5b6270'
@@ -348,7 +351,7 @@ export default function SystemDiagram({
   // { name, cluster, topic, pollRate, implemented, … }). Rendered as clickable CONS rows on the
   // service node.
   consumerFunctions = {},
-  // A selected consumer function, traced cluster → consuming service (the consume edge). Mutually
+  // A selected consumer function, traced consuming service → cluster (the consume edge). Mutually
   // exclusive with the method / function / LB selections. Set via onSelectConsumer, cleared via
   // onClearConsumerTrace.
   consumerTrace = null,
@@ -666,19 +669,24 @@ export default function SystemDiagram({
     const prev = connByKey.get(key)
     if (!prev) connByKey.set(key, { from, to, kind, contract })
     else if (kind === 'grpc') { prev.kind = 'grpc'; prev.contract = contract }
+    // A service that both produces to and consumes from the same cluster collapses to one
+    // line (same from→to) — style it as the consume edge so the Kafka relationship stays visible.
+    else if (kind === 'consume' && prev.kind === 'dep') prev.kind = 'consume'
   }
   for (const e of manifest.edges || []) {
     // A per-service load balancer's entry→instance fan-out is implied by the dotted group
     // box (like a ws fleet), so it isn't drawn as N node-to-node lines.
     if (e.origin === 'service-lb') continue
-    addConn(e.from, e.to, 'dep')
+    // A consumer function's consume edge (service → the cluster it reads) is drawn distinct from a
+    // plain producer/dep edge that points the same way — see CONSUME_COLOR / `.consume-edge`.
+    addConn(e.from, e.to, e.origin === 'consumer-fn' ? 'consume' : 'dep')
   }
   for (const e of endpoints) {
     for (const d of e.downstream || []) addConn(e.service, d, 'dep')
   }
   // A consumer function's loop calls/reads/writes its `downstream` nodes (e.g. an API it POSTs
   // to, a db it touches) — draw the same persistent service->downstream line endpoints get, so
-  // the diagram reflects what the loop actually does (the cluster->service consume edge is a
+  // the diagram reflects what the loop actually does (the service->cluster consume edge is a
   // manifest edge handled above). Applies to every consumer, present and future.
   for (const fns of Object.values(consumerFunctions)) {
     for (const c of fns || []) {
@@ -784,7 +792,7 @@ export default function SystemDiagram({
   // method calls (service → each downstream). The service node it points at must still
   // exist in this system.
   const methodService = methodTrace && byId[methodTrace.service] ? byId[methodTrace.service] : null
-  // A consumer trace highlights one consume edge: cluster → consuming service. Both nodes must
+  // A consumer trace highlights one consume edge: consuming service → cluster. Both nodes must
   // still exist. Mutually exclusive with the other traces (App nulls the others when one is set).
   const ct = consumerTrace && byId[consumerTrace.cluster] && byId[consumerTrace.service] ? consumerTrace : null
   if (ft && ft.wsBuiltin) {
@@ -895,15 +903,16 @@ export default function SystemDiagram({
     }
     traceNodes = ids
   } else if (ct) {
-    // cluster → consuming service (the consume edge; the 3rd tuple element labels it with the
-    // topic, drawn at the line midpoint like a connection description) → each node the loop then
-    // calls/reads/writes (its downstream), so the trace shows the whole path the consumed message
-    // drives, mirroring an endpoint trace's service → downstreams. Each downstream edge carries this
-    // consumer's `downstreamDescriptions[d]` label, exactly as the endpoint trace does.
+    // consuming service → cluster (the consume edge; the service subscribes to / reads from the
+    // stream, so the arrow points service → cluster; the 3rd tuple element labels it with the topic,
+    // drawn at the line midpoint like a connection description) plus service → each node the loop
+    // then calls/reads/writes (its downstream), so the trace shows the full set of things the
+    // consumer touches, mirroring an endpoint trace's service → downstreams. Each downstream edge
+    // carries this consumer's `downstreamDescriptions[d]` label, exactly as the endpoint trace does.
     const cds = (ct.downstream || []).filter((d) => byId[d])
     const cdd = ct.downstreamDescriptions || {}
     traceNodes = new Set([ct.cluster, ct.service, ...cds])
-    traceEdges.push([ct.cluster, ct.service, ct.topic])
+    traceEdges.push([ct.service, ct.cluster, ct.topic])
     for (const d of cds) traceEdges.push([ct.service, d, cdd[d] || ''])
   } else if (selected && lbNode) {
     const ids = new Set([lbNode.id, selected.service, ...(selected.downstream || [])])
@@ -1357,6 +1366,17 @@ export default function SystemDiagram({
         >
           <path d="M 0 0 L 10 5 L 0 10 z" fill={REPLICA_COLOR} />
         </marker>
+        <marker
+          id="consume-arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0 0 L 10 5 L 0 10 z" fill={CONSUME_COLOR} />
+        </marker>
         {/* Arrowhead for the collapsed websocket-fleet in/out edges (same color as `.edge`). */}
         <marker
           id="edge-arrow"
@@ -1497,9 +1517,12 @@ export default function SystemDiagram({
         const breakerOn = !!res?.circuit_breaker?.enabled
         const live = resilienceState[key]
         const dim = traceNodes ? ' dim' : ''
-        const lineClass = kind === 'grpc' ? `grpc-edge${dim}` : `edge${dim}`
+        const lineClass =
+          kind === 'grpc' ? `grpc-edge${dim}` : kind === 'consume' ? `consume-edge${dim}` : `edge${dim}`
         const fromIsService = byId[from]?.type === 'service'
-        const clickable = !!onRequestConnectionResilience && fromIsService && !dragMode
+        // A Kafka consume edge (service → cluster) isn't an outbound request call, so it doesn't
+        // take a resilience policy — exclude it from the clickable/breaker treatment.
+        const clickable = !!onRequestConnectionResilience && fromIsService && kind !== 'consume' && !dragMode
         const label = breakerOn ? breakerLabel(live) : null
         const poolText = poolLabel(poolState[key])
         return (
@@ -1519,9 +1542,21 @@ export default function SystemDiagram({
               x2={b.x}
               y2={b.y}
               className={lineClass}
-              markerEnd={kind === 'grpc' ? 'url(#grpc-arrow)' : 'url(#edge-arrow)'}
+              markerEnd={
+                kind === 'grpc'
+                  ? 'url(#grpc-arrow)'
+                  : kind === 'consume'
+                    ? 'url(#consume-arrow)'
+                    : 'url(#edge-arrow)'
+              }
             >
-              <title>{kind === 'grpc' ? `gRPC · ${contract}: ${from} → ${to}` : `${from} → ${to}`}</title>
+              <title>
+                {kind === 'grpc'
+                  ? `gRPC · ${contract}: ${from} → ${to}`
+                  : kind === 'consume'
+                    ? `Kafka consume · ${from} → ${to}`
+                    : `${from} → ${to}`}
+              </title>
             </line>
             {breakerOn && <BreakerCircle cx={mid.x} cy={mid.y} live={live} />}
             {label && (
@@ -1837,7 +1872,7 @@ export default function SystemDiagram({
                 )
               }
               if (row.kind === 'cons') {
-                // A Kafka consumer function: clicking it traces the consume edge cluster → service.
+                // A Kafka consumer function: clicking it traces the consume edge service → cluster.
                 // "CONS" stands in for the GET/POST method badge an HTTP row would show.
                 const c = row.c
                 const active =

@@ -2161,6 +2161,15 @@ h1 {
   fill: none;
 }
 
+/* A Kafka consume edge (consumer service -> the cluster it reads from). Amber + a tighter dash
+   than .grpc-edge so it's distinct from a solid-gray producer/dep edge that points the same way. */
+.consume-edge {
+  stroke: #e0a44f;
+  stroke-width: 2;
+  stroke-dasharray: 3 3;
+  fill: none;
+}
+
 /* Countdown shown under a node while it's temporarily shut down (orange). */
 .node-outage-label {
   fill: #fb8c00;

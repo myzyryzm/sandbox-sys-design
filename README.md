@@ -611,7 +611,7 @@ The cluster node's Edit panel has two tabs:
   producing/consuming services. Producers are declared here as service ids.
 - **Consumers** — **consumer functions**: a named, per-service background poll loop
   (identity `(service, name)`, stored in the system-level `consumers.json`). Adding one
-  is a live registry write (entry + consumer group + a `cluster → service` edge); the
+  is a live registry write (entry + consumer group + a `service → cluster` edge); the
   actual `KafkaConsumer` loop is authored **into that service's `app.py`** as a daemon
   thread by a launched Claude session (the `sandbox-event-stream` skill), which sets
   `implemented: true`. Description-only edits are registry-only; changing the topic/poll

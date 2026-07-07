@@ -54,7 +54,10 @@ work by hand from a terminal session, reproduce the same shape. Related: the
    are PromQL filtered on `job="<cluster>"` (topics, partitions, msgs/s, consumer lag).
 5. `systems/<id>/manifest.json` **edges** — a new cluster is **not** wired to any service.
    To make a producer/consumer relationship show on the diagram, add edges
-   `{from:<producer-service>, to:<cluster>}` and `{from:<cluster>, to:<consumer-service>}`.
+   `{from:<producer-service>, to:<cluster>}` and `{from:<consumer-service>, to:<cluster>}`
+   (both a producer and a consumer point AT the cluster — the arrow is "connects to the stream").
+   The diagram tells them apart by style: a producer/plain edge is solid gray; a consumer edge
+   (one tagged `origin:"consumer-fn"`) renders amber + dashed.
 
 ### Conventions (the delete path and PromQL depend on these)
 - `<cluster>` is the node id **and** the primary compose service name **and** the folder name.
@@ -125,7 +128,7 @@ docker compose -f systems/<id>/docker-compose.yml exec -T <cluster> \
   service to a topic's `producers`, or to a consumer group under `consumers`
   (`{groupId, members:[<service>]}`). Then add the matching manifest **edge(s)** so the
   diagram draws the relationship: `{from:<service>, to:<cluster>}` for a producer,
-  `{from:<cluster>, to:<service>}` for a consumer. (If a service should really publish/subscribe,
+  `{from:<service>, to:<cluster>}` for a consumer too (both point at the cluster). (If a service should really publish/subscribe,
   implement that in its `app.py` too — see [[sandbox-endpoint]] — but the diagram only needs the
   registry + edges.) **If the topic has a `schemaModel`, shape the message payload to that model**;
   if `enforceSchema` is true, also add the produce/consume validation above and rebuild the service.
@@ -150,8 +153,8 @@ make the diagram draw the consumer's outbound lines and print each connection's 
 The app has **already** done the mechanical scaffold before launching you (do NOT redo these):
 the consumers.json entry exists; the consumer group `{groupId:"<service>-<name>", members:["<service>"]}`
 is registered under the topic in `<cluster>/streams.json`; and the manifest edge
-`{from:<cluster>, to:<service>, origin:"consumer-fn"}` is added (this is what draws the
-`<cluster> → <service>` line + lets the diagram trace it). **Your job is the CODE half:** implement
+`{from:<service>, to:<cluster>, origin:"consumer-fn"}` is added (this is what draws the
+`<service> → <cluster>` line + lets the diagram trace it). **Your job is the CODE half:** implement
 (or update) the real poll loop in the service and rebuild that one service.
 
 - **Implement** a background Kafka consumer in `systems/<id>/<service>/app.py` (the service is a
@@ -217,7 +220,7 @@ is registered under the topic in `<cluster>/streams.json`; and the manifest edge
   entry. `downstream` is the array of node ids the loop CALLS / reads / writes — every in-system
   service whose endpoint it hits (e.g. an `<api>` it POSTs to), every database it queries, every
   cluster it produces to. This is exactly an endpoint's `downstream`, and the diagram draws a
-  persistent `<service> → <node>` line for each (the `<cluster> → <service>` consume edge is separate,
+  persistent `<service> → <node>` line for each (the `<service> → <cluster>` consume edge is separate,
   already added). **Without it the diagram shows the consumer reading the topic but NOT what it then
   does** — so a loop that calls `payout-api` and writes `ledger-db` must carry
   `"downstream": ["payout-api", "ledger-db"]`. Alongside it, write `downstreamDescriptions` — a map
@@ -254,7 +257,7 @@ is registered under the topic in `<cluster>/streams.json`; and the manifest edge
   (Also how you backfill descriptions on a consumer created before `downstreamDescriptions` existed.)
 - **Verify**: `kafka-consumer-groups.sh --describe --all-groups` lists group `<service>-<name>`; the
   cluster's `lag` metric reflects consumption; the service's `CONS <name>` row traces on the diagram
-  (cluster → service → each `downstream`, each downstream line labelled with its `downstreamDescriptions`
+  (service → cluster + service → each `downstream`, each downstream line labelled with its `downstreamDescriptions`
   blurb), and a persistent line runs from the service to every `downstream` node it calls/reads/writes.
 
 ### Pause consumers (cluster-level kill switch)
