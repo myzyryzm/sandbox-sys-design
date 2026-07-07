@@ -14,6 +14,8 @@ import { useEffect, useState } from 'react'
 const WORDS = {
   postgres: { entity: 'Table', empty: 'No tables yet — author a schema first.' },
   mongodb: { entity: 'Collection', empty: 'No collections yet — author a schema first.' },
+  cassandra: { entity: 'Table', empty: 'No tables yet — author a schema first.' },
+  dynamodb: { entity: 'Table', empty: 'No tables yet — author a schema first.' },
 }
 
 export default function DbSeed({ systemId, node, onClose, embedded = false, onBusyChange }) {

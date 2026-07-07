@@ -18,10 +18,16 @@ const WORDS = {
   mongodb: { entity: 'Collection', empty: 'No collections yet.' },
   redis: { entity: 'Namespace', empty: 'No keys yet.' },
   'object-store': { entity: 'Bucket', empty: 'No buckets yet.' },
+  dynamodb: { entity: 'Table', empty: 'No tables yet.' },
+  cassandra: { entity: 'Table', empty: 'No tables yet.' },
 }
 
-// Engines that can stream to read replicas (object-store has no such concept).
-const REPLICA_ENGINES = ['postgres', 'mongodb', 'redis']
+// Engines that can stream to read replicas (object-store has no such concept;
+// Cassandra "replicas" join the ring as a second node — see sandbox-database skill).
+const REPLICA_ENGINES = ['postgres', 'mongodb', 'redis', 'cassandra']
+
+// Engines whose schema can be (re)authored from the model bank.
+const MODEL_ENGINES = ['postgres', 'mongodb', 'dynamodb', 'cassandra']
 
 export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
   const [state, setState] = useState({ status: 'loading' })
@@ -34,7 +40,7 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
 
   const engine = node.type
   const isSecondary = !!node.replicaOf
-  const modelCapable = (engine === 'postgres' || engine === 'mongodb') && !isSecondary
+  const modelCapable = MODEL_ENGINES.includes(engine) && !isSecondary
   // Models already applied to this database (additively merged on the node).
   const appliedModels = node.schemaModels || []
 
@@ -135,7 +141,11 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
     <>
       {isSecondary && (
         <p className="replica-badge">
-          🔒 Read-only replica of <code>{node.replicaOf}</code> · {node.replication || 'async'} streaming
+          {node.readonly === false ? (
+            <>🔗 Cluster node of <code>{node.replicaOf}</code> · {node.replication || 'peer'} (accepts writes)</>
+          ) : (
+            <>🔒 Read-only replica of <code>{node.replicaOf}</code> · {node.replication || 'async'} streaming</>
+          )}
         </p>
       )}
 
