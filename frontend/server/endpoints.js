@@ -34,8 +34,13 @@ const DEFAULT_PROTOCOL = 'http'
 // through the LB at /<id>/ and own an app.py, so the discover/add/remove flow is
 // identical — the only difference is that an external service's endpoints are kept
 // off the LB's advertised surface (see endpointPolicy on the frontend).
-const ENDPOINT_HOST_TYPES = new Set(['service', 'external_service'])
-const isEndpointHost = (n) => ENDPOINT_HOST_TYPES.has(n.type)
+// A load-balanced service keeps owning its endpoints under its `<name>` id even after
+// it becomes the cluster entry (`type:'service-lb'`): `/<name>/…` still routes through
+// the haproxy sidecar to a real instance, so discovery + add/edit/delete work exactly
+// as before. Its instances (`instanceOf` set) are NOT independent endpoint hosts —
+// they serve the same routes but are never addressed individually.
+const ENDPOINT_HOST_TYPES = new Set(['service', 'external_service', 'service-lb'])
+const isEndpointHost = (n) => ENDPOINT_HOST_TYPES.has(n.type) && !n.instanceOf
 
 async function fetchJson(url, ms = 2500) {
   const ctrl = new AbortController()

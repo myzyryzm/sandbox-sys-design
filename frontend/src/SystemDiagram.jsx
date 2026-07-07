@@ -144,6 +144,7 @@ function isLB(node) {
 function isDeletable(node) {
   return (
     node.type === 'service' ||
+    node.type === 'service-lb' ||
     node.type === 'external_service' ||
     node.type === 'client' ||
     node.type === 'prometheus' ||
@@ -175,10 +176,23 @@ function isWsServer(node) {
   return node.origin === 'create-websockets' && node.wsRole === 'server'
 }
 
+// An instance of a per-service load-balanced cluster: interchangeable, and managed only
+// from the cluster entry's Load Balancing tab — so, like a ws server, it carries no Edit
+// button of its own (and the diagram stacks it under its entry).
+function isSvcInstance(node) {
+  return node.type === 'service' && !!node.instanceOf
+}
+
+// The ordinal N of a load-balanced instance id `<entry>-N`, so the stack orders 1,2,3,….
+function svcOrdinal(id) {
+  const m = /-(\d+)$/.exec(id)
+  return m ? Number(m[1]) : 0
+}
+
 // Controllable nodes carry a bottom "Edit" button (which opens the tabbed edit modal);
-// the LB, other infra, and websocket servers (see isWsServer) do not.
+// the LB, other infra, websocket servers, and load-balanced instances do not.
 function hasEditButton(node) {
-  return isDeletable(node) && !isWsServer(node)
+  return isDeletable(node) && !isWsServer(node) && !isSvcInstance(node)
 }
 
 // y where the metric/endpoint rows end.
@@ -440,7 +454,11 @@ export default function SystemDiagram({
   // node id; empty for non-endpoint-host nodes.
   const methodsByNode = new Map()
   for (const n of nodes) {
-    if (n.type !== 'service' && n.type !== 'external_service') continue
+    // A load-balanced service's cluster entry (`service-lb`) still owns its endpoints under
+    // `<name>`, so it lists them like a service. Its instances (`instanceOf`) serve the same
+    // routes but are never addressed individually — they list nothing.
+    if (n.type !== 'service' && n.type !== 'external_service' && n.type !== 'service-lb') continue
+    if (n.instanceOf) continue
     methodsByNode.set(
       n.id,
       endpoints.filter(
@@ -514,7 +532,37 @@ export default function SystemDiagram({
       y += heightOf(s) + STACK_GAP
     }
   }
-  const effPos = (n) => stackPosByServerId.get(n.id) || posOf(n)
+
+  // Per-service load-balancer clusters render like a ws fleet: the instances (instanceOf)
+  // stack vertically to the RIGHT of their entry sidecar, and the entry sits at the
+  // stack's left-middle. Positions are DERIVED from the entry's position (not each
+  // instance's own y), so the group reads as one unit and drags together. The entry keeps
+  // its own posOf; only the instances are placed here.
+  const svcInstancesByEntry = new Map() // entry id -> instance nodes, ordinal order
+  for (const n of nodes) {
+    if (!isSvcInstance(n)) continue
+    if (!svcInstancesByEntry.has(n.instanceOf)) svcInstancesByEntry.set(n.instanceOf, [])
+    svcInstancesByEntry.get(n.instanceOf).push(n)
+  }
+  const svcStackPos = new Map()
+  const SVC_STACK_GAP_X = 120 // horizontal gap between the entry sidecar and its instance column
+  for (const [entryId, instances] of svcInstancesByEntry) {
+    const entry = byId[entryId]
+    if (!entry) continue
+    instances.sort((a, b) => svcOrdinal(a.id) - svcOrdinal(b.id))
+    const ep = posOf(entry)
+    const anchorX = ep.x + NODE_W + SVC_STACK_GAP_X
+    const totalH = instances.reduce((s, inst) => s + heightOf(inst) + STACK_GAP, -STACK_GAP)
+    // Center the instance column on the entry's vertical middle → the entry reads as the
+    // left-middle sidecar of the group.
+    let y = ep.y + heightOf(entry) / 2 - totalH / 2
+    for (const inst of instances) {
+      svcStackPos.set(inst.id, { x: anchorX, y })
+      y += heightOf(inst) + STACK_GAP
+    }
+  }
+
+  const effPos = (n) => stackPosByServerId.get(n.id) || svcStackPos.get(n.id) || posOf(n)
   // Drag payload for a whole tier: captures every server's CURRENT stacked position so a group
   // drag shifts them all by the same delta (the stack then re-derives identically, shifted).
   const fleetDragArg = (tier) => ({
@@ -619,7 +667,12 @@ export default function SystemDiagram({
     if (!prev) connByKey.set(key, { from, to, kind, contract })
     else if (kind === 'grpc') { prev.kind = 'grpc'; prev.contract = contract }
   }
-  for (const e of manifest.edges || []) addConn(e.from, e.to, 'dep')
+  for (const e of manifest.edges || []) {
+    // A per-service load balancer's entry→instance fan-out is implied by the dotted group
+    // box (like a ws fleet), so it isn't drawn as N node-to-node lines.
+    if (e.origin === 'service-lb') continue
+    addConn(e.from, e.to, 'dep')
+  }
   for (const e of endpoints) {
     for (const d of e.downstream || []) addConn(e.service, d, 'dep')
   }
@@ -666,6 +719,28 @@ export default function SystemDiagram({
       h: maxY - minY + 2 * CLUSTER_PAD,
     }
   })
+
+  // Dotted box around each per-service load-balancer group: its entry sidecar + every
+  // instance. Uses effPos (the derived stacked positions), and labels the box with the
+  // service name — the group's "full service" outline.
+  const svcLbBoxes = [...svcInstancesByEntry.entries()]
+    .map(([entryId, instances]) => {
+      const members = [byId[entryId], ...instances].filter(Boolean)
+      if (members.length < 2) return null
+      const minX = Math.min(...members.map((m) => effPos(m).x))
+      const minY = Math.min(...members.map((m) => effPos(m).y))
+      const maxX = Math.max(...members.map((m) => effPos(m).x + NODE_W))
+      const maxY = Math.max(...members.map((m) => effPos(m).y + heightOf(m)))
+      return {
+        entryId,
+        label: entryId,
+        x: minX - CLUSTER_PAD,
+        y: minY - CLUSTER_PAD - 16, // extra top band for the label
+        w: maxX - minX + 2 * CLUSTER_PAD,
+        h: maxY - minY + 2 * CLUSTER_PAD + 16,
+      }
+    })
+    .filter(Boolean)
 
   // The system boundary: the dotted box the user owns. It's a PERSISTED, freely
   // movable/resizable rectangle (manifest.boundary). Until the user customizes it, it
@@ -1327,6 +1402,17 @@ export default function SystemDiagram({
         />
       ))}
 
+      {/* Dotted box around each per-service load-balancer group (entry sidecar + instances),
+          labelled with the service name; sits behind the nodes it groups. Non-interactive. */}
+      {svcLbBoxes.map((b) => (
+        <g key={`svclb-${b.entryId}`} style={{ pointerEvents: 'none' }}>
+          <rect x={b.x} y={b.y} width={b.w} height={b.h} rx="14" className="ws-fleet-box" />
+          <text x={b.x + 12} y={b.y + 16} className="ws-fleet-label">
+            {b.label}
+          </text>
+        </g>
+      ))}
+
       {/* Dotted "fleet" box around each websocket tier's servers + its shared-methods panel;
           sits behind the nodes it groups, with the group id (server base name) in its upper-left.
           Non-interactive so it never intercepts a drag meant for the move-target/cards below. */}
@@ -1542,8 +1628,14 @@ export default function SystemDiagram({
                     beginDrag(
                       e,
                       // A ws-server is part of a combined body: dragging it moves the whole
-                      // tier stack (servers + panel) together, not just this one card.
-                      isWsServer(node) ? fleetDragArg(node.wsTier) : { kind: 'node', nodeId: node.id, startPos: p },
+                      // tier stack (servers + panel) together, not just this one card. A
+                      // load-balanced instance likewise moves its whole group — its position is
+                      // derived from the entry, so we drag the entry.
+                      isWsServer(node)
+                        ? fleetDragArg(node.wsTier)
+                        : isSvcInstance(node)
+                          ? { kind: 'node', nodeId: node.instanceOf, startPos: posOf(byId[node.instanceOf]) }
+                          : { kind: 'node', nodeId: node.id, startPos: p },
                     )
                 : undefined
             }

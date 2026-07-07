@@ -223,7 +223,12 @@ async function fetchJson(url, ms = 1500) {
 async function resilienceState(system) {
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
   const manifest = readManifest(system)
-  const services = manifest.nodes.filter((n) => n.type === 'service').map((n) => n.id)
+  // Poll each service that is reachable through the lb at /<id>/. A load-balanced
+  // service's cluster entry (`service-lb`) is routable via its haproxy sidecar; its
+  // instances (`instanceOf`) are NOT individually routed, so skip them (they'd 404).
+  const services = manifest.nodes
+    .filter((n) => (n.type === 'service' || n.type === 'service-lb') && !n.instanceOf)
+    .map((n) => n.id)
   const connections = {}
   await Promise.all(
     services.map(async (id) => {

@@ -54,11 +54,18 @@ function validate(body) {
   if (!node) throw bad(`no node "${id}" in this system`)
   const deletable =
     node.type === 'service' ||
+    node.type === 'service-lb' ||
     node.type === 'external_service' ||
     node.origin === 'create-database' ||
     node.origin === 'create-event-stream' ||
     node.origin === 'create-websockets'
   if (!deletable) throw bad(`"${id}" (${node.type}) cannot be deleted`)
+  // A load-balanced service's instance can't be deleted on its own — the cluster is one
+  // unit, managed from the service's Load Balancing tab (change the instance count, or
+  // delete the service `<name>` itself, which cascades every instance).
+  if (node.instanceOf) {
+    throw bad(`"${id}" is an instance of the "${node.instanceOf}" load-balanced service — change the instance count in its Load Balancing tab, or delete "${node.instanceOf}"`)
+  }
   const kind =
     node.origin === 'create-websockets'
       ? 'websocket'
@@ -257,7 +264,13 @@ function cascadeChildIds(manifest, id, kind, node) {
   const wsChildIds = kind === 'websocket' && node?.wsRole === 'lb'
     ? manifest.nodes.filter((n) => n.wsTier === id).map((n) => n.id)
     : []
-  return { secondaryIds, cdcWorkerIds, wsChildIds }
+  // Deleting a load-balanced service's cluster entry (`service-lb`) takes its whole
+  // group: every instance carrying `instanceOf: <id>`. They cascade, so an instance is
+  // never a "dependent" that blocks the delete.
+  const svcLbInstanceIds = node?.type === 'service-lb'
+    ? manifest.nodes.filter((n) => n.instanceOf === id).map((n) => n.id)
+    : []
+  return { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds }
 }
 
 // Reverse-dependency lookup: which OTHER nodes still call/use `id`, so deleting it
@@ -410,14 +423,14 @@ export async function handleDelete(body) {
   const node = manifest.nodes.find((n) => n.id === id)
 
   // The owned children removed in the same cascade (read replicas that stream from a
-  // primary, a database's CDC worker, a websocket lb's whole tier) — excluded from
-  // the dependency guard below.
-  const { secondaryIds, cdcWorkerIds, wsChildIds } = cascadeChildIds(manifest, id, kind, node)
+  // primary, a database's CDC worker, a websocket lb's whole tier, a load-balanced
+  // service's instances) — excluded from the dependency guard below.
+  const { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds } = cascadeChildIds(manifest, id, kind, node)
 
   // Block the delete while another node still depends on `id` — an endpoint's HTTP
   // downstream, a gRPC client target, a Kafka producer/consumer, or a client function
   // step. The user must remove those calls first; cascaded children don't count.
-  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds]))
+  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...svcLbInstanceIds]))
   if (dependents.length) {
     const err = bad(`Cannot delete "${id}" — ${dependents.length} node(s) still depend on it; remove those calls first.`)
     err.dependents = dependents
@@ -431,10 +444,10 @@ export async function handleDelete(body) {
   // before the loop scrubs nodes from the manifest).
   const kafkaIds = manifest.nodes.filter((n) => n.origin === 'create-event-stream').map((n) => n.id)
 
-  // Remove the children first (workers, secondaries, a ws lb's tier), then the
-  // target, in one manifest write.
-  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, id])
-  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, id]) {
+  // Remove the children first (workers, secondaries, a ws lb's tier, a load-balanced
+  // service's instances), then the target, in one manifest write.
+  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, id])
+  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, id]) {
     const rnode = manifest.nodes.find((n) => n.id === rid)
     const rkind = kindOf(rnode)
     removeComposeServices(system, ownedServices(rid, rkind, rnode))
@@ -460,19 +473,23 @@ export async function handleDelete(body) {
   if (kind === 'websocket' && node?.wsRole === 'lb') {
     fs.rmSync(path.join(systemDir(system), 'ws-shared'), { recursive: true, force: true })
   }
+  // A deleted load-balanced service also owns its haproxy config folder (<name>-lb/).
+  if (node?.type === 'service-lb') {
+    fs.rmSync(path.join(systemDir(system), `${id}-lb`), { recursive: true, force: true })
+  }
   // Drop consumer functions that referenced any removed node (as owner service or as cluster).
   pruneConsumers(system, removedIds)
   writeManifest(system, manifest)
 
   const log = await rebuild(system, kind)
-  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds], log }
+  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds], log }
 }
 
 // What still depends on `id`, for the GET probe and a fresh-manifest computation.
 function dependentsFor(system, manifest, node) {
   const kind = kindOf(node)
-  const { secondaryIds, cdcWorkerIds, wsChildIds } = cascadeChildIds(manifest, node.id, kind, node)
-  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds]))
+  const { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds } = cascadeChildIds(manifest, node.id, kind, node)
+  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...svcLbInstanceIds]))
 }
 
 export default function removeComponent() {
