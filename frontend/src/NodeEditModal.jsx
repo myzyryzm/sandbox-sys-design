@@ -11,6 +11,7 @@ import ClientScenarioTab from './ClientScenarioTab.jsx'
 import WsClientMethodsTab from './WsClientMethodsTab.jsx'
 import ConsumerTab from './ConsumerTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
+import ServiceLbTab from './ServiceLbTab.jsx'
 import { customTypeOf } from './customTypes/index.js'
 
 /**
@@ -35,7 +36,12 @@ import { customTypeOf } from './customTypes/index.js'
  * tab-switching and dismissal while a delete / shutdown / rebuild is in flight.
  */
 export default function NodeEditModal({ systemId, node, manifest, current, onClose, onLaunch, onTraceMethod }) {
-  const isService = node.type === 'service'
+  // A load-balanced service's cluster ENTRY (`service-lb`) still owns its endpoints/gRPC
+  // under its `<name>` id, so it gets the same feature tabs as a plain service plus the
+  // Load Balancing tab. Its INSTANCES (`instanceOf`) are managed only from that tab —
+  // they get no feature tabs (and the diagram suppresses their Edit button anyway).
+  const isServiceLb = node.type === 'service-lb'
+  const isService = node.type === 'service' && !node.instanceOf
   const isExternal = node.type === 'external_service'
   const isClient = node.type === 'client'
   const isDatabase = node.origin === 'create-database'
@@ -47,10 +53,13 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   const isPrometheus = node.type === 'prometheus'
 
   const tabs = []
-  if (isService) {
+  if (isService || isServiceLb) {
     tabs.push({ id: 'endpoints', label: 'Endpoints' })
     tabs.push({ id: 'grpc', label: 'gRPC' })
     tabs.push({ id: 'calls', label: 'Calls' })
+    // Rendered via the generic Component-tab path (no `switch` case). Lets a plain
+    // service enable load balancing, or a cluster entry scale / re-balance / disable.
+    tabs.push({ id: 'lb', label: 'Load Balancing', Component: ServiceLbTab })
   } else if (isExternal) {
     // External services expose an HTTP API (the third party's endpoints) but never gRPC
     // contracts. The Functions "trigger bank" is client-only, so they have no Functions tab —

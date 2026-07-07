@@ -64,13 +64,17 @@ generic renderer of it — **to change what the user sees, edit the manifest, no
 - `nodes[]`: `{ id, label, type, position{x,y}, metrics:[{label, query, unit, scale?}],
   health?:{ query, rules:[{color, when}] } }`. `when` is a tiny safe `value <op> number` expression
   (e.g. `value < 1`); first matching rule wins; no value yet → gray. `type` is the node's kind —
-  `load_balancer | service | external_service | client | postgres | mongodb | redis | object-store |
-  kafka | cdc` (or a custom service type like `download-coordinator`). Nodes also carry
-  provenance/relationship keys the scaffolding writes and the diagram reads: `origin`
+  `load_balancer | service | service-lb | external_service | client | postgres | mongodb | redis |
+  object-store | kafka | cdc` (or a custom service type like `download-coordinator`). `service-lb` is
+  a per-service load-balancer cluster ENTRY: an haproxy sidecar that keeps the service's `<name>` and
+  fronts N instances (each a `type:"service"` node carrying `instanceOf:"<name>"`), while still
+  owning the service's endpoints/gRPC under `<name>` — see the `sandbox-service-lb` skill. Nodes also
+  carry provenance/relationship keys the scaffolding writes and the diagram reads: `origin`
   (`create-service` / `create-database` / `create-event-stream` / `create-cdc` /
   `create-external-service` / `create-client` / …), `external:true` (clients + external services,
   drawn outside the boundary), `schemaModels:[]` (model-bank names backing a database's schema), the
-  ownership links `replicaOf` / `cdcOf`, and the `grpc` / `resilience` blocks.
+  ownership links `replicaOf` / `cdcOf` / `instanceOf` (+ the entry's `svcLb:{algorithm,instances}`),
+  and the `grpc` / `resilience` blocks.
 - `edges[]`: `{ from, to }` node ids, plus an optional `origin` (e.g. `consumer-fn` for a Kafka
   consumer-function edge).
 - `boundary:{x,y,w,h}` is the dotted system-boundary rectangle; drag mode persists it (and node
@@ -166,6 +170,7 @@ skill in `.claude/skills/` — it has the canonical procedure and `Verify` steps
 | Define a gRPC contract (`.proto` + protoc + shared servicer) | `sandbox-grpc-contract` |
 | Attach a contract to a service (server/client roles, targets) | `sandbox-grpc-attach` |
 | Circuit-breaker + retry on a connection (edge) | `sandbox-resilience` |
+| Put a **per-service load balancer** in front of a service (N instances + haproxy sidecar) | `sandbox-service-lb` |
 | Register a new custom service type | `sandbox-custom-service-type` |
 | Work on the Download Coordinator (peer-to-peer chunk distribution) | `sandbox-download-coordinator` |
 | **Run** an end-to-end test process (seed → drive clients → probe for failures) | `sandbox-end-to-end-process` |
@@ -189,7 +194,7 @@ button + `EditQueuePanel.jsx`) that runs pending sessions sequentially in the on
   it); `templates/client/` and `templates/download-coordinator/` back the client + coordinator flows.
 - `frontend/server/<feature>.js` — one plugin per `/api/<feature>` route, all wired in `vite.config.js`:
   `services`, `databases` (+ `dbschema`, `dbseed`, `cdc`, `replicas`), `endpoints`, `models`,
-  `eventstreams` + `consumers`, `grpc` (+ `grpcInstall`), `resilience`, `outage`, `externalServices`,
+  `eventstreams` + `consumers`, `grpc` (+ `grpcInstall`), `resilience`, `serviceLb`, `outage`, `externalServices`,
   `clients` + `scenarios` (+ `clientScript` helper), `customServices` (+ `customTypes/` recipes),
   `endtoend`, `layout`, `simulate`, `skills`, `remove`, `terminal`. Shared primitives live in
   `scaffold.js` + `systems.js`. `remove.js` **blocks deleting a node another still depends on**

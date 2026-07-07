@@ -239,19 +239,44 @@ export function addManifestNode(system, manifest, node) {
   return node
 }
 
-// Frontend-safe rebuild: build just <name>, bring the stack up (creating the new
-// container, leaving the rest running), recreate the lb so it picks up the new
-// /<name>/ route, and restart prometheus so the appended scrape job is picked up.
-// NEVER ./start.sh.
+// A load-balanced service's code lives in its instances (<name>-1..N), not in <name>
+// itself — which is now an haproxy sidecar with no build context. So `rebuild(system,
+// '<name>')` (called by every per-service flow: endpoint, grpc, …) must build the
+// INSTANCES and recreate the sidecar, not try to `docker compose build <name>` (which
+// would fail on the image-only haproxy service). A plain service resolves to itself.
+function resolveBuildTargets(system, name) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
+    const node = manifest.nodes.find((n) => n.id === name)
+    if (node?.svcLb?.instances?.length) {
+      return { buildNames: [...node.svcLb.instances], recreate: [name] }
+    }
+  } catch {
+    /* fall back to the plain single-service path */
+  }
+  return { buildNames: [name], recreate: [] }
+}
+
+// Frontend-safe rebuild: build just <name> (or, for a load-balanced service, its
+// instances), bring the stack up (creating the new container, leaving the rest
+// running), recreate the lb so it picks up the new /<name>/ route, and restart
+// prometheus so the appended scrape job is picked up. NEVER ./start.sh.
 export async function rebuild(system, name) {
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
   const opts = { cwd: repoRoot, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 }
+  const { buildNames, recreate } = resolveBuildTargets(system, name)
   let log = ''
   try {
-    const b = await pexec('docker', ['compose', '-f', compose, 'build', name], opts)
+    const b = await pexec('docker', ['compose', '-f', compose, 'build', ...buildNames], opts)
     log += b.stdout + b.stderr
     const up = await pexec('docker', ['compose', '-f', compose, 'up', '-d'], opts)
     log += up.stdout + up.stderr
+    // Recreate a load-balanced service's sidecar so it re-reads its config and points
+    // at freshly-built instances.
+    for (const svc of recreate) {
+      const rc = await pexec('docker', ['compose', '-f', compose, 'up', '-d', '--force-recreate', svc], opts)
+      log += rc.stdout + rc.stderr
+    }
     // Recreate the lb rather than `nginx -s reload`: nginx.conf is a single-file bind
     // mount, and on macOS Docker Desktop the container pins a stale inode, so a reload
     // re-reads the OLD config (route never lands, or worse, a truncated file fails to

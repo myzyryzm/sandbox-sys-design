@@ -24,6 +24,14 @@ by hand, reproduce the same shape. This is **wiring**, like [[sandbox-grpc-attac
 (the data) already exists in the manifest before you run; your job is the shared wrapper + the
 per-service code that reads it.
 
+**A load-balanced target is ONE cluster breaker.** If `to` is a load-balanced service
+(`type:"service-lb"` — a per-service haproxy sidecar fronting N instances; see
+[[sandbox-service-lb]]), the policy stays a single breaker keyed `<from>-><to>`, exactly like any
+other node: the caller already reaches every instance transparently through the sidecar (calling
+`http://<to>:8000/…` as before), and haproxy's own health checks eject a failing instance
+underneath. Do **not** fan the policy out into per-instance breakers or point it at an instance id —
+resilience on a load-balanced service is uniform across the cluster.
+
 ## Critical semantics — get the breaker states right
 
 **"open" means broken/blocking, not "open for business."** Never invert this:

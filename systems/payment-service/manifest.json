@@ -577,13 +577,13 @@
       "to": "payout-stream"
     },
     {
-      "from": "payout-stream",
-      "to": "payout-consumer",
+      "from": "payout-consumer",
+      "to": "payout-stream",
       "origin": "consumer-fn"
     },
     {
-      "from": "refund-stream",
-      "to": "refund-service",
+      "from": "refund-service",
+      "to": "refund-stream",
       "origin": "consumer-fn"
     }
   ],

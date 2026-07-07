@@ -57,6 +57,9 @@ const COLOR_HEX = {
 const TRACE_COLOR = '#6ea8fe'
 const GRPC_COLOR = '#b18cf2'
 const REPLICA_COLOR = '#3fb6a8'
+// Kafka "consume" edge (a consumer service → the cluster it reads from). Amber + dashed so it
+// reads as distinct from a solid-gray producer/dep edge that points the same way (into the cluster).
+const CONSUME_COLOR = '#e0a44f'
 // Base dependency-edge color (matches `.edge` in styles.css) — reused for the arrowhead
 // on the collapsed websocket-fleet in/out edges.
 const EDGE_COLOR = '#5b6270'
@@ -144,6 +147,7 @@ function isLB(node) {
 function isDeletable(node) {
   return (
     node.type === 'service' ||
+    node.type === 'service-lb' ||
     node.type === 'external_service' ||
     node.type === 'client' ||
     node.type === 'prometheus' ||
@@ -175,10 +179,23 @@ function isWsServer(node) {
   return node.origin === 'create-websockets' && node.wsRole === 'server'
 }
 
+// An instance of a per-service load-balanced cluster: interchangeable, and managed only
+// from the cluster entry's Load Balancing tab — so, like a ws server, it carries no Edit
+// button of its own (and the diagram stacks it under its entry).
+function isSvcInstance(node) {
+  return node.type === 'service' && !!node.instanceOf
+}
+
+// The ordinal N of a load-balanced instance id `<entry>-N`, so the stack orders 1,2,3,….
+function svcOrdinal(id) {
+  const m = /-(\d+)$/.exec(id)
+  return m ? Number(m[1]) : 0
+}
+
 // Controllable nodes carry a bottom "Edit" button (which opens the tabbed edit modal);
-// the LB, other infra, and websocket servers (see isWsServer) do not.
+// the LB, other infra, websocket servers, and load-balanced instances do not.
 function hasEditButton(node) {
-  return isDeletable(node) && !isWsServer(node)
+  return isDeletable(node) && !isWsServer(node) && !isSvcInstance(node)
 }
 
 // y where the metric/endpoint rows end.
@@ -334,7 +351,7 @@ export default function SystemDiagram({
   // { name, cluster, topic, pollRate, implemented, … }). Rendered as clickable CONS rows on the
   // service node.
   consumerFunctions = {},
-  // A selected consumer function, traced cluster → consuming service (the consume edge). Mutually
+  // A selected consumer function, traced consuming service → cluster (the consume edge). Mutually
   // exclusive with the method / function / LB selections. Set via onSelectConsumer, cleared via
   // onClearConsumerTrace.
   consumerTrace = null,
@@ -440,7 +457,11 @@ export default function SystemDiagram({
   // node id; empty for non-endpoint-host nodes.
   const methodsByNode = new Map()
   for (const n of nodes) {
-    if (n.type !== 'service' && n.type !== 'external_service') continue
+    // A load-balanced service's cluster entry (`service-lb`) still owns its endpoints under
+    // `<name>`, so it lists them like a service. Its instances (`instanceOf`) serve the same
+    // routes but are never addressed individually — they list nothing.
+    if (n.type !== 'service' && n.type !== 'external_service' && n.type !== 'service-lb') continue
+    if (n.instanceOf) continue
     methodsByNode.set(
       n.id,
       endpoints.filter(
@@ -514,7 +535,37 @@ export default function SystemDiagram({
       y += heightOf(s) + STACK_GAP
     }
   }
-  const effPos = (n) => stackPosByServerId.get(n.id) || posOf(n)
+
+  // Per-service load-balancer clusters render like a ws fleet: the instances (instanceOf)
+  // stack vertically to the RIGHT of their entry sidecar, and the entry sits at the
+  // stack's left-middle. Positions are DERIVED from the entry's position (not each
+  // instance's own y), so the group reads as one unit and drags together. The entry keeps
+  // its own posOf; only the instances are placed here.
+  const svcInstancesByEntry = new Map() // entry id -> instance nodes, ordinal order
+  for (const n of nodes) {
+    if (!isSvcInstance(n)) continue
+    if (!svcInstancesByEntry.has(n.instanceOf)) svcInstancesByEntry.set(n.instanceOf, [])
+    svcInstancesByEntry.get(n.instanceOf).push(n)
+  }
+  const svcStackPos = new Map()
+  const SVC_STACK_GAP_X = 120 // horizontal gap between the entry sidecar and its instance column
+  for (const [entryId, instances] of svcInstancesByEntry) {
+    const entry = byId[entryId]
+    if (!entry) continue
+    instances.sort((a, b) => svcOrdinal(a.id) - svcOrdinal(b.id))
+    const ep = posOf(entry)
+    const anchorX = ep.x + NODE_W + SVC_STACK_GAP_X
+    const totalH = instances.reduce((s, inst) => s + heightOf(inst) + STACK_GAP, -STACK_GAP)
+    // Center the instance column on the entry's vertical middle → the entry reads as the
+    // left-middle sidecar of the group.
+    let y = ep.y + heightOf(entry) / 2 - totalH / 2
+    for (const inst of instances) {
+      svcStackPos.set(inst.id, { x: anchorX, y })
+      y += heightOf(inst) + STACK_GAP
+    }
+  }
+
+  const effPos = (n) => stackPosByServerId.get(n.id) || svcStackPos.get(n.id) || posOf(n)
   // Drag payload for a whole tier: captures every server's CURRENT stacked position so a group
   // drag shifts them all by the same delta (the stack then re-derives identically, shifted).
   const fleetDragArg = (tier) => ({
@@ -618,14 +669,24 @@ export default function SystemDiagram({
     const prev = connByKey.get(key)
     if (!prev) connByKey.set(key, { from, to, kind, contract })
     else if (kind === 'grpc') { prev.kind = 'grpc'; prev.contract = contract }
+    // A service that both produces to and consumes from the same cluster collapses to one
+    // line (same from→to) — style it as the consume edge so the Kafka relationship stays visible.
+    else if (kind === 'consume' && prev.kind === 'dep') prev.kind = 'consume'
   }
-  for (const e of manifest.edges || []) addConn(e.from, e.to, 'dep')
+  for (const e of manifest.edges || []) {
+    // A per-service load balancer's entry→instance fan-out is implied by the dotted group
+    // box (like a ws fleet), so it isn't drawn as N node-to-node lines.
+    if (e.origin === 'service-lb') continue
+    // A consumer function's consume edge (service → the cluster it reads) is drawn distinct from a
+    // plain producer/dep edge that points the same way — see CONSUME_COLOR / `.consume-edge`.
+    addConn(e.from, e.to, e.origin === 'consumer-fn' ? 'consume' : 'dep')
+  }
   for (const e of endpoints) {
     for (const d of e.downstream || []) addConn(e.service, d, 'dep')
   }
   // A consumer function's loop calls/reads/writes its `downstream` nodes (e.g. an API it POSTs
   // to, a db it touches) — draw the same persistent service->downstream line endpoints get, so
-  // the diagram reflects what the loop actually does (the cluster->service consume edge is a
+  // the diagram reflects what the loop actually does (the service->cluster consume edge is a
   // manifest edge handled above). Applies to every consumer, present and future.
   for (const fns of Object.values(consumerFunctions)) {
     for (const c of fns || []) {
@@ -666,6 +727,28 @@ export default function SystemDiagram({
       h: maxY - minY + 2 * CLUSTER_PAD,
     }
   })
+
+  // Dotted box around each per-service load-balancer group: its entry sidecar + every
+  // instance. Uses effPos (the derived stacked positions), and labels the box with the
+  // service name — the group's "full service" outline.
+  const svcLbBoxes = [...svcInstancesByEntry.entries()]
+    .map(([entryId, instances]) => {
+      const members = [byId[entryId], ...instances].filter(Boolean)
+      if (members.length < 2) return null
+      const minX = Math.min(...members.map((m) => effPos(m).x))
+      const minY = Math.min(...members.map((m) => effPos(m).y))
+      const maxX = Math.max(...members.map((m) => effPos(m).x + NODE_W))
+      const maxY = Math.max(...members.map((m) => effPos(m).y + heightOf(m)))
+      return {
+        entryId,
+        label: entryId,
+        x: minX - CLUSTER_PAD,
+        y: minY - CLUSTER_PAD - 16, // extra top band for the label
+        w: maxX - minX + 2 * CLUSTER_PAD,
+        h: maxY - minY + 2 * CLUSTER_PAD + 16,
+      }
+    })
+    .filter(Boolean)
 
   // The system boundary: the dotted box the user owns. It's a PERSISTED, freely
   // movable/resizable rectangle (manifest.boundary). Until the user customizes it, it
@@ -709,7 +792,7 @@ export default function SystemDiagram({
   // method calls (service → each downstream). The service node it points at must still
   // exist in this system.
   const methodService = methodTrace && byId[methodTrace.service] ? byId[methodTrace.service] : null
-  // A consumer trace highlights one consume edge: cluster → consuming service. Both nodes must
+  // A consumer trace highlights one consume edge: consuming service → cluster. Both nodes must
   // still exist. Mutually exclusive with the other traces (App nulls the others when one is set).
   const ct = consumerTrace && byId[consumerTrace.cluster] && byId[consumerTrace.service] ? consumerTrace : null
   if (ft && ft.wsBuiltin) {
@@ -820,15 +903,16 @@ export default function SystemDiagram({
     }
     traceNodes = ids
   } else if (ct) {
-    // cluster → consuming service (the consume edge; the 3rd tuple element labels it with the
-    // topic, drawn at the line midpoint like a connection description) → each node the loop then
-    // calls/reads/writes (its downstream), so the trace shows the whole path the consumed message
-    // drives, mirroring an endpoint trace's service → downstreams. Each downstream edge carries this
-    // consumer's `downstreamDescriptions[d]` label, exactly as the endpoint trace does.
+    // consuming service → cluster (the consume edge; the service subscribes to / reads from the
+    // stream, so the arrow points service → cluster; the 3rd tuple element labels it with the topic,
+    // drawn at the line midpoint like a connection description) plus service → each node the loop
+    // then calls/reads/writes (its downstream), so the trace shows the full set of things the
+    // consumer touches, mirroring an endpoint trace's service → downstreams. Each downstream edge
+    // carries this consumer's `downstreamDescriptions[d]` label, exactly as the endpoint trace does.
     const cds = (ct.downstream || []).filter((d) => byId[d])
     const cdd = ct.downstreamDescriptions || {}
     traceNodes = new Set([ct.cluster, ct.service, ...cds])
-    traceEdges.push([ct.cluster, ct.service, ct.topic])
+    traceEdges.push([ct.service, ct.cluster, ct.topic])
     for (const d of cds) traceEdges.push([ct.service, d, cdd[d] || ''])
   } else if (selected && lbNode) {
     const ids = new Set([lbNode.id, selected.service, ...(selected.downstream || [])])
@@ -1282,6 +1366,17 @@ export default function SystemDiagram({
         >
           <path d="M 0 0 L 10 5 L 0 10 z" fill={REPLICA_COLOR} />
         </marker>
+        <marker
+          id="consume-arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0 0 L 10 5 L 0 10 z" fill={CONSUME_COLOR} />
+        </marker>
         {/* Arrowhead for the collapsed websocket-fleet in/out edges (same color as `.edge`). */}
         <marker
           id="edge-arrow"
@@ -1325,6 +1420,17 @@ export default function SystemDiagram({
           rx="10"
           className="db-cluster-box"
         />
+      ))}
+
+      {/* Dotted box around each per-service load-balancer group (entry sidecar + instances),
+          labelled with the service name; sits behind the nodes it groups. Non-interactive. */}
+      {svcLbBoxes.map((b) => (
+        <g key={`svclb-${b.entryId}`} style={{ pointerEvents: 'none' }}>
+          <rect x={b.x} y={b.y} width={b.w} height={b.h} rx="14" className="ws-fleet-box" />
+          <text x={b.x + 12} y={b.y + 16} className="ws-fleet-label">
+            {b.label}
+          </text>
+        </g>
       ))}
 
       {/* Dotted "fleet" box around each websocket tier's servers + its shared-methods panel;
@@ -1411,9 +1517,12 @@ export default function SystemDiagram({
         const breakerOn = !!res?.circuit_breaker?.enabled
         const live = resilienceState[key]
         const dim = traceNodes ? ' dim' : ''
-        const lineClass = kind === 'grpc' ? `grpc-edge${dim}` : `edge${dim}`
+        const lineClass =
+          kind === 'grpc' ? `grpc-edge${dim}` : kind === 'consume' ? `consume-edge${dim}` : `edge${dim}`
         const fromIsService = byId[from]?.type === 'service'
-        const clickable = !!onRequestConnectionResilience && fromIsService && !dragMode
+        // A Kafka consume edge (service → cluster) isn't an outbound request call, so it doesn't
+        // take a resilience policy — exclude it from the clickable/breaker treatment.
+        const clickable = !!onRequestConnectionResilience && fromIsService && kind !== 'consume' && !dragMode
         const label = breakerOn ? breakerLabel(live) : null
         const poolText = poolLabel(poolState[key])
         return (
@@ -1433,9 +1542,21 @@ export default function SystemDiagram({
               x2={b.x}
               y2={b.y}
               className={lineClass}
-              markerEnd={kind === 'grpc' ? 'url(#grpc-arrow)' : 'url(#edge-arrow)'}
+              markerEnd={
+                kind === 'grpc'
+                  ? 'url(#grpc-arrow)'
+                  : kind === 'consume'
+                    ? 'url(#consume-arrow)'
+                    : 'url(#edge-arrow)'
+              }
             >
-              <title>{kind === 'grpc' ? `gRPC · ${contract}: ${from} → ${to}` : `${from} → ${to}`}</title>
+              <title>
+                {kind === 'grpc'
+                  ? `gRPC · ${contract}: ${from} → ${to}`
+                  : kind === 'consume'
+                    ? `Kafka consume · ${from} → ${to}`
+                    : `${from} → ${to}`}
+              </title>
             </line>
             {breakerOn && <BreakerCircle cx={mid.x} cy={mid.y} live={live} />}
             {label && (
@@ -1542,8 +1663,14 @@ export default function SystemDiagram({
                     beginDrag(
                       e,
                       // A ws-server is part of a combined body: dragging it moves the whole
-                      // tier stack (servers + panel) together, not just this one card.
-                      isWsServer(node) ? fleetDragArg(node.wsTier) : { kind: 'node', nodeId: node.id, startPos: p },
+                      // tier stack (servers + panel) together, not just this one card. A
+                      // load-balanced instance likewise moves its whole group — its position is
+                      // derived from the entry, so we drag the entry.
+                      isWsServer(node)
+                        ? fleetDragArg(node.wsTier)
+                        : isSvcInstance(node)
+                          ? { kind: 'node', nodeId: node.instanceOf, startPos: posOf(byId[node.instanceOf]) }
+                          : { kind: 'node', nodeId: node.id, startPos: p },
                     )
                 : undefined
             }
@@ -1745,7 +1872,7 @@ export default function SystemDiagram({
                 )
               }
               if (row.kind === 'cons') {
-                // A Kafka consumer function: clicking it traces the consume edge cluster → service.
+                // A Kafka consumer function: clicking it traces the consume edge service → cluster.
                 // "CONS" stands in for the GET/POST method badge an HTTP row would show.
                 const c = row.c
                 const active =
