@@ -15,3 +15,6 @@ __pycache__/
 
 schemas/
 instructions/
+llm-app
+toy_llm.py
+scheduler.py
