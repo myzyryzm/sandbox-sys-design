@@ -15,7 +15,6 @@ import ConnectionResilienceModal from './ConnectionResilienceModal.jsx'
 import NodeEditModal from './NodeEditModal.jsx'
 import WsSharedMethodsModal from './WsSharedMethodsModal.jsx'
 import { CUSTOM_RUNTIMES } from './customTypes/index.js'
-import TestPanel from './TestPanel.jsx'
 import EndToEndModal from './EndToEndModal.jsx'
 import SkillsModal from './SkillsModal.jsx'
 import { queryInstant } from './prometheus.js'
@@ -119,7 +118,6 @@ export default function App() {
   // Set of event-stream cluster ids whose consumers are currently paused (drives a
   // diagram badge). Polled from /api/consumer-pause, mirroring the outage poll.
   const [pausedConsumers, setPausedConsumers] = useState(() => new Set())
-  const [showTest, setShowTest] = useState(false)
   const [showEndToEnd, setShowEndToEnd] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
   const [endpoints, setEndpoints] = useState([])
@@ -604,9 +602,6 @@ export default function App() {
         >
           <MoveIcon /> Drag
         </button>
-        <button className="header-btn no-auto" onClick={() => setShowTest(true)}>
-          🧪 Test
-        </button>
         <button className="header-btn no-auto" onClick={() => setShowEndToEnd(true)}>
           🔁 End-to-End
         </button>
@@ -729,9 +724,6 @@ export default function App() {
       )}
       {showCreateWebsockets && (
         <CreateWebsockets systemId={SYSTEM_ID} onClose={() => setShowCreateWebsockets(false)} />
-      )}
-      {showTest && (
-        <TestPanel systemId={SYSTEM_ID} onClose={() => setShowTest(false)} />
       )}
       {showEndToEnd && (
         <EndToEndModal

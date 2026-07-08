@@ -112,7 +112,6 @@ Other key files in systems/${id}/:
   Reload after route changes: docker compose -f systems/${id}/docker-compose.yml exec -T lb nginx -s reload
 - prometheus/prometheus.yml   Scrape targets (scrapes services/exporters directly, not
   through the lb). Restart after changes: docker compose -f systems/${id}/docker-compose.yml restart prometheus
-- load.sh   Load generator for smoke tests.
 Keep new metrics consistent between a service's app.py and manifest.json's PromQL. Reach
 a service through the lb at http://localhost:8080/<service><path>.
 

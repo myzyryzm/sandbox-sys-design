@@ -196,7 +196,7 @@ button + `EditQueuePanel.jsx`) that runs pending sessions sequentially in the on
   `services`, `databases` (+ `dbschema`, `dbseed`, `cdc`, `replicas`), `endpoints`, `models`,
   `eventstreams` + `consumers`, `grpc` (+ `grpcInstall`), `resilience`, `serviceLb`, `outage`, `externalServices`,
   `clients` + `scenarios` (+ `clientScript` helper), `customServices` (+ `customTypes/` recipes),
-  `endtoend`, `layout`, `simulate`, `skills`, `remove`, `terminal`. Shared primitives live in
+  `endtoend`, `layout`, `skills`, `remove`, `terminal`. Shared primitives live in
   `scaffold.js` + `systems.js`. `remove.js` **blocks deleting a node another still depends on**
   (`findDependents` reverse-scans endpoints `downstream`/gRPC targets/Kafka producers-consumers/consumer
   functions/scenario steps; replicas + CDC workers are excluded as they cascade) — `GET /api/dependents`

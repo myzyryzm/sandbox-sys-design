@@ -27,4 +27,3 @@ this one stops whichever system was previously active.
 - `docker-compose.yml` — add services (replicas, a DB, a cache, exporters…).
 - `nginx/nginx.conf` — per-service `/<id>/` routes and `upstream` blocks.
 - `prometheus/prometheus.yml` — scrape targets for any new services.
-- `load.sh` — how the smoke test drives traffic.

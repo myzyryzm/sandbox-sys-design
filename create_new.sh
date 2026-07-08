@@ -166,29 +166,6 @@ cat >"$NEW_DIR/endpoints.json" <<'ENDPOINTS'
 {}
 ENDPOINTS
 
-# --- load.sh: drive traffic through the LB so the metrics move ---
-cat >"$NEW_DIR/load.sh" <<'LOAD'
-#!/usr/bin/env bash
-# Generate steady load through the nginx LB so metrics move.
-# Usage: ./load.sh [delay-seconds-between-requests]   (Ctrl-C to stop)
-#
-# The target and HTTP method are overridable via env so the frontend's "Test"
-# panel can drive a specific endpoint:
-#   URL=http://localhost:8080/service-1/items METHOD=POST ./load.sh 0.05
-set -euo pipefail
-
-URL="${URL:-http://localhost:8080/service-1/health}"
-METHOD="${METHOD:-GET}"
-DELAY="${1:-0.05}"   # seconds between requests
-
-echo "Hammering $METHOD $URL (delay ${DELAY}s). Ctrl-C to stop."
-while true; do
-  curl -s -o /dev/null -X "$METHOD" "$URL" || true
-  sleep "$DELAY"
-done
-LOAD
-chmod +x "$NEW_DIR/load.sh"
-
 # --- manifest.json: lb + service-1 nodes, no edges. Metrics/health match scaffold.js ---
 python3 - "$NEW_DIR/manifest.json" "$NEW_ID" "$DISPLAY_NAME" <<'PY'
 import json, sys
@@ -282,7 +259,6 @@ this one stops whichever system was previously active.
 - \`docker-compose.yml\` — add services (replicas, a DB, a cache, exporters…).
 - \`nginx/nginx.conf\` — per-service \`/<id>/\` routes and \`upstream\` blocks.
 - \`prometheus/prometheus.yml\` — scrape targets for any new services.
-- \`load.sh\` — how the smoke test drives traffic.
 EOF
 
 echo "==> Created systems/$NEW_ID (\"$DISPLAY_NAME\")"

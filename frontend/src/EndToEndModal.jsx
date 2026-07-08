@@ -74,7 +74,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
     }
   }, [systemId])
 
-  // Own poll (like TestPanel), so App needs no new state. ~1.5s keeps the Start/Stop toggle live.
+  // Own poll, so App needs no new state. ~1.5s keeps the Start/Stop toggle live.
   useEffect(() => {
     load()
     const id = setInterval(load, 1500)

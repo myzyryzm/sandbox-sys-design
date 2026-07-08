@@ -25,9 +25,9 @@
 //        is given, only clears when it matches the running id, so a stale session can't stop a
 //        newer run).
 //
-// Mirrors scenarios.js (registry read/write + validators) and outage.js/simulate.js (in-memory
-// tracked state + a timer + cleanup when the dev server closes). Same-origin, same dev-server port,
-// no CORS. Unlike outage/simulate there is NO process/container to kill — `stop` is just map.delete.
+// Mirrors scenarios.js (registry read/write + validators) and outage.js (in-memory tracked
+// state + a timer + cleanup when the dev server closes). Same-origin, same dev-server port,
+// no CORS. Unlike outage there is NO process/container to kill — `stop` is just map.delete.
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'

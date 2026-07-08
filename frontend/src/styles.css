@@ -2046,25 +2046,8 @@ h1 {
   cursor: default;
 }
 
-/* Test / simulate modal */
-.sim {
-  background: #14171e;
-  border: 1px solid #232733;
-  border-radius: 8px;
-  padding: 14px;
-}
-
-.sim-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.sim-title {
-  font-weight: 600;
-  font-size: 14px;
-}
-
+/* Shared modal helpers — a status pill (used by the End-to-End modal) and the
+   muted description paragraph reused across many modals. */
 .sim-status {
   font-size: 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -2082,73 +2065,6 @@ h1 {
   color: var(--muted);
   font-size: 13px;
   margin: 8px 0 12px;
-}
-
-.sim-controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-/* Endpoint selector spans its own row above the rate + button. */
-.sim-target {
-  flex-basis: 100%;
-}
-
-.sim-target select {
-  flex: 1;
-  background: #0b0d12;
-  color: var(--text);
-  border: 1px solid #2a2e37;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 13px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.sim-controls label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.sim-controls input {
-  width: 64px;
-  background: #0b0d12;
-  color: var(--text);
-  border: 1px solid #2a2e37;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 13px;
-}
-
-.sim-controls button {
-  margin-left: auto;
-  border: 1px solid #2a2e37;
-  border-radius: 6px;
-  padding: 6px 14px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.sim-controls button.primary {
-  background: #2e7d32;
-  border-color: #2e7d32;
-  color: #fff;
-}
-
-.sim-controls button.danger {
-  background: #c62828;
-  border-color: #c62828;
-  color: #fff;
-}
-
-.sim-controls button:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 /* ===== gRPC ===== */

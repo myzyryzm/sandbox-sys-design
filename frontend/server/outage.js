@@ -15,9 +15,9 @@
 // the container down does that for all node types. A stopped container's port is
 // closed, so callers get connection-refused and the LB returns 502.
 //
-// Mirrors simulate.js (in-memory tracked state + timers + cleanup when the dev server
-// closes) and reuses the docker-compose-via-execFile shape from dbschema.js (arg
-// arrays, never a shell string). Node id == compose service name throughout this app.
+// Keeps in-memory tracked state + timers + cleanup when the dev server closes, and
+// reuses the docker-compose-via-execFile shape from dbschema.js (arg arrays, never a
+// shell string). Node id == compose service name throughout this app.
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
@@ -123,8 +123,7 @@ async function startOutage(body) {
     throw bad('duration_seconds must be a whole number between 1 and 300')
   }
 
-  // Replace any existing outage for this node (re-arm the timer / extend the window),
-  // like simulate.startLoad restarting a running loader.
+  // Replace any existing outage for this node (re-arm the timer / extend the window).
   clearEntry(system, node)
 
   try {
@@ -202,7 +201,7 @@ export default function outage() {
       })
 
       // Never leave a container stopped when the dev server goes away: restart every
-      // node still in an outage (best-effort, same spirit as simulate.js's cleanup).
+      // node still in an outage (best-effort cleanup on shutdown).
       server.httpServer?.on('close', () => {
         for (const [system, m] of outages) {
           for (const [node, e] of m) {

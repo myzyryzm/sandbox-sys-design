@@ -88,5 +88,4 @@ echo "Ready — system '$SYSTEM_ID':"
 echo "  Load balancer      : http://localhost:8080/health"
 echo "  Prometheus         : http://localhost:9090  (targets: /targets)"
 echo
-echo "  Generate load : systems/$SYSTEM_ID/load.sh"
 echo "  Stop          : ./stop.sh $SYSTEM_ID"

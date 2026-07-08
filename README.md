@@ -24,7 +24,7 @@ real Docker, not a mock. From the header and per-node Edit panels you can add:
 - **Custom service types** — typed services that scaffold real containers (the
   first is the peer-to-peer **Download Coordinator**),
 
-and exercise it all: generate load, trace an endpoint's request path, take a node
+and exercise it all: trace an endpoint's request path, take a node
 offline to watch failures propagate, and run **end-to-end test processes** that seed
 preconditions, drive clients, and probe for design defects (PASS/FAIL). The frontend
 stays generic — it renders whatever the selected system's `manifest.json` describes,
@@ -49,7 +49,6 @@ repo-root/
       consumers.json           # per-service Kafka consumer functions (if any)
       endtoend.json            # named end-to-end test processes (if any)
       endtoend-runs/           # persisted PASS/FAIL run reports
-      load.sh                  # load generator (honors URL + METHOD env)
       prometheus/prometheus.yml
       nginx/nginx.conf         # per-service /<id>/ routes (insertion markers)
       grpc/                    # gRPC contract bank: .proto + generated bindings + shared servicers
@@ -186,7 +185,6 @@ The header shows the system name/id and a row of top-level actions. Left to righ
 | Button | What it opens / does |
 | --- | --- |
 | **Drag** | Toggle drag mode — reposition nodes and move/resize the system-boundary box; the layout is saved to the manifest (`POST /api/layout`), no rebuild. |
-| **🧪 Test** | Simulations modal — today "Generate load" against a chosen endpoint. |
 | **🔁 End-to-End** | End-to-end test processes — define + run seed→drive→probe processes with a PASS/FAIL verdict. |
 | **📖 Skills** | Browse the Claude Code skills a launched session can use (served live from `.claude/skills/`). |
 | **＋ Add service** | Add a generic FastAPI service — or a **custom service type** (e.g. Download Coordinator). |
@@ -714,23 +712,6 @@ grid + aggregate %, and live chunk-source edges show the star→mesh shift. See 
 
 ---
 
-## Testing the system (the "Test" button)
-
-Click **"🧪 Test"** in the header to open the simulations modal. Today it has one
-simulation, **Generate load**: choose a **target endpoint** (method + path, from
-the same `/api/endpoints` catalog the LB shows), a rate (req/s), and **Start
-load**; request-rate, latency and in-flight metrics move on that service's node.
-**Stop** ends it.
-
-The dev-server plugin `frontend/server/simulate.js` spawns `load.sh` detached (in
-its own process group) with the chosen `URL` + `METHOD` in its environment, and
-tracks it per system — so Stop, or shutting down the dev server, kills the whole
-loop. `GET/POST /api/test/load` report and control its state. It's built as a
-list so future simulations (latency injection, kill a node, …) can slot in
-alongside.
-
----
-
 ## End-to-end test processes (the "End-to-End" button)
 
 Click **"🔁 End-to-End"** to define and run **end-to-end test processes** — the sandbox's
@@ -767,8 +748,7 @@ queries Prometheus**. If all four checks below agree, it's proven.
 **1. Generate load** through the load balancer (leave it running in a terminal):
 
 ```bash
-cd systems/hello-lb
-./load.sh            # or:  while true; do curl -s localhost:8080/service-1/health; done
+while true; do curl -s localhost:8080/service-1/health; done
 ```
 
 **2. Prometheus Targets page** — open
@@ -838,7 +818,7 @@ scrapes don't inflate req/s or latency.
 Every capability above entered through the same extensibility contract — a
 manifest node + compose service + scrape job, scaffolded by a dev-server plugin —
 so new ones keep slotting in without reworking the generic frontend. Ideas not
-built yet: optional Grafana dashboards, a Locust load generator, latency injection
+built yet: optional Grafana dashboards, latency injection
 (netem), and coordinator hot-standby / failover for the Download Coordinator (its
 orchestration state is deliberately kept in one separable object as the seam, but
 standby itself is out of scope today).
