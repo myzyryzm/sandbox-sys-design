@@ -8,6 +8,7 @@ import CreateService from './CreateService.jsx'
 import CreateExternalService from './CreateExternalService.jsx'
 import CreateClient from './CreateClient.jsx'
 import CreateEventStream from './CreateEventStream.jsx'
+import CreateEtcd from './CreateEtcd.jsx'
 import CreateWebsockets from './CreateWebsockets.jsx'
 import GrpcContractsModal from './GrpcContractsModal.jsx'
 import ModelsModal from './ModelsModal.jsx'
@@ -17,7 +18,7 @@ import WsSharedMethodsModal from './WsSharedMethodsModal.jsx'
 import { CUSTOM_RUNTIMES } from './customTypes/index.js'
 import EndToEndModal from './EndToEndModal.jsx'
 import SkillsModal from './SkillsModal.jsx'
-import { queryInstant } from './prometheus.js'
+import { queryInstant, queryVector } from './prometheus.js'
 import { pickColor } from './health.js'
 import { deriveFunctionTrace } from './scenarioBank.js'
 
@@ -88,7 +89,30 @@ async function pollSystem(manifest) {
         }
       }
 
-      state[node.id] = { metrics, color }
+      // An etcd cluster node additionally reads PER-MEMBER series (all N `up` and
+      // `is_leader` series of its job) to drive the member-dot strip under the node.
+      let members = null
+      if (node.type === 'etcd') {
+        try {
+          const [ups, leaders] = await Promise.all([
+            queryVector(base, `up{job="${node.id}"}`),
+            queryVector(base, `etcd_server_is_leader{job="${node.id}"}`),
+          ])
+          members = {}
+          for (const s of ups) {
+            const m = (s.labels.instance || '').split(':')[0]
+            if (m) members[m] = { up: s.value === 1, leader: false }
+          }
+          for (const s of leaders) {
+            const m = (s.labels.instance || '').split(':')[0]
+            if (members[m]) members[m].leader = s.value === 1
+          }
+        } catch (err) {
+          console.warn(`etcd members on ${node.id} failed:`, err.message)
+        }
+      }
+
+      state[node.id] = members ? { metrics, color, members } : { metrics, color }
     }),
   )
 
@@ -108,6 +132,7 @@ export default function App() {
   const [showCreateExternal, setShowCreateExternal] = useState(false)
   const [showCreateClient, setShowCreateClient] = useState(false)
   const [showCreateEventStream, setShowCreateEventStream] = useState(false)
+  const [showCreateEtcd, setShowCreateEtcd] = useState(false)
   const [showCreateWebsockets, setShowCreateWebsockets] = useState(false)
   const [showGrpcContracts, setShowGrpcContracts] = useState(false)
   const [showModels, setShowModels] = useState(false)
@@ -149,6 +174,12 @@ export default function App() {
   // A consumer function selected on the diagram, traced cluster → consuming service. Mutually
   // exclusive with the method/function/LB selections. Cleared on canvas click.
   const [consumerTrace, setConsumerTrace] = useState(null)
+  // The per-etcd keyspace registry (systems/<id>/etcd.json via GET /api/etcd?live=0), keyed by
+  // etcd node id. Rendered as clickable KEY rows on the etcd cluster node.
+  const [etcdKeyspaces, setEtcdKeyspaces] = useState({})
+  // A keyspace selected on the etcd node, traced registrant → etcd (the lease-put) and
+  // etcd → each listener (the watch push). Mutually exclusive with the other traces.
+  const [keyspaceTrace, setKeyspaceTrace] = useState(null)
   // Live runtime state for custom service types (e.g. Download Coordinator worker
   // bitmaps / distribution progress), keyed by node id. Filled by the poll below.
   const [customState, setCustomState] = useState({})
@@ -301,6 +332,38 @@ export default function App() {
       clearInterval(id)
     }
   }, [])
+
+  // Poll each etcd cluster's keyspace registry (registry-only, ?live=0 — no docker
+  // probing) so the cluster node's KEY rows and their traces update as keyspaces /
+  // listeners are added. Gated on the manifest containing an etcd node.
+  const etcdIds = (manifest?.nodes || []).filter((n) => n.type === 'etcd').map((n) => n.id).join(',')
+  useEffect(() => {
+    if (!etcdIds) {
+      setEtcdKeyspaces({})
+      return
+    }
+    let cancelled = false
+    const tick = async () => {
+      const entries = await Promise.all(
+        etcdIds.split(',').map(async (id) => {
+          try {
+            const res = await fetch(`/api/etcd?system=${SYSTEM_ID}&id=${encodeURIComponent(id)}&live=0`)
+            const data = await res.json()
+            return data.ok ? [id, data.keyspaces || []] : null
+          } catch {
+            return null
+          }
+        }),
+      )
+      if (!cancelled) setEtcdKeyspaces(Object.fromEntries(entries.filter(Boolean)))
+    }
+    tick()
+    const id = setInterval(tick, 4000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [etcdIds])
 
   // Fast-poll the in-memory resilience state (breaker/retry) so the diagram can show
   // a breaker trip live, faster than Prometheus' scrape. The aggregator returns {}
@@ -618,6 +681,11 @@ export default function App() {
                 { label: 'Client', onClick: () => setShowCreateClient(true) },
                 { label: 'Database', onClick: () => setShowCreateDb(true) },
                 { label: 'Event stream', onClick: () => setShowCreateEventStream(true) },
+                // Only one etcd cluster may exist — hide the option while one is on the
+                // diagram (the backend also 409s a second add), like Prometheus below.
+                ...(manifest.nodes.some((n) => n.type === 'etcd')
+                  ? []
+                  : [{ label: 'etcd', onClick: () => setShowCreateEtcd(true) }]),
                 { label: 'WebSockets', onClick: () => setShowCreateWebsockets(true) },
                 // Only one Prometheus node may exist — hide the option while one is on the
                 // diagram (the backend also 409s a second add).
@@ -670,7 +738,7 @@ export default function App() {
         pausedConsumers={pausedConsumers}
         customState={customState}
         methodTrace={methodTrace}
-        onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setMethodTrace(ep) }}
+        onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setKeyspaceTrace(null); setMethodTrace(ep) }}
         onClearMethodTrace={() => setMethodTrace(null)}
         clientFunctions={clientFunctions}
         wsStats={wsStats}
@@ -681,6 +749,7 @@ export default function App() {
         onSelectFunction={(fn, clientId) => {
           setMethodTrace(null)
           setConsumerTrace(null)
+          setKeyspaceTrace(null)
           // A ws builtin has no authored steps — the diagram traces the tier path itself.
           setFunctionTrace(fn.wsBuiltin
             ? { client: clientId, name: fn.name, wsBuiltin: true, methods: [] }
@@ -689,8 +758,22 @@ export default function App() {
         onClearFunctionTrace={() => setFunctionTrace(null)}
         consumerFunctions={consumerFunctions}
         consumerTrace={consumerTrace}
-        onSelectConsumer={(c, serviceId) => { setMethodTrace(null); setFunctionTrace(null); setConsumerTrace({ cluster: c.cluster, service: serviceId, topic: c.topic, name: c.name, downstream: c.downstream || [], downstreamDescriptions: c.downstreamDescriptions || {} }) }}
+        onSelectConsumer={(c, serviceId) => { setMethodTrace(null); setFunctionTrace(null); setKeyspaceTrace(null); setConsumerTrace({ cluster: c.cluster, service: serviceId, topic: c.topic, name: c.name, downstream: c.downstream || [], downstreamDescriptions: c.downstreamDescriptions || {} }) }}
         onClearConsumerTrace={() => setConsumerTrace(null)}
+        etcdKeyspaces={etcdKeyspaces}
+        keyspaceTrace={keyspaceTrace}
+        onSelectKeyspace={(ks, etcdId) => {
+          setMethodTrace(null)
+          setFunctionTrace(null)
+          setConsumerTrace(null)
+          setKeyspaceTrace({
+            etcd: etcdId,
+            service: ks.service,
+            prefix: ks.prefix,
+            listeners: (ks.listeners || []).map((l) => l.service),
+          })
+        }}
+        onClearKeyspaceTrace={() => setKeyspaceTrace(null)}
       />
       </div>
       {showTerminal && (
@@ -721,6 +804,9 @@ export default function App() {
       )}
       {showCreateEventStream && (
         <CreateEventStream systemId={SYSTEM_ID} onClose={() => setShowCreateEventStream(false)} />
+      )}
+      {showCreateEtcd && (
+        <CreateEtcd systemId={SYSTEM_ID} onClose={() => setShowCreateEtcd(false)} />
       )}
       {showCreateWebsockets && (
         <CreateWebsockets systemId={SYSTEM_ID} onClose={() => setShowCreateWebsockets(false)} />
@@ -796,6 +882,7 @@ export default function App() {
             // visible behind the (now-dismissed) overlay.
             setFunctionTrace(null)
             setConsumerTrace(null)
+            setKeyspaceTrace(null)
             setMethodTrace(ep)
             setEditTarget(null)
           }}

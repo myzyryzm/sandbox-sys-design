@@ -432,6 +432,77 @@
           }
         ]
       }
+    },
+    {
+      "id": "etcd",
+      "label": "etcd",
+      "type": "etcd",
+      "origin": "create-etcd",
+      "position": {
+        "x": 560,
+        "y": 918
+      },
+      "etcd": {
+        "size": 3,
+        "heartbeatMs": 100,
+        "electionMs": 1000,
+        "leaseTtlSeconds": 15,
+        "quorum": 2,
+        "members": [
+          "etcd-1",
+          "etcd-2",
+          "etcd-3"
+        ]
+      },
+      "metrics": [
+        {
+          "label": "members up",
+          "query": "sum(up{job=\"etcd\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "has leader",
+          "query": "min(etcd_server_has_leader{job=\"etcd\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "leader changes",
+          "query": "max(etcd_server_leader_changes_seen_total{job=\"etcd\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "keys",
+          "query": "max(etcd_debugging_mvcc_keys_total{job=\"etcd\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "watchers",
+          "query": "sum(etcd_debugging_mvcc_watcher_total{job=\"etcd\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "puts/s",
+          "query": "sum(rate(etcd_mvcc_put_total{job=\"etcd\"}[1m])) or vector(0)",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "sum(up{job=\"etcd\"}) or vector(0)",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 2"
+          },
+          {
+            "color": "yellow",
+            "when": "value < 3"
+          },
+          {
+            "color": "green",
+            "when": "value >= 3"
+          }
+        ]
+      }
     }
   ],
   "edges": [

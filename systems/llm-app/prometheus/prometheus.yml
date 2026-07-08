@@ -46,5 +46,10 @@ scrape_configs:
     {
         job_name: usr-msg-strm-srvc,
         static_configs: [ { targets: [ usr-msg-strm-srvc:8000 ] } ]
+      },
+    # etcd cluster "etcd" — added by Add etcd
+    {
+        job_name: etcd,
+        static_configs: [ { targets: [ etcd-1:2379, etcd-2:2379, etcd-3:2379 ] } ]
       }
   ]

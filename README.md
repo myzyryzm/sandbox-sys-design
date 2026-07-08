@@ -623,6 +623,50 @@ A cluster also has a **pause** toggle (`consumersPaused`) that consumer loops re
 
 ---
 
+## etcd (service discovery on a real Raft cluster)
+
+Click **"＋ Add etcd"** to provision a real **N-member etcd cluster** (N odd — 3/5/7 —
+one container per member, static bootstrap, no host ports, scraped natively by
+Prometheus). Only **one** etcd setup may exist per system: the menu item hides while a
+cluster is on the diagram and the backend 409s a second create. The create modal derives
+the Raft math live — **quorum = ⌊N/2⌋+1, tolerates ⌊N/2⌋ failures** — and takes the two
+Raft timing knobs (**heartbeat interval**, **election timeout**, validated ≥ 5×heartbeat)
+plus the **lease TTL**. Backend: `frontend/server/etcd.js`.
+
+The cluster renders as ONE diagram node: quorum-aware health (**red below quorum**,
+yellow degraded, green full), a per-member **dot strip** (leader ringed — kill the leader
+and watch the ring move), the derived quorum caption, and one clickable **KEY row per
+keyspace** — clicking it traces the discovery flow: registrant service **→ etcd**
+(lease-put keepalive) and **etcd →** each listener (watch push). No permanent edges;
+the arrows exist only while selected.
+
+Its Edit panel has two tabs:
+
+- **Cluster** — size / heartbeat / election / TTL with the derived quorum line. A
+  **TTL-only** save is a pure `etcd.json` write applied **live** (registration loops
+  re-read the mounted file by mtime — no rebuild); changing size or a Raft knob
+  **recreates the cluster** (fresh bootstrap token; leased registrations re-establish
+  themselves on reconnect). Below that, a per-member list with live health / leader
+  status and **Stop/Start** buttons — stop ⌈N/2⌉ members to lose quorum and watch
+  writes fail + the node turn red, then start one back and watch everything self-heal.
+- **Keyspaces** — **register a service** (creates `/services/<service>/`; each of its
+  workers — or every instance of a load-balanced service — keeps a **leased key** alive
+  there with value `host:port`) and add **listeners** per keyspace (a real etcd
+  `watch_prefix` — updates are **pushed**, never polled). The registry entry + compose
+  env/mount (`ETCD_WORKER_ID`, `ETCD_ENDPOINTS`, `etcd.json:ro`) are written
+  mechanically; the lease-keepalive / watch loops are authored into the service's
+  `app.py` by a launched Claude session (the `sandbox-etcd` skill), which flips
+  `implemented: true`. The tab lists each keyspace's **live workers** straight from the
+  cluster (kill a worker and its key vanishes within one TTL) and each listener exposes
+  `GET /<listener>/discovery/<service>` with its live view.
+
+Deleting is guarded like everything else: the cluster can't be deleted while keyspaces
+exist, and a service can't be deleted while others watch its keyspace. Routes:
+`POST/GET/PUT /api/etcd`, `POST/DELETE /api/etcd/keyspace`, `POST/DELETE
+/api/etcd/listener`, `POST /api/etcd/member` (the quorum demo).
+
+---
+
 ## WebSockets (an L4-balanced real-time tier)
 
 Click **"＋ Add WebSockets"** to provision a complete websocket tier in one mechanical

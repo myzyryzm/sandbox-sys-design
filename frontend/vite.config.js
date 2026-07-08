@@ -29,6 +29,7 @@ import endtoend from './server/endtoend.js'
 import websockets from './server/websockets.js'
 import serviceLb from './server/serviceLb.js'
 import prometheusNodePlugin from './server/prometheus.js'
+import etcdPlugin from './server/etcd.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -68,7 +69,7 @@ function serveSystems() {
 }
 
 export default defineConfig({
-  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin()],
+  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin()],
   server: {
     proxy: {
       // Browser -> /api/prometheus/api/v1/query?...  proxied to Prometheus.

@@ -153,6 +153,7 @@ function isDeletable(node) {
     node.type === 'prometheus' ||
     node.origin === 'create-database' ||
     node.origin === 'create-event-stream' ||
+    node.origin === 'create-etcd' ||
     node.origin === 'create-websockets'
   )
 }
@@ -357,6 +358,15 @@ export default function SystemDiagram({
   consumerTrace = null,
   onSelectConsumer,
   onClearConsumerTrace,
+  // Each etcd cluster's keyspaces (systems/<id>/etcd.json), keyed by etcd node id. Rendered
+  // as clickable KEY rows on the cluster node; clicking one traces registrant → etcd →
+  // each listener.
+  etcdKeyspaces = {},
+  // A selected keyspace, traced registrant service → etcd (the lease-put keepalive) and
+  // etcd → each listener (the watch push). Mutually exclusive with the other traces.
+  keyspaceTrace = null,
+  onSelectKeyspace,
+  onClearKeyspaceTrace,
 }) {
   const [selectedKey, setSelectedKey] = useState(null)
   // Index of the trace hop whose description popup is open (or null). Reset whenever the active
@@ -496,12 +506,16 @@ export default function SystemDiagram({
       { label: 'last run', value: wsStats[id].ts ? new Date(wsStats[id].ts).toLocaleTimeString() : '—' },
     ].map((r) => ({ kind: 'wsstat', ...r }))
   }
+  // An etcd cluster's keyspaces, dropping any whose registrant service no longer exists (so a
+  // deleted service can't leave a dangling KEY row that traces to nothing).
+  const keyspacesOf = (id) => (etcdKeyspaces[id] || []).filter((k) => byId[k.service])
   const rowsOf = (node) => {
     if (!node) return []
     return [
       ...methodsOf(node.id).map((e) => ({ kind: 'method', e })),
       ...functionsOf(node.id).map((fn) => ({ kind: 'fn', fn })),
       ...consumersOf(node.id).map((c) => ({ kind: 'cons', c })),
+      ...keyspacesOf(node.id).map((ks) => ({ kind: 'ks', ks })),
       ...wsStatRowsOf(node.id),
     ]
   }
@@ -795,6 +809,9 @@ export default function SystemDiagram({
   // A consumer trace highlights one consume edge: consuming service → cluster. Both nodes must
   // still exist. Mutually exclusive with the other traces (App nulls the others when one is set).
   const ct = consumerTrace && byId[consumerTrace.cluster] && byId[consumerTrace.service] ? consumerTrace : null
+  // A keyspace trace highlights the discovery flow around the etcd cluster: registrant → etcd
+  // (the lease-put keepalive in) and etcd → each listener (the watch push out).
+  const kt = keyspaceTrace && byId[keyspaceTrace.etcd] && byId[keyspaceTrace.service] ? keyspaceTrace : null
   if (ft && ft.wsBuiltin) {
     // A ws pool client's builtin method has no authored steps — trace the TIER path
     // instead: client → its L4 lb → each relay server → the bus + presence redis.
@@ -914,6 +931,14 @@ export default function SystemDiagram({
     traceNodes = new Set([ct.cluster, ct.service, ...cds])
     traceEdges.push([ct.service, ct.cluster, ct.topic])
     for (const d of cds) traceEdges.push([ct.service, d, cdd[d] || ''])
+  } else if (kt) {
+    // Registrant service → etcd (each worker keeps a leased key alive under the prefix), then
+    // etcd → each listener (updates are PUSHED over the watch stream — no polling). The arrows
+    // exist only while the keyspace row is selected; there are no permanent manifest edges.
+    const listeners = (kt.listeners || []).filter((l) => byId[l])
+    traceNodes = new Set([kt.service, kt.etcd, ...listeners])
+    traceEdges.push([kt.service, kt.etcd, `lease-put ${kt.prefix}<worker> · TTL keepalive`])
+    for (const l of listeners) traceEdges.push([kt.etcd, l, `watch ${kt.prefix} (pushed)`])
   } else if (selected && lbNode) {
     const ids = new Set([lbNode.id, selected.service, ...(selected.downstream || [])])
     // Extend the trace back to the clients that actually call this endpoint:
@@ -1326,6 +1351,7 @@ export default function SystemDiagram({
               onClearMethodTrace?.()
               onClearFunctionTrace?.()
               onClearConsumerTrace?.()
+              onClearKeyspaceTrace?.()
             }
       }
       onPointerMove={dragMode ? onPointerMove : undefined}
@@ -1759,10 +1785,11 @@ export default function SystemDiagram({
                           className={isSel ? 'endpoint-hit selected' : 'endpoint-hit'}
                           onClick={dragMode ? undefined : (ev) => {
                             ev.stopPropagation()
-                            // An LB selection and a method/function/consumer trace never coexist.
+                            // An LB selection and a method/function/consumer/keyspace trace never coexist.
                             onClearMethodTrace?.()
                             onClearFunctionTrace?.()
                             onClearConsumerTrace?.()
+                            onClearKeyspaceTrace?.()
                             setSelectedKey(isSel ? null : key)
                           }}
                         >
@@ -1847,10 +1874,11 @@ export default function SystemDiagram({
                     className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
                     onClick={dragMode ? undefined : (ev) => {
                       ev.stopPropagation()
-                      // A function trace is exclusive with the LB / method / consumer selections.
+                      // A function trace is exclusive with the LB / method / consumer / keyspace selections.
                       setSelectedKey(null)
                       onClearMethodTrace?.()
                       onClearConsumerTrace?.()
+                      onClearKeyspaceTrace?.()
                       if (active) onClearFunctionTrace?.()
                       else onSelectFunction?.(fn, node.id)
                     }}
@@ -1888,10 +1916,11 @@ export default function SystemDiagram({
                     className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
                     onClick={dragMode ? undefined : (ev) => {
                       ev.stopPropagation()
-                      // A consumer trace is exclusive with the LB / method / function selections.
+                      // A consumer trace is exclusive with the LB / method / function / keyspace selections.
                       setSelectedKey(null)
                       onClearMethodTrace?.()
                       onClearFunctionTrace?.()
+                      onClearKeyspaceTrace?.()
                       if (active) onClearConsumerTrace?.()
                       else onSelectConsumer?.(c, node.id)
                     }}
@@ -1899,6 +1928,34 @@ export default function SystemDiagram({
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
                       <tspan className="endpoint-method">CONS</tspan> {c.name}
+                    </text>
+                  </g>
+                )
+              }
+              if (row.kind === 'ks') {
+                // An etcd keyspace: clicking it traces registrant → etcd (lease-put) and
+                // etcd → each listener (watch push). "KEY" stands in for the method badge.
+                const ks = row.ks
+                const active =
+                  !!keyspaceTrace && keyspaceTrace.etcd === node.id && keyspaceTrace.service === ks.service
+                return (
+                  <g
+                    key={`ks-${ks.service}`}
+                    className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      // A keyspace trace is exclusive with the LB / method / function / consumer selections.
+                      setSelectedKey(null)
+                      onClearMethodTrace?.()
+                      onClearFunctionTrace?.()
+                      onClearConsumerTrace?.()
+                      if (active) onClearKeyspaceTrace?.()
+                      else onSelectKeyspace?.(ks, node.id)
+                    }}
+                  >
+                    <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={y + 12} className="endpoint-row">
+                      <tspan className="endpoint-method">KEY</tspan> {ks.prefix}
                     </text>
                   </g>
                 )
@@ -1916,10 +1973,11 @@ export default function SystemDiagram({
                   className={isSel ? 'endpoint-hit selected' : 'endpoint-hit'}
                   onClick={dragMode ? undefined : (ev) => {
                     ev.stopPropagation()
-                    // Method trace and LB / function / consumer selection never coexist.
+                    // Method trace and LB / function / consumer / keyspace selection never coexist.
                     setSelectedKey(null)
                     onClearFunctionTrace?.()
                     onClearConsumerTrace?.()
+                    onClearKeyspaceTrace?.()
                     if (isSel) onClearMethodTrace?.()
                     else onSelectMethod?.(e)
                   }}
@@ -1995,6 +2053,38 @@ export default function SystemDiagram({
                 ⏸ consumers paused
               </text>
             )}
+            {/* etcd cluster caption: per-member health dots (leader ringed) + the quorum
+                math derived from N, below the node like the outage/pause captions. Member
+                up/leader state comes from the per-member Prometheus series (nodeData). */}
+            {node.type === 'etcd' && node.etcd && (() => {
+              const members = node.etcd.members || []
+              const live = data?.members || {}
+              const size = node.etcd.size || members.length
+              const quorum = node.etcd.quorum || Math.floor(size / 2) + 1
+              const yDots = h + (inOutage ? 26 : 12)
+              const dotGap = 16
+              const x0 = NODE_W / 2 - ((members.length - 1) * dotGap) / 2
+              return (
+                <g style={{ pointerEvents: 'none' }}>
+                  {members.map((m, mi) => {
+                    const st = live[m]
+                    const fill = st ? (st.up ? COLOR_HEX.green : COLOR_HEX.red) : COLOR_HEX.gray
+                    return (
+                      <g key={m}>
+                        <circle cx={x0 + mi * dotGap} cy={yDots} r={4.5} fill={fill} />
+                        {st?.leader && (
+                          <circle cx={x0 + mi * dotGap} cy={yDots} r={7} fill="none"
+                            stroke={fill} strokeWidth="1.5" />
+                        )}
+                      </g>
+                    )
+                  })}
+                  <text x={NODE_W / 2} y={yDots + 18} className="node-pause-label">
+                    {size} nodes · quorum {quorum} · tolerates {size - quorum}
+                  </text>
+                </g>
+              )
+            })()}
           </g>
         )
       })}

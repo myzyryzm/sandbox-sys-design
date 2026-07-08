@@ -1,0 +1,44 @@
+{
+  "cluster": {
+    "id": "etcd",
+    "size": 3,
+    "heartbeatMs": 100,
+    "electionMs": 1000,
+    "leaseTtlSeconds": 15,
+    "createdAt": "2026-07-08T17:57:24.765Z",
+    "updatedAt": "2026-07-08T17:57:24.765Z"
+  },
+  "keyspaces": [
+    {
+      "service": "chat-service",
+      "prefix": "/services/chat-service/",
+      "description": "Register each chat-service worker under /services/chat-service/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set.",
+      "implemented": true,
+      "conversationId": "",
+      "createdAt": "2026-07-08T17:57:25.665Z",
+      "updatedAt": "2026-07-08T17:57:25.679Z",
+      "history": [
+        {
+          "at": "2026-07-08T17:57:25.665Z",
+          "description": "Register each chat-service worker under /services/chat-service/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set."
+        }
+      ],
+      "listeners": [
+        {
+          "service": "usr-msg-strm-srvc",
+          "description": "Watch /services/chat-service/ and keep a live in-memory map of chat-service workers (worker id -> host:port), updated by pushed etcd events.",
+          "implemented": true,
+          "conversationId": "",
+          "createdAt": "2026-07-08T17:57:25.679Z",
+          "updatedAt": "2026-07-08T17:57:25.679Z",
+          "history": [
+            {
+              "at": "2026-07-08T17:57:25.679Z",
+              "description": "Watch /services/chat-service/ and keep a live in-memory map of chat-service workers (worker id -> host:port), updated by pushed etcd events."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

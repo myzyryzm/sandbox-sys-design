@@ -316,7 +316,7 @@ function enable(ctx) {
   const doc = loadCompose(system)
   const app = appServiceDef(doc, service)
   for (const id of ids) {
-    setComposeService(doc, id, { ...app, build: `./${service}` }, ` Instance of load-balanced service "${service}"`)
+    setComposeService(doc, id, withEtcdWorkerId({ ...app, build: `./${service}` }, id), ` Instance of load-balanced service "${service}"`)
   }
   setComposeService(doc, service, sidecarDef(service, ids), ` Load balancer sidecar for "${service}" (haproxy)`)
   saveCompose(system, doc)
@@ -345,6 +345,24 @@ function enable(ctx) {
   writeManifest(system, manifest)
 
   return { buildNames: ids, recreate: [service, 'lb'], removeOrphans: false }
+}
+
+// A cloned instance def must carry its OWN etcd worker identity: the def being cloned
+// may belong to an etcd-registered service (env ETCD_WORKER_ID, written by etcd.js),
+// and copying it verbatim would make every instance register under the SAME key —
+// one worker on the diagram instead of N. No-op for services with no etcd role.
+// Handles both compose environment forms (map and KEY=VAL list).
+function withEtcdWorkerId(def, id) {
+  const env = def?.environment
+  if (Array.isArray(env)) {
+    if (!env.some((e) => String(e).startsWith('ETCD_WORKER_ID='))) return def
+    return {
+      ...def,
+      environment: env.map((e) => (String(e).startsWith('ETCD_WORKER_ID=') ? `ETCD_WORKER_ID=${id}` : e)),
+    }
+  }
+  if (!env || env.ETCD_WORKER_ID === undefined) return def
+  return { ...def, environment: { ...env, ETCD_WORKER_ID: id } }
 }
 
 // A fresh instance node: a normal service card that carries the grouping back-link and
@@ -382,7 +400,7 @@ function scale(ctx) {
     for (let o = maxOrd + 1; buildNames.length < target - current.length; o++) {
       const id = instanceId(service, o)
       assertFreeInstanceIds(system, manifest, service, [o])
-      setComposeService(doc, id, { ...app, build: `./${service}` }, ` Instance of load-balanced service "${service}"`)
+      setComposeService(doc, id, withEtcdWorkerId({ ...app, build: `./${service}` }, id), ` Instance of load-balanced service "${service}"`)
       addScrapeJobDoc(prom, id, `${id}:${SERVICE_PORT}`, ` Instance of load-balanced service "${service}"`)
       manifest.nodes.push(instanceNode(service, id, node))
       manifest.edges.push({ from: service, to: id, origin: 'service-lb' })
@@ -432,7 +450,9 @@ function disable(ctx) {
     removeComposeService(doc, n.id)
     removeScrapeJobDoc(prom, n.id)
   }
-  setComposeService(doc, service, restored, ` Service "${service}"`)
+  // A collapsed plain service registers as `<service>-1` by convention, so pin the
+  // restored def's worker id back (it was cloned from instance 1, but be explicit).
+  setComposeService(doc, service, withEtcdWorkerId(restored, `${service}-1`), ` Service "${service}"`)
   setScrapeJobTarget(prom, service, `${service}:${SERVICE_PORT}`)
   saveCompose(system, doc)
   savePrometheus(system, prom)

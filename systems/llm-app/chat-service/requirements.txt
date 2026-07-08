@@ -2,3 +2,6 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 prometheus_client==0.21.1
 psycopg[binary]==3.2.3
+etcd3==0.12.0
+protobuf==3.20.3
+grpcio>=1.60

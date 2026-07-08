@@ -65,6 +65,11 @@ services:
   chat-service:
     # Service "chat-service" — added by Add service (generic FastAPI backend)
     build: ./chat-service
+    volumes:
+      - ./etcd.json:/etcd/etcd.json:ro
+    environment:
+      ETCD_WORKER_ID: chat-service-1
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
   user-messages-stream:
     # Kafka "user-messages-stream" — added by Add event stream
     image: apache/kafka:3.8.0
@@ -148,3 +153,54 @@ services:
   usr-msg-strm-srvc:
     # Service "usr-msg-strm-srvc" — added by Add service (generic FastAPI backend)
     build: ./usr-msg-strm-srvc
+    environment:
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
+  etcd-1:
+    # etcd cluster "etcd" — added by Add etcd
+    image: gcr.io/etcd-development/etcd:v3.5.21
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-1
+      - --data-dir=/var/lib/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-1:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-1783533444765
+      - --heartbeat-interval=100
+      - --election-timeout=1000
+    restart: unless-stopped
+  etcd-2:
+    image: gcr.io/etcd-development/etcd:v3.5.21
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-2
+      - --data-dir=/var/lib/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-2:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-2:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-1783533444765
+      - --heartbeat-interval=100
+      - --election-timeout=1000
+    restart: unless-stopped
+  etcd-3:
+    image: gcr.io/etcd-development/etcd:v3.5.21
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-3
+      - --data-dir=/var/lib/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-3:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-3:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-1783533444765
+      - --heartbeat-interval=100
+      - --election-timeout=1000
+    restart: unless-stopped

@@ -11,6 +11,8 @@ import ClientScenarioTab from './ClientScenarioTab.jsx'
 import ClientStateTab from './ClientStateTab.jsx'
 import WsClientMethodsTab from './WsClientMethodsTab.jsx'
 import ConsumerTab from './ConsumerTab.jsx'
+import EtcdClusterTab from './EtcdClusterTab.jsx'
+import EtcdKeyspacesTab from './EtcdKeyspacesTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
 import ServiceLbTab from './ServiceLbTab.jsx'
 import { customTypeOf } from './customTypes/index.js'
@@ -52,6 +54,7 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   const isClient = node.type === 'client'
   const isDatabase = node.origin === 'create-database'
   const isEventStream = node.origin === 'create-event-stream'
+  const isEtcd = node.origin === 'create-etcd'
   const isSecondary = !!node.replicaOf
   // Prometheus is shared infra: its only action is the visual Delete (remove the diagram
   // node, keep the container). No feature tabs, and NO Shutdown — never offer to stop the
@@ -101,6 +104,12 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     // Consumer functions: internal services that consume this cluster's topics. Rendered via the
     // generic Component-tab path below (no `switch` case needed).
     tabs.push({ id: 'consumers', label: 'Consumers', Component: ConsumerTab })
+  } else if (isEtcd) {
+    // Cluster config (size / Raft knobs / lease TTL + per-member stop-start) and the
+    // service-discovery keyspaces (register services, manage listeners, live workers).
+    // Both render via the generic Component-tab path below.
+    tabs.push({ id: 'cluster', label: 'Cluster', Component: EtcdClusterTab })
+    tabs.push({ id: 'keyspaces', label: 'Keyspaces', Component: EtcdKeyspacesTab })
   }
   // Custom service types inject their own tab(s) (e.g. a Download Coordinator's
   // Distribution tab) between the kind tabs and the universal Shutdown/Delete.

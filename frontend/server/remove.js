@@ -64,6 +64,7 @@ function validate(body) {
     node.type === 'external_service' ||
     node.origin === 'create-database' ||
     node.origin === 'create-event-stream' ||
+    node.origin === 'create-etcd' ||
     node.origin === 'create-websockets'
   if (!deletable) throw bad(`"${id}" (${node.type}) cannot be deleted`)
   // A replica-group instance can't be deleted on its own — the group is one unit, managed
@@ -84,7 +85,9 @@ function validate(body) {
         ? 'database'
         : node.origin === 'create-event-stream'
           ? 'event-stream'
-          : 'service'
+          : node.origin === 'create-etcd'
+            ? 'etcd'
+            : 'service'
   // A websocket tier is one unit: servers, bus, presence and the client pool all
   // cascade from the lb (see cascadeChildIds). Only the lb is individually
   // deletable — nothing else can validate, so the cascade loop below never has
@@ -106,6 +109,9 @@ function ownedServices(id, kind, node) {
   }
   // A linked token stream (streamOf) is a redis with an exporter, no init sidecar.
   if (node?.streamOf) return [id, `${id}-exporter`]
+  // An etcd cluster is one node owning N member containers (<id>-1..N, no exporter —
+  // etcd serves /metrics natively).
+  if (kind === 'etcd') return node?.etcd?.members?.length ? [...node.etcd.members] : [id]
   return kind === 'database' || kind === 'event-stream'
     ? [id, `${id}-exporter`, `${id}-init`]
     : [id]
@@ -190,7 +196,9 @@ const kindOf = (node) =>
         ? 'event-stream'
         : node?.origin === 'create-cdc'
           ? 'cdc'
-          : 'service'
+          : node?.origin === 'create-etcd'
+            ? 'etcd'
+            : 'service'
 
 // A removed CDC worker was registered as a producer in its target streams'
 // streams.json — scrub it so no stream lists a producer that no longer exists.
@@ -259,6 +267,24 @@ function readJson(file) {
   } catch {
     return null
   }
+}
+
+// Drop etcd keyspaces owned by a removed service and listener entries naming one, so
+// the discovery registry never references nodes that no longer exist. (Deleting a
+// keyspace owner with LISTENERS is blocked by findDependents; this prunes the
+// unwatched leftovers + the removed service's own listener entries.)
+function pruneEtcd(system, removedIds) {
+  const file = path.join(systemDir(system), 'etcd.json')
+  const data = readJson(file)
+  if (!data || !Array.isArray(data.keyspaces)) return
+  const before = JSON.stringify(data.keyspaces)
+  data.keyspaces = data.keyspaces
+    .filter((ks) => ks && !removedIds.has(ks.service))
+    .map((ks) => ({
+      ...ks,
+      listeners: (Array.isArray(ks.listeners) ? ks.listeners : []).filter((l) => l && !removedIds.has(l.service)),
+    }))
+  if (JSON.stringify(data.keyspaces) !== before) fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n')
 }
 
 // The owned children a delete cascades to — read replicas (replicaOf) and the CDC
@@ -366,6 +392,29 @@ function findDependents(system, manifest, id, kind, cascadeIds = new Set()) {
   for (const c of consumers && Array.isArray(consumers.consumers) ? consumers.consumers : []) {
     if (skip(c?.service) || !Array.isArray(c.downstream) || !c.downstream.includes(id)) continue
     deps.push({ node: c.service, label: labelOf(c.service), via: 'consumer', detail: `function ${c.name}`, calls: [] })
+  }
+
+  // etcd — deleting the CLUSTER is blocked while any keyspace still has a registered
+  // owner or listeners (their app.py loops point at it); deleting a SERVICE that owns
+  // a keyspace is blocked while other services still watch that keyspace.
+  const etcdReg = readJson(path.join(dir, 'etcd.json'))
+  const etcdKeyspaces = etcdReg && Array.isArray(etcdReg.keyspaces) ? etcdReg.keyspaces : []
+  if (kind === 'etcd') {
+    for (const ks of etcdKeyspaces) {
+      if (!skip(ks?.service)) {
+        deps.push({ node: ks.service, label: labelOf(ks.service), via: 'etcd', detail: `registers ${ks.prefix}`, calls: [] })
+      }
+      for (const l of Array.isArray(ks?.listeners) ? ks.listeners : []) {
+        if (skip(l?.service)) continue
+        deps.push({ node: l.service, label: labelOf(l.service), via: 'etcd', detail: `watches ${ks.prefix}`, calls: [] })
+      }
+    }
+  } else {
+    const owned = etcdKeyspaces.find((ks) => ks?.service === id)
+    for (const l of owned && Array.isArray(owned.listeners) ? owned.listeners : []) {
+      if (skip(l?.service)) continue
+      deps.push({ node: l.service, label: labelOf(l.service), via: 'etcd', detail: `watches ${owned.prefix}`, calls: [] })
+    }
   }
 
   // WebSocket tier — every relay server publishes through the tier's bus and reads/
@@ -492,8 +541,15 @@ export async function handleDelete(body) {
   if (node?.type === 'service-lb') {
     fs.rmSync(path.join(systemDir(system), `${id}-lb`), { recursive: true, force: true })
   }
+  // A deleted etcd cluster also owns the top-level discovery registry (etcd.json —
+  // fixed name, one cluster per system; the node has no folder of its own).
+  if (kind === 'etcd') {
+    fs.rmSync(path.join(systemDir(system), 'etcd.json'), { force: true })
+  }
   // Drop consumer functions that referenced any removed node (as owner service or as cluster).
   pruneConsumers(system, removedIds)
+  // Drop etcd keyspaces/listeners that referenced any removed service.
+  pruneEtcd(system, removedIds)
   writeManifest(system, manifest)
 
   const log = await rebuild(system, kind)

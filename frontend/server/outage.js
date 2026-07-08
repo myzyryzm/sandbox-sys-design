@@ -78,10 +78,27 @@ function isControllable(node) {
     node.type === 'external_service' ||
     node.origin === 'create-database' ||
     node.origin === 'create-event-stream' ||
+    // The etcd cluster node: shutdown kills ALL members at once (total quorum loss —
+    // registrations error-loop until it's back). Per-member kills live in the
+    // Cluster tab (/api/etcd/member), not here.
+    node.origin === 'create-etcd' ||
     // WebSocket-tier nodes are real containers too (kill a relay and watch the
     // haproxy lb shift sessions) — except the client, which runs on the host.
     (node.origin === 'create-websockets' && node.type !== 'client')
   )
+}
+
+// The compose services a node's outage acts on: an etcd node maps to its N member
+// containers (the node id itself is not a compose service); everything else is 1:1.
+function containersOf(system, node) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
+    const target = manifest.nodes.find((n) => n.id === node)
+    if (target?.origin === 'create-etcd' && target.etcd?.members?.length) return [...target.etcd.members]
+  } catch {
+    /* fall through to the 1:1 default */
+  }
+  return [node]
 }
 
 function remainingSeconds(until) {
@@ -126,12 +143,13 @@ async function startOutage(body) {
   // Replace any existing outage for this node (re-arm the timer / extend the window).
   clearEntry(system, node)
 
+  const containers = containersOf(system, node)
   try {
     // `kill` (SIGKILL), not a graceful `stop`: an outage should reject inbound
     // connections *immediately* for the whole window, with no graceful-drain tail
     // that could still serve a request in the first second. `docker compose start`
     // brings the container back; databases/streams do crash recovery on restart.
-    await compose(system, 'kill', node)
+    await compose(system, 'kill', ...containers)
   } catch (err) {
     const detail = `${err.stderr || ''}${err.stdout || ''}`.trim() || err.message
     throw new HttpError(502, `could not shut down "${node}": ${detail}`)
@@ -141,7 +159,7 @@ async function startOutage(body) {
   const timer = setTimeout(() => {
     // Window elapsed: bring the node back and forget the outage. Errors here are
     // logged but can't be surfaced (no request in flight); the node simply stays down.
-    compose(system, 'start', node).catch((err) => {
+    compose(system, 'start', ...containers).catch((err) => {
       console.warn(`outage: failed to restart "${node}" in ${system}:`, err.message)
     })
     const m = outages.get(system)
@@ -154,7 +172,7 @@ async function startOutage(body) {
   timer.unref?.()
 
   if (!outages.has(system)) outages.set(system, new Map())
-  outages.get(system).set(node, { until, timer })
+  outages.get(system).set(node, { until, timer, containers })
   return status(system)
 }
 
@@ -163,7 +181,7 @@ async function endOutage(body) {
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
   clearEntry(system, node)
   try {
-    await compose(system, 'start', node)
+    await compose(system, 'start', ...containersOf(system, node))
   } catch (err) {
     const detail = `${err.stderr || ''}${err.stdout || ''}`.trim() || err.message
     throw new HttpError(502, `could not restart "${node}": ${detail}`)
@@ -206,7 +224,7 @@ export default function outage() {
         for (const [system, m] of outages) {
           for (const [node, e] of m) {
             clearTimeout(e.timer)
-            compose(system, 'start', node).catch(() => {})
+            compose(system, 'start', ...(e.containers || [node])).catch(() => {})
           }
         }
         outages.clear()
