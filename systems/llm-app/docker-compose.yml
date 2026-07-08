@@ -145,3 +145,6 @@ services:
       REDIS_ADDR: redis://llm-worker-stream:6379
     depends_on:
       - llm-worker-stream
+  usr-msg-strm-srvc:
+    # Service "usr-msg-strm-srvc" — added by Add service (generic FastAPI backend)
+    build: ./usr-msg-strm-srvc

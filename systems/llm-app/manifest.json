@@ -65,8 +65,8 @@
       "type": "postgres",
       "origin": "create-database",
       "position": {
-        "x": 203,
-        "y": 633
+        "x": 90,
+        "y": 629
       },
       "metrics": [
         {
@@ -108,8 +108,8 @@
       "type": "postgres",
       "origin": "create-database",
       "position": {
-        "x": 593,
-        "y": 383
+        "x": 499,
+        "y": 564
       },
       "metrics": [
         {
@@ -153,8 +153,8 @@
       "type": "service",
       "origin": "create-service",
       "position": {
-        "x": 199,
-        "y": 362
+        "x": 110,
+        "y": 353
       },
       "metrics": [
         {
@@ -199,8 +199,8 @@
       "type": "kafka",
       "origin": "create-event-stream",
       "position": {
-        "x": 958,
-        "y": 383
+        "x": 1162,
+        "y": 428
       },
       "metrics": [
         {
@@ -245,8 +245,8 @@
       "origin": "create-cdc",
       "cdcOf": "chat-db",
       "position": {
-        "x": 813,
-        "y": 616
+        "x": 819,
+        "y": 582
       },
       "metrics": [
         {
@@ -286,8 +286,8 @@
       "origin": "create-custom-service",
       "service_type": "llm_worker",
       "position": {
-        "x": 457,
-        "y": 740
+        "x": 788,
+        "y": 138
       },
       "metrics": [
         {
@@ -353,8 +353,8 @@
       "origin": "create-custom-service",
       "streamOf": "llm-worker",
       "position": {
-        "x": 757,
-        "y": 740
+        "x": 458,
+        "y": 324
       },
       "metrics": [
         {
@@ -386,6 +386,52 @@
           }
         ]
       }
+    },
+    {
+      "id": "usr-msg-strm-srvc",
+      "label": "usr-msg-strm-srvc",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 1163,
+        "y": 205
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"usr-msg-strm-srvc\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"usr-msg-strm-srvc\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"usr-msg-strm-srvc\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"usr-msg-strm-srvc\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"usr-msg-strm-srvc\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"usr-msg-strm-srvc\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
     }
   ],
   "edges": [
@@ -404,9 +450,9 @@
     }
   ],
   "boundary": {
-    "x": 54,
-    "y": 106,
-    "w": 1362,
-    "h": 654
+    "x": -26,
+    "y": 103,
+    "w": 1499,
+    "h": 649
   }
 }
