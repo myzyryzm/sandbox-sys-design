@@ -56,6 +56,34 @@ the stack only with `docker compose -f systems/<id>/docker-compose.yml ...`.
 `worker.json` / `hooks.py` are **single-file bind mounts — always edit them in place**
 (tmp+rename swaps the inode and detaches the mount on macOS Docker Desktop).
 
+## Scaling: worker replicas (no load balancer)
+
+A worker can run as **N instances under one service id**, with **no load balancer** — the
+consumer that calls it does its own request forwarding across the group (see the
+[[sandbox-grpc-attach]] entry+`instanceOf` expansion). Set the count in the worker's
+Edit ▸ **Replicas** section (1 = a single worker); it POSTs
+`/api/custom/llm-worker/scale {system, node, instances}` — mechanical, no launched session.
+
+- The base `<w>` node **stays a real serving worker**; instances `<w>-2..N` are added as
+  `type:"service"`, `service_type:"llm_worker"`, `instanceOf:"<w>"` nodes, and the base
+  gains `replicas:{ instances:[…] }`. The diagram stacks them in a dotted box behind `<w>`.
+- All instances **`build: ./<w>`** (one image) and bind-mount the **base's** `worker.json`,
+  `hooks.py`, `grpc/`, `manifest.json` — so **config, hook and code are shared** across the
+  group. They also share the one **`<w>-stream`** redis (`REDIS_HOST=<w>-stream`; tokens are
+  keyed by `user_message_id`, not by worker). Each instance has its own `SERVICE_ID=<w>-i`,
+  Prometheus scrape job, and gRPC endpoint `<w>-i:50051`, but **no nginx route** (gRPC-only;
+  `/<w>/…` and `/llm/state` stay owned by the base — only the base is polled for live state).
+
+When you work on a **replicated** worker:
+- `worker.json` is live (mtime-poll, no restart) and updates the whole group in one write.
+- `hooks.py` needs a **group restart** (all instances mount the base's copy):
+  `docker compose -f systems/<id>/docker-compose.yml restart <w> <w>-2 … <w>-N`.
+- An `app.py` / `requirements.txt` change rebuilds the group automatically
+  (`resolveBuildTargets` returns the base + every instance for the per-service rebuild).
+- The prefix cache is **per-container** (in-memory KV, keyed by chat), so a chat's follow-up
+  only `cache_hit`s if the consumer routes it back to the same instance; otherwise it's a
+  cache miss that prefills from the `chat_db` history (still correct, just no cache benefit).
+
 ## The hook contract
 
 ```python
@@ -84,6 +112,9 @@ def on_cache_evict(entry): ...
    ```
    docker compose -f systems/<id>/docker-compose.yml restart <w>
    ```
+   If the worker is **scaled to replicas** (`<w>` has a `replicas.instances` list), every
+   instance mounts the base's `hooks.py`, so restart the whole group instead:
+   `… restart <w> <w>-2 … <w>-N`.
    (Only if you genuinely need a new pip package: add it to `<w>/requirements.txt` and
    `up -d --build <w>` instead — but prefer the preinstalled clients above.)
 4. Verify (below), then set `"implemented": true` in `systems/<id>/<w>/hook.json`

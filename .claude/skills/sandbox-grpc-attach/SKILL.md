@@ -102,6 +102,38 @@ async def lifespan(app):
 - **Do not implement** the chunk-transfer/distribution behavior (timing, bitmaps, backpressure)
   unless explicitly asked — wiring + a minimal correct method body is the scope.
 
+### Client-side balancing across a replica group (no load balancer)
+
+Some services scale to **N instances that share one service id with no load balancer** — notably
+an LLM worker replica group ([[sandbox-llm-worker]]): a base `<w>` plus instances `<w>-2..N`, each
+`type:"service"` carrying `instanceOf:"<w>"`, all serving the same contract at `:50051`. There is
+no proxy, so **the client does the request forwarding itself**.
+
+Point the client's `targets` at **just the group entry** — `targets:["<w>"]` — and **expand** it to
+the whole group at runtime from the mounted manifest:
+
+```python
+def _worker_targets(contract="Worker"):
+    m = json.load(open("/manifest.json"))
+    node = next(n for n in m["nodes"] if n["id"] == os.environ["SERVICE_ID"])
+    ids = []
+    for c in node.get("grpc", {}).get("clients", []):
+        if c["contract"] != contract:
+            continue
+        for entry in c["targets"]:                       # e.g. ["<w>"]
+            ids.append(entry)                            # the base IS a real worker
+            ids += [n["id"] for n in m["nodes"] if n.get("instanceOf") == entry]
+    return ids                                           # -> ["<w>", "<w>-2", ...]
+# build one stub per id at ":50051"; pick per request in app code — round-robin, a
+# GetStatus-gated "first with capacity", or hash-by-key for cache affinity.
+```
+
+- Targeting the entry (not each instance) keeps the diagram to **one** gRPC edge into the group's
+  box, and means **scaling needs no re-attach** — the mounted `/manifest.json` reflects new
+  instances after a `restart <service>` (targets are read at startup).
+- The framework has **no built-in selection policy**: which stub to call per request is application
+  code. Every instance serves the same contract + behavior, so any instance is a correct target.
+
 ## Rebuild + verify
 
 ```

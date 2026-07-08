@@ -239,17 +239,102 @@ export function addManifestNode(system, manifest, node) {
   return node
 }
 
+// ---------------------------------------------------------------------------
+// compose / prometheus DOCUMENT splices (comment-preserving)
+//
+// Lower-level than addComposeService/addScrapeJob: these operate on a parsed `yaml`
+// Document so a caller making SEVERAL edits at once (add N instances, drop one, repoint
+// a target) parses + writes the file a single time. addComposeService/addScrapeJob stay
+// the single-edit convenience wrappers. Shared by serviceLb.js (haproxy clusters) and
+// customTypes/llmWorker.js (worker replica groups) — don't fork these; compose them.
+// ---------------------------------------------------------------------------
+
+export const composePath = (system) => path.join(systemDir(system), 'docker-compose.yml')
+export const prometheusPath = (system) => path.join(systemDir(system), 'prometheus', 'prometheus.yml')
+
+export function loadCompose(system) {
+  return parseDocument(fs.readFileSync(composePath(system), 'utf8'))
+}
+export function saveCompose(system, doc) {
+  fs.writeFileSync(composePath(system), doc.toString())
+}
+
+// The plain-JS form of an existing compose service (so a caller can clone its
+// build/env/volumes onto sibling services), or null if it isn't defined.
+export function composeServiceDef(doc, name) {
+  const node = doc.getIn(['services', name])
+  return node ? node.toJSON() : null
+}
+
+export function setComposeService(doc, name, def, comment) {
+  const node = doc.createNode(def)
+  if (comment) node.commentBefore = comment
+  doc.setIn(['services', name], node)
+}
+
+export function removeComposeService(doc, name) {
+  if (doc.hasIn(['services', name])) doc.deleteIn(['services', name])
+  // Scrub dangling depends_on references to the removed service (list or map form).
+  const services = doc.get('services')
+  for (const pair of services?.items || []) {
+    const dep = pair.value?.get?.('depends_on')
+    if (!dep?.items) continue
+    for (let i = dep.items.length - 1; i >= 0; i--) {
+      const it = dep.items[i]
+      const n = it?.key !== undefined ? String(it.key.value ?? it.key) : String(it.value ?? it)
+      if (n === name) dep.items.splice(i, 1)
+    }
+    if (dep.items.length === 0) pair.value.delete('depends_on')
+  }
+}
+
+export function loadPrometheus(system) {
+  return parseDocument(fs.readFileSync(prometheusPath(system), 'utf8'))
+}
+export function savePrometheus(system, doc) {
+  fs.writeFileSync(prometheusPath(system), doc.toString())
+}
+export function findScrapeJob(doc, jobName) {
+  const sc = doc.get('scrape_configs')
+  return sc?.items?.findIndex((it) => String(it.get('job_name')) === jobName) ?? -1
+}
+export function removeScrapeJobDoc(doc, jobName) {
+  const sc = doc.get('scrape_configs')
+  const i = findScrapeJob(doc, jobName)
+  if (i >= 0) sc.delete(i)
+}
+export function addScrapeJobDoc(doc, jobName, target, comment) {
+  const node = doc.createNode({ job_name: jobName, static_configs: [{ targets: [target] }] })
+  if (comment) node.commentBefore = comment
+  doc.addIn(['scrape_configs'], node)
+}
+// Repoint an existing job's single target (e.g. move `<name>` between its FastAPI port
+// and an exporter port).
+export function setScrapeJobTarget(doc, jobName, target) {
+  const i = findScrapeJob(doc, jobName)
+  if (i < 0) return
+  doc.setIn(['scrape_configs', i, 'static_configs', 0, 'targets', 0], target)
+}
+
 // A load-balanced service's code lives in its instances (<name>-1..N), not in <name>
 // itself — which is now an haproxy sidecar with no build context. So `rebuild(system,
 // '<name>')` (called by every per-service flow: endpoint, grpc, …) must build the
 // INSTANCES and recreate the sidecar, not try to `docker compose build <name>` (which
 // would fail on the image-only haproxy service). A plain service resolves to itself.
+//
+// A worker replica group (customTypes/llmWorker.js — N instances sharing one id with NO
+// load balancer) is the mirror image: `<name>` IS a real serving container, and its
+// instances `<name>-2..N` all `build: ./<name>`, so a per-service edit must rebuild the
+// base AND every instance (no sidecar to recreate).
 function resolveBuildTargets(system, name) {
   try {
     const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
     const node = manifest.nodes.find((n) => n.id === name)
     if (node?.svcLb?.instances?.length) {
       return { buildNames: [...node.svcLb.instances], recreate: [name] }
+    }
+    if (node?.replicas?.instances?.length) {
+      return { buildNames: [name, ...node.replicas.instances], recreate: [] }
     }
   } catch {
     /* fall back to the plain single-service path */

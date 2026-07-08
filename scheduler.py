@@ -1,25 +1,24 @@
-workers = []  # llm workers
-conversation_worker_dict = dict() # map of conversation id to worker
+workers = []
+chat_worker_dict = dict() # map of chat id to worker
 q = Kafka()
-def find_available_worker():
-    # admission control: is there a worker with KV-cache room?
-    for worker in workers:
-        if worker.get_status() is True: # worker available
+def find_available_worker(user_message):
+    if user_message.chat in chat_worker_dict:
+        worker = chat_worker_dict[user_message.chat]
+        if worker.get_status() is True:
             return worker
-    return None   # all full -> backpressure
+    else:
+        for worker in workers:
+            if worker.get_status() is True:
+                return worker
+    return None 
 
 def scheduler():
-    while True:
-        # drain as much as we can this tick
-        while True:
-            if q.is_empty():
-                break                      # nothing waiting
+    user_message = q[0]
+    
+    worker = find_available_worker(user_message)
+    if worker is None:
+        break                      # all workers full -> leave prompts in queue
+    worker.add_prompt(user_message)      # local call now, RPC later
+    q.commit()
 
-            worker = find_available_worker()
-            if worker is None:
-                break                      # all workers full -> leave prompts in queue
-
-            prompt = q.read()              # only read once we KNOW we can place it
-            worker.add_prompt(prompt)      # local call now, RPC later
-
-        await asyncio.sleep(0.01)          # yield, then check again
+# this is going to read from the user-messages-stream 

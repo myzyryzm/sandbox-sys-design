@@ -17,14 +17,19 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import {
-  bad, serviceMetrics, serviceHealth, cloneTemplate, addComposeService,
+  bad, HttpError, serviceMetrics, serviceHealth, cloneTemplate, addComposeService,
   addNginxRoute, addScrapeJob, addManifestNode, rebuild, NAME_RE,
+  loadCompose, saveCompose, composeServiceDef, setComposeService, removeComposeService,
+  loadPrometheus, savePrometheus, addScrapeJobDoc, removeScrapeJobDoc,
 } from '../scaffold.js'
 import { addComposeServices, addScrapeJob as addDbScrapeJob, HEALTH_RULES } from '../databases.js'
 import { installContracts } from '../grpcInstall.js'
-import { isValidSystem, systemDir, nextNodePosition } from '../systems.js'
+import { isValidSystem, systemDir, nextNodePosition, repoRoot, systemsDir } from '../systems.js'
 
+const pexec = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const TPL = path.join(__dirname, '..', 'templates', 'llm-worker')
 const WORKER_DIR = path.join(TPL, 'worker')
@@ -34,11 +39,15 @@ const SERVICE_FILES = ['app.py', 'model.py', 'hooks.py', 'requirements.txt', 'Do
 const CONFIG_DEFAULTS = { ttl_seconds: 30, chat_db: null, max_active: 5 }
 const TTL_MAX = 60
 const MAX_ACTIVE_MAX = 32
+const MAX_WORKERS = 8 // total workers in a group (base + instances)
+const INSTANCE_PORT = 8000 // instances serve FastAPI / are scraped here (gRPC is 50051)
 const LB = 'http://localhost:8080' // the system's load balancer (compose maps 8080:80)
 const SKIP_REBUILD = () => process.env.CREATE_SVC_SKIP_REBUILD === '1'
 
 const read = (dir, f) => fs.readFileSync(path.join(dir, f), 'utf8')
 const readManifest = (system) => JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
+const writeManifest = (system, manifest) =>
+  fs.writeFileSync(path.join(systemDir(system), 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
 const readJsonFile = (file, fallback) => {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -232,7 +241,10 @@ async function handleState(req, res, _next, ctx) {
     const system = url.searchParams.get('system')
     if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
     const manifest = readManifest(system)
-    const workers = manifest.nodes.filter((n) => n.service_type === 'llm_worker')
+    // Only base workers are polled: instances (instanceOf) have no nginx route, so their
+    // /llm/state isn't reachable through the lb. Their metric cards still come from the
+    // direct Prometheus scrape.
+    const workers = manifest.nodes.filter((n) => n.service_type === 'llm_worker' && !n.instanceOf)
     const nodes = {}
     await Promise.all(
       workers.map(async (w) => {
@@ -339,6 +351,162 @@ async function handleHook(req, res, _next, ctx) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Replica scaling — run the worker as N instances under one service id, with NO
+// load balancer. The base `<name>` stays a real serving worker; instances
+// `<name>-2..N` clone its build/config/hook/redis-stream (differing only by
+// SERVICE_ID) and are reached ONLY over gRPC at `<name>-i:50051` (no nginx route).
+// The consumer enumerates the group and does its own request forwarding — see the
+// entry+instanceOf expansion in the sandbox-grpc-attach skill. Mechanical (no launched
+// session), mirroring serviceLb.js minus the haproxy sidecar.
+// ---------------------------------------------------------------------------
+
+const instanceOrdinal = (id, base) => {
+  const m = new RegExp(`^${base}-(\\d+)$`).exec(id)
+  return m ? Number(m[1]) : 0
+}
+const instanceId = (base, ord) => `${base}-${ord}`
+function instanceNodes(manifest, base) {
+  return manifest.nodes
+    .filter((n) => n.instanceOf === base)
+    .sort((a, b) => instanceOrdinal(a.id, base) - instanceOrdinal(b.id, base))
+}
+
+// A worker instance node: a service card carrying only the grouping back-link. It shares
+// the base's build/config/hook/redis-stream, keeps service_type so its diagram body +
+// metric cards match the base's, and declares the Worker server it runs. It owns no
+// endpoints (the diagram suppresses those for instanceOf nodes) and is reached only by gRPC.
+function workerInstanceNode(base, id, entryNode) {
+  return {
+    id,
+    label: id,
+    type: 'service',
+    origin: 'create-custom-service',
+    service_type: 'llm_worker',
+    instanceOf: base,
+    position: { x: (entryNode.position?.x ?? 80) + 260, y: entryNode.position?.y ?? 80 },
+    metrics: workerMetrics(id),
+    health: serviceHealth(id),
+    grpc: { servers: ['Worker'], clients: [], overrides: [] },
+  }
+}
+
+// Reject a derived instance id that collides with an existing node or folder.
+function assertFreeInstanceId(system, manifest, id) {
+  if (manifest.nodes.some((n) => n.id === id)) throw bad(`a node named "${id}" already exists in this system`)
+  if (fs.existsSync(path.join(systemDir(system), id))) throw bad(`systems/${system}/${id}/ already exists`)
+}
+
+// Resolve + validate the group ENTRY worker (a base llm_worker, never itself an instance).
+function entryWorker(system, nodeId) {
+  const { manifest, node } = workerNode(system, nodeId)
+  if (node.instanceOf) {
+    throw bad(`"${nodeId}" is a worker instance — scale the group from its base worker "${node.instanceOf}"`)
+  }
+  return { manifest, node }
+}
+
+// Frontend-safe rebuild for the worker group: build the new instance images, bring the
+// stack up (creating them, or removing orphaned instance containers on scale-down), and
+// restart prometheus so appended/removed scrape jobs are picked up. No nginx (instances
+// have no route) and no sidecar (there is no load balancer). NEVER ./start.sh.
+async function scaleRebuild(system, { buildNames = [], removeOrphans = false }) {
+  if (SKIP_REBUILD()) return '(rebuild skipped)'
+  const compose = path.join(systemsDir, system, 'docker-compose.yml')
+  const opts = { cwd: repoRoot, timeout: 600_000, maxBuffer: 16 * 1024 * 1024 }
+  const run = async (args) => {
+    const r = await pexec('docker', ['compose', '-f', compose, ...args], opts)
+    return r.stdout + r.stderr
+  }
+  let log = ''
+  try {
+    if (buildNames.length) log += await run(['build', ...buildNames])
+    const upArgs = ['up', '-d']
+    if (removeOrphans) upArgs.push('--remove-orphans')
+    log += await run(upArgs)
+    log += await run(['restart', 'prometheus'])
+  } catch (err) {
+    const detail = `${err.stdout || ''}${err.stderr || ''}` || err.message
+    throw new HttpError(500, `docker compose failed:\n${detail}`)
+  }
+  return log
+}
+
+// The idempotent "set desired worker count" op (total = base + instances). instances==1
+// removes every replica; N>=2 adds/drops the highest-ordinal instances to reach N.
+export async function setReplicas(body) {
+  const { system } = body
+  const { manifest, node } = entryWorker(system, body.node)
+
+  const target = Number(body.instances)
+  if (!Number.isInteger(target) || target < 1 || target > MAX_WORKERS) {
+    throw bad(`instances must be a whole number between 1 and ${MAX_WORKERS}`)
+  }
+
+  const current = instanceNodes(manifest, node.id)
+  const currentTotal = 1 + current.length
+  if (target === currentTotal) return { ok: true, node, log: '(no change)' }
+
+  const doc = loadCompose(system)
+  const prom = loadPrometheus(system)
+  let plan
+
+  if (target > currentTotal) {
+    // scale up: base is ordinal 1, so added instances start at 2. Clone the base compose
+    // def and override only SERVICE_ID (build/config/hook/redis-stream all shared).
+    const app = composeServiceDef(doc, node.id) || { build: `./${node.id}` }
+    const maxOrd = current.reduce((m, n) => Math.max(m, instanceOrdinal(n.id, node.id)), 1)
+    const newIds = []
+    for (let o = maxOrd + 1; currentTotal + newIds.length < target; o++) {
+      const id = instanceId(node.id, o)
+      assertFreeInstanceId(system, manifest, id)
+      setComposeService(
+        doc,
+        id,
+        { ...app, build: `./${node.id}`, environment: { ...(app.environment || {}), SERVICE_ID: id } },
+        ` Instance of LLM worker "${node.id}" — no load balancer, dialed directly over gRPC`,
+      )
+      addScrapeJobDoc(prom, id, `${id}:${INSTANCE_PORT}`, ` Instance of LLM worker "${node.id}"`)
+      manifest.nodes.push(workerInstanceNode(node.id, id, node))
+      newIds.push(id)
+    }
+    node.replicas = { instances: [...current.map((n) => n.id), ...newIds] }
+    plan = { buildNames: newIds, removeOrphans: false }
+  } else {
+    // scale down: drop the highest ordinals until base + kept === target
+    const keep = target - 1
+    const drop = current.slice(keep)
+    for (const n of drop) {
+      removeComposeService(doc, n.id)
+      removeScrapeJobDoc(prom, n.id)
+    }
+    const dropIds = new Set(drop.map((n) => n.id))
+    manifest.nodes = manifest.nodes.filter((n) => !dropIds.has(n.id))
+    manifest.edges = (manifest.edges || []).filter((e) => !dropIds.has(e.from) && !dropIds.has(e.to))
+    const remaining = current.slice(0, keep).map((n) => n.id)
+    if (remaining.length) node.replicas = { instances: remaining }
+    else delete node.replicas
+    plan = { buildNames: [], removeOrphans: true }
+  }
+
+  saveCompose(system, doc)
+  savePrometheus(system, prom)
+  writeManifest(system, manifest)
+
+  const log = await scaleRebuild(system, plan)
+  return { ok: true, node: readManifest(system).nodes.find((n) => n.id === node.id), log }
+}
+
+async function handleScale(req, res, _next, ctx) {
+  try {
+    if (req.method !== 'POST') return ctx.json(res, 405, { ok: false, error: 'POST only' })
+    const body = await ctx.readJsonBody(req)
+    ctx.json(res, 200, await setReplicas(body))
+  } catch (err) {
+    fail(ctx, res, err)
+  }
+}
+
 export default {
   serviceType: 'llm_worker',
   displayName: 'LLM Worker',
@@ -349,5 +517,6 @@ export default {
     { path: '/api/custom/llm-worker/state', handler: handleState },
     { path: '/api/custom/llm-worker/config', handler: handleConfig },
     { path: '/api/custom/llm-worker/hook', handler: handleHook },
+    { path: '/api/custom/llm-worker/scale', handler: handleScale },
   ],
 }

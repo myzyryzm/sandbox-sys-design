@@ -65,7 +65,10 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     tabs.push({ id: 'calls', label: 'Calls' })
     // Rendered via the generic Component-tab path (no `switch` case). Lets a plain
     // service enable load balancing, or a cluster entry scale / re-balance / disable.
-    tabs.push({ id: 'lb', label: 'Load Balancing', Component: ServiceLbTab })
+    // A custom-typed service (service_type, e.g. an LLM worker) is skipped: the haproxy
+    // sidecar is HTTP-only and its backend rejects custom services — such a service
+    // scales through its OWN tab (client-side, no load balancer) instead.
+    if (!node.service_type) tabs.push({ id: 'lb', label: 'Load Balancing', Component: ServiceLbTab })
   } else if (isExternal) {
     // External services expose an HTTP API (the third party's endpoints) but never gRPC
     // contracts. The Functions "trigger bank" is client-only, so they have no Functions tab —
