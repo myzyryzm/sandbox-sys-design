@@ -66,13 +66,16 @@ Edit ▸ **Replicas** section (1 = a single worker); it POSTs
 
 - The base `<w>` node **stays a real serving worker**; instances `<w>-2..N` are added as
   `type:"service"`, `service_type:"llm_worker"`, `instanceOf:"<w>"` nodes, and the base
-  gains `replicas:{ instances:[…] }`. The diagram stacks them in a dotted box behind `<w>`.
+  gains `replicas:{ instances:[…] }`. The diagram renders the group as a compact `<w>`
+  header card with all workers (`<w>-1` = the base container, `<w>-2..N`) stacked below it
+  in one dotted box.
 - All instances **`build: ./<w>`** (one image) and bind-mount the **base's** `worker.json`,
   `hooks.py`, `grpc/`, `manifest.json` — so **config, hook and code are shared** across the
   group. They also share the one **`<w>-stream`** redis (`REDIS_HOST=<w>-stream`; tokens are
   keyed by `user_message_id`, not by worker). Each instance has its own `SERVICE_ID=<w>-i`,
-  Prometheus scrape job, and gRPC endpoint `<w>-i:50051`, but **no nginx route** (gRPC-only;
-  `/<w>/…` and `/llm/state` stay owned by the base — only the base is polled for live state).
+  Prometheus scrape job, and gRPC endpoint `<w>-i:50051`. Request traffic is **gRPC-only**
+  (endpoints stay owned by the base); each instance also has a plain nginx `/<w>-i/` route,
+  but that exists purely so the control plane can poll its `/llm/state` for the diagram.
 
 When you work on a **replicated** worker:
 - `worker.json` is live (mtime-poll, no restart) and updates the whole group in one write.

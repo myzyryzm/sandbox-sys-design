@@ -131,6 +131,30 @@ export function addNginxRoute(system, name, port = 8000) {
   fs.writeFileSync(file, conf)
 }
 
+// Strip a `/<name>/` route (upstream + location) back out of nginx.conf.
+export function removeNginxRoute(system, id) {
+  const file = path.join(systemDir(system), 'nginx', 'nginx.conf')
+  let conf = fs.readFileSync(file, 'utf8')
+  conf = conf.replace(new RegExp(` *upstream ${id} \\{[^}]*\\}\\n`), '')
+  conf = conf.replace(new RegExp(` *location /${id}/ \\{[\\s\\S]*?\\n *\\}\\n`), '')
+  fs.writeFileSync(file, conf)
+}
+
+// Whether nginx.conf already routes `/<name>/` (addNginxRoute is a blind splice —
+// calling it twice would duplicate the upstream and break the config).
+export function hasNginxRoute(system, name) {
+  const file = path.join(systemDir(system), 'nginx', 'nginx.conf')
+  return fs.readFileSync(file, 'utf8').includes(`upstream ${name} {`)
+}
+
+// Idempotent addNginxRoute: returns true only when the route was actually added
+// (so callers know a reload is needed).
+export function ensureNginxRoute(system, name, port = 8000) {
+  if (hasNginxRoute(system, name)) return false
+  addNginxRoute(system, name, port)
+  return true
+}
+
 // Internal-route blocking: deny EXTERNAL calls (those arrive through the lb) to endpoints
 // the user marked internal, while leaving service-to-service calls untouched — those talk
 // container-to-container (http://<service>:8000) and never traverse the lb. It's an nginx
@@ -375,11 +399,36 @@ function resolveBuildTargets(system, name) {
   return { buildNames: [name], recreate: [] }
 }
 
+// Per-system serialization for docker-compose invocations. Node already runs each handler's
+// compose/manifest/registry FILE edits synchronously (no `await` between load and save), so
+// those can't interleave; what CAN overlap is the `docker compose build/up/...` SHELL commands
+// of two concurrent mutations (e.g. scaling a worker while creating an etcd keyspace) hitting
+// the same project. This mutex chains those invocations per system so at most one runs at a
+// time. It guards ONLY the docker calls — file edits stay lock-free. Wraps the three rebuild
+// paths: `rebuild` (below), serviceLb.js `dockerRebuild`, customTypes/llmWorker.js `scaleRebuild`.
+// (Bounded, one Map entry per system id; not cleaned up, which is fine for the few systems a
+// dev server ever touches.) Callers must NOT nest lock-wrapped rebuilds for the same system.
+const _systemLocks = new Map()
+
+export function withSystemLock(system, fn) {
+  const prev = _systemLocks.get(system) || Promise.resolve()
+  const run = () => fn()
+  const next = prev.then(run, run)
+  // Tail the chain on a rejection-swallowed copy so the next caller waits for this one to
+  // settle (success OR failure) without a failed rebuild leaving an unhandled rejection.
+  _systemLocks.set(system, next.then(() => {}, () => {}))
+  return next
+}
+
 // Frontend-safe rebuild: build just <name> (or, for a load-balanced service, its
 // instances), bring the stack up (creating the new container, leaving the rest
 // running), recreate the lb so it picks up the new /<name>/ route, and restart
 // prometheus so the appended scrape job is picked up. NEVER ./start.sh.
 export async function rebuild(system, name) {
+  return withSystemLock(system, () => _rebuildImpl(system, name))
+}
+
+async function _rebuildImpl(system, name) {
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
   const opts = { cwd: repoRoot, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 }
   const { buildNames, recreate } = resolveBuildTargets(system, name)

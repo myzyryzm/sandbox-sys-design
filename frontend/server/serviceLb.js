@@ -31,7 +31,7 @@ import {
   HttpError, bad, NAME_RE, readJsonBody, serviceMetrics, serviceHealth,
   composePath, loadCompose, saveCompose, composeServiceDef, setComposeService,
   removeComposeService, loadPrometheus, savePrometheus, addScrapeJobDoc,
-  removeScrapeJobDoc, setScrapeJobTarget, withEtcdWorkerId,
+  removeScrapeJobDoc, setScrapeJobTarget, withEtcdWorkerId, withSystemLock,
 } from './scaffold.js'
 
 const pexec = promisify(execFile)
@@ -176,7 +176,11 @@ function sidecarDef(service, instances) {
 // Rebuild (frontend-safe — NEVER ./start.sh)
 // ---------------------------------------------------------------------------
 
-async function dockerRebuild(system, { buildNames = [], recreate = [], removeOrphans = false }) {
+async function dockerRebuild(system, opts) {
+  return withSystemLock(system, () => _dockerRebuildImpl(system, opts))
+}
+
+async function _dockerRebuildImpl(system, { buildNames = [], recreate = [], removeOrphans = false }) {
   if (process.env.SERVICE_LB_SKIP_REBUILD === '1') return '(rebuild skipped)'
   const compose = composePath(system)
   // 600s: the first instance build pulls python:3.12-slim + pip installs.

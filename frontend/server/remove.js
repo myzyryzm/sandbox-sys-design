@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { parseDocument } from 'yaml'
 import { repoRoot, systemsDir, systemDir, isValidSystem } from './systems.js'
+import { removeNginxRoute } from './scaffold.js'
 import { removeWsClientScript } from './websockets.js'
 import { removeClientScript } from './clientScript.js'
 
@@ -142,14 +143,6 @@ function removeComposeServices(system, names) {
   }
 
   fs.writeFileSync(file, doc.toString())
-}
-
-function removeNginxRoute(system, id) {
-  const file = path.join(systemDir(system), 'nginx', 'nginx.conf')
-  let conf = fs.readFileSync(file, 'utf8')
-  conf = conf.replace(new RegExp(` *upstream ${id} \\{[^}]*\\}\\n`), '')
-  conf = conf.replace(new RegExp(` *location /${id}/ \\{[\\s\\S]*?\\n *\\}\\n`), '')
-  fs.writeFileSync(file, conf)
 }
 
 function removeScrapeJob(system, id) {

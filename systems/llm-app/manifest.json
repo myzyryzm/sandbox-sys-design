@@ -320,6 +320,11 @@
           "label": "batch",
           "query": "sum(llm_active_sequences{job=\"llm-worker\"}) or vector(0)",
           "unit": ""
+        },
+        {
+          "label": "cached",
+          "query": "sum(llm_cached_prefixes{job=\"llm-worker\"}) or vector(0)",
+          "unit": ""
         }
       ],
       "health": {
@@ -445,8 +450,8 @@
       "type": "etcd",
       "origin": "create-etcd",
       "position": {
-        "x": 677,
-        "y": 500
+        "x": 950,
+        "y": 560
       },
       "etcd": {
         "size": 3,
@@ -552,6 +557,11 @@
           "label": "batch",
           "query": "sum(llm_active_sequences{job=\"llm-worker-2\"}) or vector(0)",
           "unit": ""
+        },
+        {
+          "label": "cached",
+          "query": "sum(llm_cached_prefixes{job=\"llm-worker-2\"}) or vector(0)",
+          "unit": ""
         }
       ],
       "health": {
@@ -616,6 +626,11 @@
         {
           "label": "batch",
           "query": "sum(llm_active_sequences{job=\"llm-worker-3\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "cached",
+          "query": "sum(llm_cached_prefixes{job=\"llm-worker-3\"}) or vector(0)",
           "unit": ""
         }
       ],

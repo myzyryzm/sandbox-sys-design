@@ -199,6 +199,20 @@ function hasEditButton(node) {
   return isDeletable(node) && !isWsServer(node) && !isSvcInstance(node)
 }
 
+// The BASE node of an LLM worker group. It renders as a compact cluster-header card
+// (name + Edit, lb-style chrome); its container's live data is shown on a render-only
+// virtual `<name>-1` card stacked below it, alongside the real `<name>-2..N` instances.
+function isLlmBase(node) {
+  return node.service_type === 'llm_worker' && node.type === 'service' && !node.instanceOf
+}
+
+// Where a node's live data (nodeData / customState / outages) lives: a virtual llm
+// worker card reads the base container's id via stateKey; every real node reads its own.
+const dataKeyOf = (node) => node.stateKey || node.id
+
+// Height of the compact llm cluster-header card: header strip + Edit band.
+const LLM_HDR_H = HEADER_H + EDIT_GAP + EDIT_H + PAD
+
 // y where the metric/endpoint rows end.
 function metricsBottom(node, bodyRows) {
   return HEADER_H + PAD + rowCount(node, bodyRows) * LINE_H
@@ -405,6 +419,22 @@ export default function SystemDiagram({
   const nodes = manifest.nodes
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
 
+  // Render-only ordinal-1 cards for LLM worker groups: the base node draws as the compact
+  // cluster header, and this virtual card shows the base CONTAINER's data (stateKey) as
+  // `<name>-1` in the worker column. `::` is outside NAME_RE, so the synthetic id can
+  // never collide with a real node. instanceOf gives it the instance behaviors for free
+  // (no Edit button, no method rows, group drag via the base). NOT added to byId — edges,
+  // traces and drag-entry lookups must only ever see manifest nodes.
+  const llmVirtuals = nodes.filter(isLlmBase).map((b) => ({
+    ...b,
+    id: `${b.id}::1`,
+    label: `${b.id}-1`,
+    instanceOf: b.id,
+    stateKey: b.id,
+    llmVirtual: true,
+  }))
+  const renderNodes = [...nodes, ...llmVirtuals]
+
   // Effective on-screen position of a node: a live drag override wins over the manifest.
   const posOf = (n) => drag[n.id] || n.position
 
@@ -527,8 +557,11 @@ export default function SystemDiagram({
   const customEdges = customModules.flatMap((m) => m.diagramEdges?.({ manifest, customState }) || [])
 
   // Layout helpers that fold in a node's live custom-type runtime (so a custom body band
-  // reserves the right vertical space and edges hit the recomputed center).
-  const heightOf = (n) => nodeHeight(n, bodyRowsOf(n), customState[n.id], rowsOf(n))
+  // reserves the right vertical space and edges hit the recomputed center). An llm base
+  // renders as the fixed-height cluster header; a virtual `<name>-1` card reads the base
+  // container's runtime via dataKeyOf so its live-body band is reserved too.
+  const heightOf = (n) =>
+    isLlmBase(n) ? LLM_HDR_H : nodeHeight(n, bodyRowsOf(n), customState[dataKeyOf(n)], rowsOf(n))
 
   // Websocket relay servers render as ONE combined body: a rigid vertical stack (one shared
   // column x, cascaded top-to-bottom by height + STACK_GAP) instead of each server floating at
@@ -565,7 +598,7 @@ export default function SystemDiagram({
   const SVC_STACK_GAP_X = 28 // horizontal gap between the entry sidecar and its instance column — kept tight so the instances read as sitting right next to their load balancer
   for (const [entryId, instances] of svcInstancesByEntry) {
     const entry = byId[entryId]
-    if (!entry) continue
+    if (!entry || isLlmBase(entry)) continue // llm groups stack BELOW their header instead
     instances.sort((a, b) => svcOrdinal(a.id) - svcOrdinal(b.id))
     const ep = posOf(entry)
     const anchorX = ep.x + NODE_W + SVC_STACK_GAP_X
@@ -579,7 +612,28 @@ export default function SystemDiagram({
     }
   }
 
-  const effPos = (n) => stackPosByServerId.get(n.id) || svcStackPos.get(n.id) || posOf(n)
+  // LLM worker groups: the compact header card sits at the base's position and ONE column
+  // of worker cards hangs below it — the virtual `<name>-1` first (explicitly; its `::1`
+  // id doesn't parse as an ordinal), then the real instances in ordinal order.
+  const llmStackPos = new Map()
+  const llmMembersByBase = new Map() // base id -> [virtual, ...instances] in render order
+  for (const b of nodes.filter(isLlmBase)) {
+    const virtual = llmVirtuals.find((v) => v.stateKey === b.id)
+    const instances = (svcInstancesByEntry.get(b.id) || [])
+      .slice()
+      .sort((a, x) => svcOrdinal(a.id) - svcOrdinal(x.id))
+    const members = [virtual, ...instances]
+    llmMembersByBase.set(b.id, members)
+    const bp = posOf(b)
+    let y = bp.y + LLM_HDR_H + STACK_GAP
+    for (const m of members) {
+      llmStackPos.set(m.id, { x: bp.x, y })
+      y += heightOf(m) + STACK_GAP
+    }
+  }
+
+  const effPos = (n) =>
+    stackPosByServerId.get(n.id) || llmStackPos.get(n.id) || svcStackPos.get(n.id) || posOf(n)
   // Drag payload for a whole tier: captures every server's CURRENT stacked position so a group
   // drag shifts them all by the same delta (the stack then re-derives identically, shifted).
   const fleetDragArg = (tier) => ({
@@ -744,25 +798,33 @@ export default function SystemDiagram({
 
   // Dotted box around each per-service load-balancer group: its entry sidecar + every
   // instance. Uses effPos (the derived stacked positions), and labels the box with the
-  // service name — the group's "full service" outline.
+  // service name — the group's "full service" outline. LLM groups are boxed separately
+  // below (header + worker column, drawn even for a single-worker group).
+  const groupBox = (entryId, members) => {
+    const minX = Math.min(...members.map((m) => effPos(m).x))
+    const minY = Math.min(...members.map((m) => effPos(m).y))
+    const maxX = Math.max(...members.map((m) => effPos(m).x + NODE_W))
+    const maxY = Math.max(...members.map((m) => effPos(m).y + heightOf(m)))
+    return {
+      entryId,
+      label: entryId,
+      x: minX - CLUSTER_PAD,
+      y: minY - CLUSTER_PAD - 16, // extra top band for the label
+      w: maxX - minX + 2 * CLUSTER_PAD,
+      h: maxY - minY + 2 * CLUSTER_PAD + 16,
+    }
+  }
   const svcLbBoxes = [...svcInstancesByEntry.entries()]
     .map(([entryId, instances]) => {
+      if (isLlmBase(byId[entryId] || {})) return null
       const members = [byId[entryId], ...instances].filter(Boolean)
       if (members.length < 2) return null
-      const minX = Math.min(...members.map((m) => effPos(m).x))
-      const minY = Math.min(...members.map((m) => effPos(m).y))
-      const maxX = Math.max(...members.map((m) => effPos(m).x + NODE_W))
-      const maxY = Math.max(...members.map((m) => effPos(m).y + heightOf(m)))
-      return {
-        entryId,
-        label: entryId,
-        x: minX - CLUSTER_PAD,
-        y: minY - CLUSTER_PAD - 16, // extra top band for the label
-        w: maxX - minX + 2 * CLUSTER_PAD,
-        h: maxY - minY + 2 * CLUSTER_PAD + 16,
-      }
+      return groupBox(entryId, members)
     })
     .filter(Boolean)
+  const llmBoxes = [...llmMembersByBase.entries()].map(([baseId, members]) =>
+    groupBox(baseId, [byId[baseId], ...members].filter(Boolean)),
+  )
 
   // The system boundary: the dotted box the user owns. It's a PERSISTED, freely
   // movable/resizable rectangle (manifest.boundary). Until the user customizes it, it
@@ -770,7 +832,7 @@ export default function SystemDiagram({
   // sensibly. Once persisted it's decoupled from node positions — a node may sit inside
   // or outside it, the user's call. A live override (mid-drag / just-dropped) wins.
   const BOUNDARY_PAD = 26
-  const internalNodes = nodes.filter((n) => !n.external)
+  const internalNodes = renderNodes.filter((n) => !n.external)
   let defaultBoundary = null
   if (internalNodes.length) {
     const minX = Math.min(...internalNodes.map((n) => effPos(n).x))
@@ -1045,10 +1107,10 @@ export default function SystemDiagram({
   // boundary ⊕ the ws shared-methods panels), plus a margin. Clients sit LEFT of the
   // system, so x can be negative — the viewBox origin moves with it instead of being
   // pinned at 0,0.
-  const xStarts = nodes.map((n) => effPos(n).x)
-  const xEnds = nodes.map((n) => effPos(n).x + NODE_W)
-  const yStarts = nodes.map((n) => effPos(n).y)
-  const yEnds = nodes.map((n) => effPos(n).y + heightOf(n))
+  const xStarts = renderNodes.map((n) => effPos(n).x)
+  const xEnds = renderNodes.map((n) => effPos(n).x + NODE_W)
+  const yStarts = renderNodes.map((n) => effPos(n).y)
+  const yEnds = renderNodes.map((n) => effPos(n).y + heightOf(n))
   if (boundary) {
     xStarts.push(boundary.x)
     xEnds.push(boundary.x + boundary.w)
@@ -1448,9 +1510,10 @@ export default function SystemDiagram({
         />
       ))}
 
-      {/* Dotted box around each per-service load-balancer group (entry sidecar + instances),
-          labelled with the service name; sits behind the nodes it groups. Non-interactive. */}
-      {svcLbBoxes.map((b) => (
+      {/* Dotted box around each per-service load-balancer group (entry sidecar + instances)
+          and each LLM worker group (header card + worker column), labelled with the service
+          name; sits behind the nodes it groups. Non-interactive. */}
+      {[...svcLbBoxes, ...llmBoxes].map((b) => (
         <g key={`svclb-${b.entryId}`} style={{ pointerEvents: 'none' }}>
           <rect x={b.x} y={b.y} width={b.w} height={b.h} rx="14" className="ws-fleet-box" />
           <text x={b.x + 12} y={b.y + 16} className="ws-fleet-label">
@@ -1661,16 +1724,18 @@ export default function SystemDiagram({
         )
       })}
 
-      {nodes.map((node) => {
-        const data = nodeData[node.id] || { metrics: {}, color: 'gray' }
-        const rt = customState[node.id]
+      {renderNodes.map((node) => {
+        // Virtual llm `<name>-1` cards read the base container's live data via dataKeyOf.
+        const data = nodeData[dataKeyOf(node)] || { metrics: {}, color: 'gray' }
+        const rt = customState[dataKeyOf(node)]
         // On-node clickable rows: a service's callable methods, or a client's attached
         // functions, listed below the metrics.
         const rows = rowsOf(node)
         const h = nodeHeight(node, bodyRowsOf(node), rt, rows)
         // A user-initiated temporary outage paints the node orange and wins over the
         // health-derived color (a deliberate shutdown looks down — but intentionally).
-        const inOutage = outages[node.id]
+        // A base outage paints both the llm header and its `<name>-1` card — same container.
+        const inOutage = outages[dataKeyOf(node)]
         const color = inOutage ? COLOR_HEX.orange : COLOR_HEX[data.color] || COLOR_HEX.gray
         // Event-stream cluster with its consumers paused — badge it (amber, like an outage).
         const consumersPaused = pausedConsumers.has(node.id)
@@ -1678,6 +1743,53 @@ export default function SystemDiagram({
         // behind the bottom "Edit" button, so the node body itself is no longer clickable.
         const p = effPos(node)
         const gClass = [dimmed(node.id) ? 'dim' : '', dragMode ? 'draggable' : ''].filter(Boolean).join(' ') || undefined
+
+        // An LLM worker group's base node renders as a COMPACT cluster-header card — the
+        // same chrome as the load balancer (standard box + health-colored header strip)
+        // holding just the service name and the Edit button. Its container's metrics/live
+        // body render on the virtual `<name>-1` card stacked below (see llmVirtuals);
+        // edges and traces into the group keep anchoring here.
+        if (isLlmBase(node)) {
+          return (
+            <g
+              key={node.id}
+              transform={`translate(${p.x}, ${p.y})`}
+              className={gClass}
+              onPointerDown={
+                dragMode
+                  ? (e) => beginDrag(e, { kind: 'node', nodeId: node.id, startPos: p })
+                  : undefined
+              }
+            >
+              <rect width={NODE_W} height={LLM_HDR_H} rx="8" className="node-box" style={{ stroke: color }} />
+              <rect width={NODE_W} height={HEADER_H} rx="8" fill={color} />
+              <rect width={NODE_W} height={HEADER_H / 2} fill={color} />
+              <text x={PAD} y={HEADER_H / 2 + 5} className="node-label">
+                {node.label}
+              </text>
+              <text x={NODE_W - PAD} y={HEADER_H / 2 + 5} className="node-type">
+                llm workers
+              </text>
+              {onRequestEdit && (
+                <g
+                  className="node-edit"
+                  onClick={dragMode ? undefined : (e) => {
+                    e.stopPropagation()
+                    onRequestEdit(node)
+                  }}
+                >
+                  <rect x={PAD} y={HEADER_H + EDIT_GAP} width={NODE_W - 2 * PAD} height={EDIT_H} rx="6" className="node-edit-btn" />
+                  <text x={NODE_W / 2} y={HEADER_H + EDIT_GAP + EDIT_H / 2} className="node-edit-label">
+                    Edit
+                  </text>
+                </g>
+              )}
+              {/* No outage caption here: the `<name>-1` card 8px below shows the same
+                  container's countdown, and a caption would overprint its header. The
+                  orange strip still signals the outage on the header itself. */}
+            </g>
+          )
+        }
         return (
           <g
             key={node.id}

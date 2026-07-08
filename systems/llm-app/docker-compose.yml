@@ -219,7 +219,7 @@ services:
     depends_on:
       - llm-worker-stream
   llm-worker-3:
-    # Instance of LLM worker "llm-worker" — no load balancer, dialed directly over gRPC
+    # Instance of LLM worker "llm-worker" — request traffic over gRPC; nginx route is control-plane only
     build: ./llm-worker
     environment:
       SERVICE_ID: llm-worker-3

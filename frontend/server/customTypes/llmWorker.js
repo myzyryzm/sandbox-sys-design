@@ -21,9 +21,11 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import {
   bad, HttpError, serviceMetrics, serviceHealth, cloneTemplate, addComposeService,
-  addNginxRoute, addScrapeJob, addManifestNode, rebuild, NAME_RE,
+  addNginxRoute, ensureNginxRoute, removeNginxRoute, reloadNginx, addScrapeJob,
+  addManifestNode, rebuild, NAME_RE,
   loadCompose, saveCompose, composeServiceDef, setComposeService, removeComposeService,
   loadPrometheus, savePrometheus, addScrapeJobDoc, removeScrapeJobDoc, withEtcdWorkerId,
+  withSystemLock,
 } from '../scaffold.js'
 import { addComposeServices, addScrapeJob as addDbScrapeJob, HEALTH_RULES } from '../databases.js'
 import { installContracts } from '../grpcInstall.js'
@@ -93,6 +95,7 @@ function workerMetrics(name) {
       unit: '/s',
     },
     { label: 'batch', query: `sum(llm_active_sequences{job="${name}"}) or vector(0)`, unit: '' },
+    { label: 'cached', query: `sum(llm_cached_prefixes{job="${name}"}) or vector(0)`, unit: '' },
   ]
 }
 
@@ -241,10 +244,11 @@ async function handleState(req, res, _next, ctx) {
     const system = url.searchParams.get('system')
     if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
     const manifest = readManifest(system)
-    // Only base workers are polled: instances (instanceOf) have no nginx route, so their
-    // /llm/state isn't reachable through the lb. Their metric cards still come from the
-    // direct Prometheus scrape.
-    const workers = manifest.nodes.filter((n) => n.service_type === 'llm_worker' && !n.instanceOf)
+    // Every group member is polled — base AND instances (each has a plain nginx
+    // `/<id>/` route so its /llm/state is reachable through the lb; see setReplicas).
+    // config/hook always come from the BASE's folder: instances share the base's
+    // worker.json / hook.json bind mounts and have no folder of their own.
+    const workers = manifest.nodes.filter((n) => n.service_type === 'llm_worker')
     const nodes = {}
     await Promise.all(
       workers.map(async (w) => {
@@ -258,10 +262,11 @@ async function handleState(req, res, _next, ctx) {
         } catch {
           /* worker not reachable yet (still building) */
         }
+        const baseId = w.instanceOf || w.id
         nodes[w.id] = {
           live,
-          config: readJsonFile(configFile(system, w.id), { ...CONFIG_DEFAULTS }),
-          hook: readJsonFile(hookFile(system, w.id), { description: '', implemented: false, conversationId: '' }),
+          config: readJsonFile(configFile(system, baseId), { ...CONFIG_DEFAULTS }),
+          hook: readJsonFile(hookFile(system, baseId), { description: '', implemented: false, conversationId: '' }),
         }
       }),
     )
@@ -355,10 +360,11 @@ async function handleHook(req, res, _next, ctx) {
 // Replica scaling — run the worker as N instances under one service id, with NO
 // load balancer. The base `<name>` stays a real serving worker; instances
 // `<name>-2..N` clone its build/config/hook/redis-stream (differing only by
-// SERVICE_ID) and are reached ONLY over gRPC at `<name>-i:50051` (no nginx route).
-// The consumer enumerates the group and does its own request forwarding — see the
-// entry+instanceOf expansion in the sandbox-grpc-attach skill. Mechanical (no launched
-// session), mirroring serviceLb.js minus the haproxy sidecar.
+// SERVICE_ID). The DATA plane stays gRPC-only with caller-side forwarding
+// (`<name>-i:50051` — see the entry+instanceOf expansion in the sandbox-grpc-attach
+// skill); each instance also gets a plain nginx `/<id>/` route so the CONTROL plane
+// (/llm/state, polled by handleState for the diagram) can reach it through the lb.
+// Mechanical (no launched session), mirroring serviceLb.js minus the haproxy sidecar.
 // ---------------------------------------------------------------------------
 
 const instanceOrdinal = (id, base) => {
@@ -375,7 +381,8 @@ function instanceNodes(manifest, base) {
 // A worker instance node: a service card carrying only the grouping back-link. It shares
 // the base's build/config/hook/redis-stream, keeps service_type so its diagram body +
 // metric cards match the base's, and declares the Worker server it runs. It owns no
-// endpoints (the diagram suppresses those for instanceOf nodes) and is reached only by gRPC.
+// endpoints (the diagram suppresses those for instanceOf nodes); request traffic reaches
+// it only by gRPC, while its nginx route exists purely for control-plane state polling.
 function workerInstanceNode(base, id, entryNode) {
   return {
     id,
@@ -407,10 +414,15 @@ function entryWorker(system, nodeId) {
 }
 
 // Frontend-safe rebuild for the worker group: build the new instance images, bring the
-// stack up (creating them, or removing orphaned instance containers on scale-down), and
-// restart prometheus so appended/removed scrape jobs are picked up. No nginx (instances
-// have no route) and no sidecar (there is no load balancer). NEVER ./start.sh.
-async function scaleRebuild(system, { buildNames = [], removeOrphans = false }) {
+// stack up (creating them, or removing orphaned instance containers on scale-down),
+// recreate the lb when instance routes changed (reloadLb — after `up -d` so nginx can
+// resolve the new upstream hostnames), and restart prometheus so appended/removed scrape
+// jobs are picked up. No haproxy sidecar (there is no load balancer). NEVER ./start.sh.
+async function scaleRebuild(system, opts) {
+  return withSystemLock(system, () => _scaleRebuildImpl(system, opts))
+}
+
+async function _scaleRebuildImpl(system, { buildNames = [], removeOrphans = false, reloadLb = false }) {
   if (SKIP_REBUILD()) return '(rebuild skipped)'
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
   const opts = { cwd: repoRoot, timeout: 600_000, maxBuffer: 16 * 1024 * 1024 }
@@ -424,6 +436,7 @@ async function scaleRebuild(system, { buildNames = [], removeOrphans = false }) 
     const upArgs = ['up', '-d']
     if (removeOrphans) upArgs.push('--remove-orphans')
     log += await run(upArgs)
+    if (reloadLb) log += await reloadNginx(system)
     log += await run(['restart', 'prometheus'])
   } catch (err) {
     const detail = `${err.stdout || ''}${err.stderr || ''}` || err.message
@@ -445,7 +458,23 @@ export async function setReplicas(body) {
 
   const current = instanceNodes(manifest, node.id)
   const currentTotal = 1 + current.length
-  if (target === currentTotal) return { ok: true, node, log: '(no change)' }
+
+  // Idempotent reconciliation — runs on EVERY scale call (including no-change) so
+  // pre-existing groups self-heal: refresh each member's metric cards to the current
+  // workerMetrics shape and make sure every instance has its control-plane nginx route
+  // (added retroactively for groups scaled before instances were routed).
+  node.metrics = workerMetrics(node.id)
+  for (const n of current) n.metrics = workerMetrics(n.id)
+  let routesChanged = false
+  for (const n of current) if (ensureNginxRoute(system, n.id)) routesChanged = true
+
+  if (target === currentTotal) {
+    writeManifest(system, manifest)
+    const log = routesChanged && !SKIP_REBUILD()
+      ? await withSystemLock(system, () => reloadNginx(system))
+      : '(no change)'
+    return { ok: true, node, log }
+  }
 
   const doc = loadCompose(system)
   const prom = loadPrometheus(system)
@@ -466,14 +495,18 @@ export async function setReplicas(body) {
         doc,
         id,
         withEtcdWorkerId({ ...app, build: `./${node.id}`, environment: { ...(app.environment || {}), SERVICE_ID: id } }, id),
-        ` Instance of LLM worker "${node.id}" — no load balancer, dialed directly over gRPC`,
+        ` Instance of LLM worker "${node.id}" — request traffic over gRPC; nginx route is control-plane only`,
       )
       addScrapeJobDoc(prom, id, `${id}:${INSTANCE_PORT}`, ` Instance of LLM worker "${node.id}"`)
       manifest.nodes.push(workerInstanceNode(node.id, id, node))
       newIds.push(id)
     }
+    // Route writes go to disk immediately (unlike the in-memory compose/prom/manifest
+    // docs), so they happen only after every id has passed assertFreeInstanceId — a
+    // mid-loop throw must not leave nginx pointing at containers that never exist.
+    for (const id of newIds) addNginxRoute(system, id)
     node.replicas = { instances: [...current.map((n) => n.id), ...newIds] }
-    plan = { buildNames: newIds, removeOrphans: false }
+    plan = { buildNames: newIds, removeOrphans: false, reloadLb: true }
   } else {
     // scale down: drop the highest ordinals until base + kept === target
     const keep = target - 1
@@ -481,6 +514,7 @@ export async function setReplicas(body) {
     for (const n of drop) {
       removeComposeService(doc, n.id)
       removeScrapeJobDoc(prom, n.id)
+      removeNginxRoute(system, n.id)
     }
     const dropIds = new Set(drop.map((n) => n.id))
     manifest.nodes = manifest.nodes.filter((n) => !dropIds.has(n.id))
@@ -488,7 +522,7 @@ export async function setReplicas(body) {
     const remaining = current.slice(0, keep).map((n) => n.id)
     if (remaining.length) node.replicas = { instances: remaining }
     else delete node.replicas
-    plan = { buildNames: [], removeOrphans: true }
+    plan = { buildNames: [], removeOrphans: true, reloadLb: true }
   }
 
   saveCompose(system, doc)
