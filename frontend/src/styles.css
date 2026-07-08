@@ -2453,6 +2453,32 @@ h1 {
   text-anchor: middle;
 }
 
+/* ── LLM Worker custom node body (per-sequence decode progress bars) ──────────── */
+.llm-node-bar {
+  fill: #2a2f3c;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 0.5;
+}
+.llm-node-bar.fill {
+  fill: #6ea8fe;
+  stroke: none;
+}
+.llm-node-bar.prefill {
+  fill: #d8a657;
+  stroke: none;
+}
+/* "implemented" badge on the worker's evict-hook section (green twin of .scenario-pending). */
+.llm-implemented {
+  color: #7fbf7f;
+  background: rgba(127, 191, 127, 0.12);
+  border: 1px solid rgba(127, 191, 127, 0.35);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 /* ── Service "Calls" tab: list of a service's API methods (Edit ▸ Calls) ───────── */
 .calls-list {
   list-style: none;

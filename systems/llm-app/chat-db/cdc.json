@@ -1,0 +1,12 @@
+{
+  "rules": [
+    {
+      "table": "user_message",
+      "operations": [
+        "INSERT"
+      ],
+      "stream": "user-messages-stream",
+      "topic": "user-message"
+    }
+  ]
+}

@@ -58,10 +58,10 @@
     },
     {
       "name": "UserMessage",
-      "ts": "/*\nid => primary key, snowflake id\nmessage => foreign key\n*/\ninterface UserMessage {\n  id: number;\n  message: Message;\n}",
+      "ts": "/*\nid => primary key, snowflake id\nmessage => foreign key\nchat => foreign key\n*/\ninterface UserMessage {\n  id: number;\n  content: string;\n  message: Message;\n  chat: Chat;\n}",
       "description": "",
       "createdAt": "2026-07-07T23:12:46.170Z",
-      "updatedAt": "2026-07-07T23:12:46.170Z"
+      "updatedAt": "2026-07-07T23:43:20.595Z"
     }
   ]
 }

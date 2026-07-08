@@ -10,7 +10,9 @@
 // frontend registry (src/customTypes/). Nothing in the modal, diagram, edit-tab, or
 // manifest core changes.
 import downloadCoordinator from './downloadCoordinator.js'
+import llmWorker from './llmWorker.js'
 
 export const CUSTOM_TYPES = {
   [downloadCoordinator.serviceType]: downloadCoordinator,
+  [llmWorker.serviceType]: llmWorker,
 }

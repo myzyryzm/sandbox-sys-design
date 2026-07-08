@@ -9,8 +9,9 @@
 // A module may own several related service_types (e.g. the coordinator + its workers).
 // Adding the next type = drop a module here and list it below; no seam code changes.
 import downloadCoordinator from './downloadCoordinator/index.jsx'
+import llmWorker from './llmWorker/index.jsx'
 
-const MODULES = [downloadCoordinator]
+const MODULES = [downloadCoordinator, llmWorker]
 
 const TYPES = {}
 for (const m of MODULES) {

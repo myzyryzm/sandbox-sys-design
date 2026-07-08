@@ -9,8 +9,8 @@
       "label": "nginx LB",
       "type": "load_balancer",
       "position": {
-        "x": 66,
-        "y": 139
+        "x": -44,
+        "y": 158
       },
       "metrics": []
     },
@@ -20,8 +20,8 @@
       "type": "prometheus",
       "origin": "create-prometheus",
       "position": {
-        "x": 908,
-        "y": 120
+        "x": 174,
+        "y": 126
       },
       "metrics": [
         {
@@ -65,8 +65,8 @@
       "type": "postgres",
       "origin": "create-database",
       "position": {
-        "x": 787,
-        "y": 460
+        "x": 203,
+        "y": 633
       },
       "metrics": [
         {
@@ -108,8 +108,8 @@
       "type": "postgres",
       "origin": "create-database",
       "position": {
-        "x": 765,
-        "y": 273
+        "x": 593,
+        "y": 383
       },
       "metrics": [
         {
@@ -143,7 +143,8 @@
       },
       "schemaModels": [
         "Chat",
-        "Message"
+        "Message",
+        "UserMessage"
       ]
     },
     {
@@ -152,8 +153,8 @@
       "type": "service",
       "origin": "create-service",
       "position": {
-        "x": 283,
-        "y": 354
+        "x": 199,
+        "y": 362
       },
       "metrics": [
         {
@@ -191,13 +192,221 @@
           }
         ]
       }
+    },
+    {
+      "id": "user-messages-stream",
+      "label": "user-messages-stream",
+      "type": "kafka",
+      "origin": "create-event-stream",
+      "position": {
+        "x": 958,
+        "y": 383
+      },
+      "metrics": [
+        {
+          "label": "topics",
+          "query": "count(count by (topic)(kafka_topic_partitions{job=\"user-messages-stream\",topic!~\"__.*\"})) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "partitions",
+          "query": "sum(kafka_topic_partitions{job=\"user-messages-stream\",topic!~\"__.*\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "msgs/s",
+          "query": "sum(rate(kafka_topic_partition_current_offset{job=\"user-messages-stream\",topic!~\"__.*\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "lag",
+          "query": "sum(kafka_consumergroup_lag{job=\"user-messages-stream\",topic!~\"__.*\"}) or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"user-messages-stream\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chat-db-cdc",
+      "label": "chat-db-cdc",
+      "type": "cdc",
+      "origin": "create-cdc",
+      "cdcOf": "chat-db",
+      "position": {
+        "x": 813,
+        "y": 616
+      },
+      "metrics": [
+        {
+          "label": "captured/s",
+          "query": "sum(rate(cdc_events_captured_total{job=\"chat-db-cdc\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "produced/s",
+          "query": "sum(rate(cdc_events_produced_total{job=\"chat-db-cdc\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "errors/s",
+          "query": "sum(rate(cdc_errors_total{job=\"chat-db-cdc\"}[1m])) or vector(0)",
+          "unit": "/s"
+        }
+      ],
+      "health": {
+        "query": "up{job=\"chat-db-cdc\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "llm-worker",
+      "label": "llm-worker",
+      "type": "service",
+      "origin": "create-custom-service",
+      "service_type": "llm_worker",
+      "position": {
+        "x": 457,
+        "y": 740
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"llm-worker\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"llm-worker\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"llm-worker\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"llm-worker\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"llm-worker\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        },
+        {
+          "label": "tokens/s",
+          "query": "sum(rate(llm_tokens_streamed_total{job=\"llm-worker\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "batch",
+          "query": "sum(llm_active_sequences{job=\"llm-worker\"}) or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"llm-worker\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "grpc": {
+        "servers": [
+          "Worker"
+        ],
+        "clients": [],
+        "overrides": []
+      },
+      "llm": {
+        "stream": "llm-worker-stream"
+      }
+    },
+    {
+      "id": "llm-worker-stream",
+      "label": "llm-worker-stream",
+      "type": "redis",
+      "origin": "create-custom-service",
+      "streamOf": "llm-worker",
+      "position": {
+        "x": 757,
+        "y": 740
+      },
+      "metrics": [
+        {
+          "label": "clients",
+          "query": "redis_connected_clients{job=\"llm-worker-stream\"}",
+          "unit": ""
+        },
+        {
+          "label": "ops/s",
+          "query": "sum(rate(redis_commands_processed_total{job=\"llm-worker-stream\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "keys",
+          "query": "sum(redis_db_keys{job=\"llm-worker-stream\"})",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "redis_up{job=\"llm-worker-stream\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
     }
   ],
-  "edges": [],
+  "edges": [
+    {
+      "from": "chat-db",
+      "to": "chat-db-cdc"
+    },
+    {
+      "from": "chat-db-cdc",
+      "to": "user-messages-stream"
+    },
+    {
+      "from": "llm-worker",
+      "to": "llm-worker-stream",
+      "origin": "create-custom-service"
+    }
+  ],
   "boundary": {
     "x": 54,
     "y": 106,
-    "w": 1066,
+    "w": 1362,
     "h": 654
   }
 }

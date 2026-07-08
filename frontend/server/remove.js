@@ -52,6 +52,12 @@ function validate(body) {
   const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
   const node = manifest.nodes.find((n) => n.id === id)
   if (!node) throw bad(`no node "${id}" in this system`)
+  // A linked token stream (e.g. an LLM worker's redis) is owned by its service and
+  // cascades with it — it is never individually deletable. Checked before the generic
+  // deletable test so the error points at the owner.
+  if (node.streamOf) {
+    throw bad(`"${id}" is the token stream of "${node.streamOf}" — delete "${node.streamOf}" instead (the stream cascades with it)`)
+  }
   const deletable =
     node.type === 'service' ||
     node.type === 'service-lb' ||
@@ -93,6 +99,8 @@ function ownedServices(id, kind, node) {
   if (kind === 'websocket') {
     return node?.wsRole === 'bus' || node?.wsRole === 'presence' ? [id, `${id}-exporter`] : [id]
   }
+  // A linked token stream (streamOf) is a redis with an exporter, no init sidecar.
+  if (node?.streamOf) return [id, `${id}-exporter`]
   return kind === 'database' || kind === 'event-stream'
     ? [id, `${id}-exporter`, `${id}-init`]
     : [id]
@@ -270,7 +278,10 @@ function cascadeChildIds(manifest, id, kind, node) {
   const svcLbInstanceIds = node?.type === 'service-lb'
     ? manifest.nodes.filter((n) => n.instanceOf === id).map((n) => n.id)
     : []
-  return { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds }
+  // A service's linked token stream (e.g. an LLM worker's redis) carries
+  // `streamOf: <id>` and is torn down alongside it.
+  const streamIds = manifest.nodes.filter((n) => n.streamOf === id).map((n) => n.id)
+  return { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds, streamIds }
 }
 
 // Reverse-dependency lookup: which OTHER nodes still call/use `id`, so deleting it
@@ -425,12 +436,12 @@ export async function handleDelete(body) {
   // The owned children removed in the same cascade (read replicas that stream from a
   // primary, a database's CDC worker, a websocket lb's whole tier, a load-balanced
   // service's instances) — excluded from the dependency guard below.
-  const { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds } = cascadeChildIds(manifest, id, kind, node)
+  const { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds, streamIds } = cascadeChildIds(manifest, id, kind, node)
 
   // Block the delete while another node still depends on `id` — an endpoint's HTTP
   // downstream, a gRPC client target, a Kafka producer/consumer, or a client function
   // step. The user must remove those calls first; cascaded children don't count.
-  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...svcLbInstanceIds]))
+  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...svcLbInstanceIds, ...streamIds]))
   if (dependents.length) {
     const err = bad(`Cannot delete "${id}" — ${dependents.length} node(s) still depend on it; remove those calls first.`)
     err.dependents = dependents
@@ -446,8 +457,8 @@ export async function handleDelete(body) {
 
   // Remove the children first (workers, secondaries, a ws lb's tier, a load-balanced
   // service's instances), then the target, in one manifest write.
-  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, id])
-  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, id]) {
+  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, ...streamIds, id])
+  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, ...streamIds, id]) {
     const rnode = manifest.nodes.find((n) => n.id === rid)
     const rkind = kindOf(rnode)
     removeComposeServices(system, ownedServices(rid, rkind, rnode))
@@ -482,14 +493,14 @@ export async function handleDelete(body) {
   writeManifest(system, manifest)
 
   const log = await rebuild(system, kind)
-  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds], log }
+  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, ...streamIds], log }
 }
 
 // What still depends on `id`, for the GET probe and a fresh-manifest computation.
 function dependentsFor(system, manifest, node) {
   const kind = kindOf(node)
-  const { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds } = cascadeChildIds(manifest, node.id, kind, node)
-  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...svcLbInstanceIds]))
+  const { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds, streamIds } = cascadeChildIds(manifest, node.id, kind, node)
+  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...svcLbInstanceIds, ...streamIds]))
 }
 
 export default function removeComponent() {

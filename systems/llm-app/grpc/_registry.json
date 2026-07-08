@@ -1,0 +1,30 @@
+{
+  "contracts": {
+    "Worker": {
+      "instruction": "Simulated LLM inference worker. AddPrompt admits a UserMessage (id + content mandatory; chat/message optional) into the continuous-batching loop — prompts are tokenized a-z → 0-25, generated tokens stream to the linked redis (stream key tokens:<id>, END token 26 last), and finished sequences keep their KV caches in a TTL prefix cache keyed by chat. GetStatus reports whether the worker has space.",
+      "methods": [
+        {
+          "name": "AddPrompt",
+          "request": {},
+          "response": {},
+          "requestType": "AddPromptRequest",
+          "responseType": "AddPromptReply",
+          "requestStreaming": false,
+          "responseStreaming": false
+        },
+        {
+          "name": "GetStatus",
+          "request": {},
+          "response": {},
+          "requestType": "StatusRequest",
+          "responseType": "StatusReply",
+          "requestStreaming": false,
+          "responseStreaming": false
+        }
+      ],
+      "conversationId": "custom-llm_worker-Worker",
+      "createdAt": "2026-07-08T03:21:38.162Z",
+      "source": "llm_worker"
+    }
+  }
+}

@@ -1,10 +1,10 @@
 workers = []  # llm workers
 conversation_worker_dict = dict() # map of conversation id to worker
-q = Queue()
+q = Kafka()
 def find_available_worker():
     # admission control: is there a worker with KV-cache room?
     for worker in workers:
-        if worker.has_space_for_prompt():
+        if worker.get_status() is True: # worker available
             return worker
     return None   # all full -> backpressure
 

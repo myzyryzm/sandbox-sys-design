@@ -1,0 +1,11 @@
+{
+  "topics": [
+    {
+      "id": "user-message",
+      "producers": [
+        "chat-db-cdc"
+      ],
+      "consumers": []
+    }
+  ]
+}

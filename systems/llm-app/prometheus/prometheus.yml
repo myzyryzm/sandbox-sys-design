@@ -24,5 +24,22 @@ scrape_configs:
     {
         job_name: chat-service,
         static_configs: [ { targets: [ chat-service:8000 ] } ]
+      },
+    # Event stream "user-messages-stream" — added by Add event stream
+    {
+        job_name: user-messages-stream,
+        static_configs: [ { targets: [ user-messages-stream-exporter:9308 ] } ]
+      },
+    # Database "chat-db-cdc" — added by Add CDC
+    {
+        job_name: chat-db-cdc,
+        static_configs: [ { targets: [ chat-db-cdc:8000 ] } ]
+      },
+    # LLM Worker "llm-worker" — custom service type
+    { job_name: llm-worker, static_configs: [ { targets: [ llm-worker:8000 ] } ] },
+    # Redis "llm-worker-stream" — added by Add service (LLM Worker)
+    {
+        job_name: llm-worker-stream,
+        static_configs: [ { targets: [ llm-worker-stream-exporter:9121 ] } ]
       }
   ]
