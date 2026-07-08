@@ -51,5 +51,15 @@ scrape_configs:
     {
         job_name: etcd,
         static_configs: [ { targets: [ etcd-1:2379, etcd-2:2379, etcd-3:2379 ] } ]
+      },
+    # Instance of LLM worker "llm-worker"
+    {
+        job_name: llm-worker-2,
+        static_configs: [ { targets: [ llm-worker-2:8000 ] } ]
+      },
+    # Instance of LLM worker "llm-worker"
+    {
+        job_name: llm-worker-3,
+        static_configs: [ { targets: [ llm-worker-3:8000 ] } ]
       }
   ]

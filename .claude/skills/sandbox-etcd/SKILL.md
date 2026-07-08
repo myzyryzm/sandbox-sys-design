@@ -128,7 +128,11 @@ one per worker container:
   ```python
   def _register_worker():
       key = f"/services/{SERVICE}/{WORKER_ID}"
-      value = f"{WORKER_ID}:8000"   # container DNS: instances resolve by their own name
+      # value = this container's OWN compose DNS name (NOT always == WORKER_ID). Per topology:
+      #   plain service         -> f"{SERVICE}:8000"     (SERVICE is its own DNS)
+      #   load-balanced instance -> f"{WORKER_ID}:8000"  (WORKER_ID == the instance container)
+      #   worker replica group   -> f"{SERVICE_ID}:8000" (base's WORKER_ID is <name>-1, not a host)
+      value = f"{SERVICE}:8000"
       while True:
           try:
               host, port = random.choice(ENDPOINTS).split(":")
@@ -159,10 +163,14 @@ one per worker container:
 - **Hard requirements**: survive cluster recreation (the refresh-TTL check above);
   survive quorum loss (calls raise → keep retrying); pick members with failover (don't
   hardcode `etcd-1`); on TTL change grant a fresh lease and re-put (the old lease just
-  expires). For a plain service, `value` should be `f"{SERVICE}:8000"` (its own compose
-  DNS name); for a load-balanced instance, `WORKER_ID` doubles as its DNS name, so
-  `f"{WORKER_ID}:8000"` is correct for both when `ETCD_WORKER_ID` is set (it always is —
-  the app writes it).
+  expires). The `value` is always the **registering container's own network DNS name** —
+  the key's `WORKER_ID` is the logical worker identity and is NOT always a resolvable host.
+  For a plain service that DNS is the service name; for a load-balanced instance the
+  `WORKER_ID` doubles as the container name, so `f"{WORKER_ID}:8000"` also works there. But
+  for a **worker replica group** the base's `WORKER_ID` is `<name>-1` while its container is
+  just `<name>` (no `<name>-1` host exists), so use the container's own service id —
+  `f"{SERVICE_ID}:8000"` — which is correct for the base *and* every instance, never
+  `WORKER_ID`. (`ETCD_WORKER_ID` is always set for the key — the app writes it per instance.)
 - Keep the hand-written prometheus metrics middleware and every other route/loop intact.
 - Rebuild ONLY that service (for a load-balanced service this builds the instances),
   then force-recreate the lb — a recreated service can land on a new IP and nginx's

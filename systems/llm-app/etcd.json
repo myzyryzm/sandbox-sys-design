@@ -10,31 +10,31 @@
   },
   "keyspaces": [
     {
-      "service": "chat-service",
-      "prefix": "/services/chat-service/",
-      "description": "Register each chat-service worker under /services/chat-service/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set.",
+      "service": "llm-worker",
+      "prefix": "/services/llm-worker/",
+      "description": "Register each llm-worker worker under /services/llm-worker/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set.",
       "implemented": true,
-      "conversationId": "",
-      "createdAt": "2026-07-08T17:57:25.665Z",
-      "updatedAt": "2026-07-08T17:57:25.679Z",
+      "conversationId": "77c34876-353d-4b7a-8698-25f6af36ec79",
+      "createdAt": "2026-07-08T19:23:43.945Z",
+      "updatedAt": "2026-07-08T19:26:54.939Z",
       "history": [
         {
-          "at": "2026-07-08T17:57:25.665Z",
-          "description": "Register each chat-service worker under /services/chat-service/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set."
+          "at": "2026-07-08T19:23:43.945Z",
+          "description": "Register each llm-worker worker under /services/llm-worker/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set."
         }
       ],
       "listeners": [
         {
           "service": "usr-msg-strm-srvc",
-          "description": "Watch /services/chat-service/ and keep a live in-memory map of chat-service workers (worker id -> host:port), updated by pushed etcd events.",
+          "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events.",
           "implemented": true,
-          "conversationId": "",
-          "createdAt": "2026-07-08T17:57:25.679Z",
-          "updatedAt": "2026-07-08T17:57:25.679Z",
+          "conversationId": "fe127bd0-89ca-4e49-82b0-b372f88eb784",
+          "createdAt": "2026-07-08T19:26:54.939Z",
+          "updatedAt": "2026-07-08T19:26:54.939Z",
           "history": [
             {
-              "at": "2026-07-08T17:57:25.679Z",
-              "description": "Watch /services/chat-service/ and keep a live in-memory map of chat-service workers (worker id -> host:port), updated by pushed etcd events."
+              "at": "2026-07-08T19:26:54.939Z",
+              "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events."
             }
           ]
         }

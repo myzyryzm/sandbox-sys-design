@@ -65,11 +65,6 @@ services:
   chat-service:
     # Service "chat-service" — added by Add service (generic FastAPI backend)
     build: ./chat-service
-    volumes:
-      - ./etcd.json:/etcd/etcd.json:ro
-    environment:
-      ETCD_WORKER_ID: chat-service-1
-      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
   user-messages-stream:
     # Kafka "user-messages-stream" — added by Add event stream
     image: apache/kafka:3.8.0
@@ -134,11 +129,14 @@ services:
     environment:
       SERVICE_ID: llm-worker
       REDIS_HOST: llm-worker-stream
+      ETCD_WORKER_ID: llm-worker-1
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
     volumes:
       - ./grpc:/app/grpc_pkg:ro
       - ./manifest.json:/manifest.json:ro
       - ./llm-worker/worker.json:/config/worker.json:ro
       - ./llm-worker/hooks.py:/app/hooks.py:ro
+      - ./etcd.json:/etcd/etcd.json:ro
     depends_on:
       - llm-worker-stream
   llm-worker-stream:
@@ -204,3 +202,35 @@ services:
       - --heartbeat-interval=100
       - --election-timeout=1000
     restart: unless-stopped
+  llm-worker-2:
+    # Instance of LLM worker "llm-worker" — no load balancer, dialed directly over gRPC
+    build: ./llm-worker
+    environment:
+      SERVICE_ID: llm-worker-2
+      REDIS_HOST: llm-worker-stream
+      ETCD_WORKER_ID: llm-worker-2
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
+    volumes:
+      - ./grpc:/app/grpc_pkg:ro
+      - ./manifest.json:/manifest.json:ro
+      - ./llm-worker/worker.json:/config/worker.json:ro
+      - ./llm-worker/hooks.py:/app/hooks.py:ro
+      - ./etcd.json:/etcd/etcd.json:ro
+    depends_on:
+      - llm-worker-stream
+  llm-worker-3:
+    # Instance of LLM worker "llm-worker" — no load balancer, dialed directly over gRPC
+    build: ./llm-worker
+    environment:
+      SERVICE_ID: llm-worker-3
+      REDIS_HOST: llm-worker-stream
+      ETCD_WORKER_ID: llm-worker-3
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
+    volumes:
+      - ./grpc:/app/grpc_pkg:ro
+      - ./manifest.json:/manifest.json:ro
+      - ./llm-worker/worker.json:/config/worker.json:ro
+      - ./llm-worker/hooks.py:/app/hooks.py:ro
+      - ./etcd.json:/etcd/etcd.json:ro
+    depends_on:
+      - llm-worker-stream

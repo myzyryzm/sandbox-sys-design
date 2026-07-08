@@ -23,7 +23,7 @@ import {
   bad, HttpError, serviceMetrics, serviceHealth, cloneTemplate, addComposeService,
   addNginxRoute, addScrapeJob, addManifestNode, rebuild, NAME_RE,
   loadCompose, saveCompose, composeServiceDef, setComposeService, removeComposeService,
-  loadPrometheus, savePrometheus, addScrapeJobDoc, removeScrapeJobDoc,
+  loadPrometheus, savePrometheus, addScrapeJobDoc, removeScrapeJobDoc, withEtcdWorkerId,
 } from '../scaffold.js'
 import { addComposeServices, addScrapeJob as addDbScrapeJob, HEALTH_RULES } from '../databases.js'
 import { installContracts } from '../grpcInstall.js'
@@ -453,7 +453,9 @@ export async function setReplicas(body) {
 
   if (target > currentTotal) {
     // scale up: base is ordinal 1, so added instances start at 2. Clone the base compose
-    // def and override only SERVICE_ID (build/config/hook/redis-stream all shared).
+    // def and override SERVICE_ID (build/config/hook/redis-stream all shared). If the base is
+    // etcd-registered, `withEtcdWorkerId` rewrites the cloned ETCD_WORKER_ID to this instance
+    // so each worker registers a distinct key instead of all sharing the base's `<name>-1`.
     const app = composeServiceDef(doc, node.id) || { build: `./${node.id}` }
     const maxOrd = current.reduce((m, n) => Math.max(m, instanceOrdinal(n.id, node.id)), 1)
     const newIds = []
@@ -463,7 +465,7 @@ export async function setReplicas(body) {
       setComposeService(
         doc,
         id,
-        { ...app, build: `./${node.id}`, environment: { ...(app.environment || {}), SERVICE_ID: id } },
+        withEtcdWorkerId({ ...app, build: `./${node.id}`, environment: { ...(app.environment || {}), SERVICE_ID: id } }, id),
         ` Instance of LLM worker "${node.id}" — no load balancer, dialed directly over gRPC`,
       )
       addScrapeJobDoc(prom, id, `${id}:${INSTANCE_PORT}`, ` Instance of LLM worker "${node.id}"`)

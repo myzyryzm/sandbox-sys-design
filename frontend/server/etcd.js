@@ -56,7 +56,7 @@ import { repoRoot, systemsDir, systemDir, isValidSystem, nextNodePosition } from
 import {
   HttpError, bad, readJsonBody, NAME_RE, addManifestNode,
   loadCompose, saveCompose, setComposeService, removeComposeService,
-  loadPrometheus, savePrometheus, removeScrapeJobDoc,
+  loadPrometheus, savePrometheus, removeScrapeJobDoc, serviceCodeContainers,
 } from './scaffold.js'
 import { addComposeServices, addScrapeJob } from './databases.js'
 
@@ -228,12 +228,12 @@ function removeVolumeEntry(doc, svc, entry) {
 
 const ETCD_JSON_MOUNT = './etcd.json:/etcd/etcd.json:ro'
 
-// The containers that actually run a service's code: a load-balanced service's
-// instances (<svc>-1..N), or the service itself. Registration/watch loops live in
-// those containers, so that's where the env vars (and the etcd.json mount) go.
-function serviceContainers(svcNode) {
-  return svcNode.svcLb?.instances?.length ? [...svcNode.svcLb.instances] : [svcNode.id]
-}
+// The containers that actually run a service's code: a load-balanced service's instances
+// (<svc>-1..N), a worker replica group's base + instances (<svc>, <svc>-2..N), or a plain
+// single service. Registration/watch loops live in those containers, so that's where the
+// env vars (and the etcd.json mount) go — one shared definition with the rebuild path (see
+// scaffold.js `serviceCodeContainers`) so both stay replica-group-aware.
+const serviceContainers = serviceCodeContainers
 
 // A service node that can carry etcd code: an internal plain service (not a
 // cluster instance) or a service-lb entry. The id is also validated here because

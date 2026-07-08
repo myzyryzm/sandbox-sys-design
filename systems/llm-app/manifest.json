@@ -9,8 +9,8 @@
       "label": "nginx LB",
       "type": "load_balancer",
       "position": {
-        "x": -44,
-        "y": 158
+        "x": -24,
+        "y": 155
       },
       "metrics": []
     },
@@ -20,8 +20,8 @@
       "type": "prometheus",
       "origin": "create-prometheus",
       "position": {
-        "x": 174,
-        "y": 126
+        "x": -23,
+        "y": 253
       },
       "metrics": [
         {
@@ -65,8 +65,8 @@
       "type": "postgres",
       "origin": "create-database",
       "position": {
-        "x": 90,
-        "y": 629
+        "x": 50,
+        "y": 779
       },
       "metrics": [
         {
@@ -108,8 +108,8 @@
       "type": "postgres",
       "origin": "create-database",
       "position": {
-        "x": 499,
-        "y": 564
+        "x": 470,
+        "y": 809
       },
       "metrics": [
         {
@@ -153,8 +153,8 @@
       "type": "service",
       "origin": "create-service",
       "position": {
-        "x": 110,
-        "y": 353
+        "x": 65,
+        "y": 464
       },
       "metrics": [
         {
@@ -199,8 +199,8 @@
       "type": "kafka",
       "origin": "create-event-stream",
       "position": {
-        "x": 1162,
-        "y": 428
+        "x": 1209,
+        "y": 652
       },
       "metrics": [
         {
@@ -245,8 +245,8 @@
       "origin": "create-cdc",
       "cdcOf": "chat-db",
       "position": {
-        "x": 819,
-        "y": 582
+        "x": 833,
+        "y": 833
       },
       "metrics": [
         {
@@ -286,8 +286,8 @@
       "origin": "create-custom-service",
       "service_type": "llm_worker",
       "position": {
-        "x": 788,
-        "y": 138
+        "x": 666,
+        "y": 230
       },
       "metrics": [
         {
@@ -344,6 +344,12 @@
       },
       "llm": {
         "stream": "llm-worker-stream"
+      },
+      "replicas": {
+        "instances": [
+          "llm-worker-2",
+          "llm-worker-3"
+        ]
       }
     },
     {
@@ -353,8 +359,8 @@
       "origin": "create-custom-service",
       "streamOf": "llm-worker",
       "position": {
-        "x": 458,
-        "y": 324
+        "x": 292,
+        "y": 251
       },
       "metrics": [
         {
@@ -393,8 +399,8 @@
       "type": "service",
       "origin": "create-service",
       "position": {
-        "x": 1163,
-        "y": 205
+        "x": 1208,
+        "y": 460
       },
       "metrics": [
         {
@@ -439,8 +445,8 @@
       "type": "etcd",
       "origin": "create-etcd",
       "position": {
-        "x": 560,
-        "y": 918
+        "x": 677,
+        "y": 500
       },
       "etcd": {
         "size": 3,
@@ -503,6 +509,136 @@
           }
         ]
       }
+    },
+    {
+      "id": "llm-worker-2",
+      "label": "llm-worker-2",
+      "type": "service",
+      "origin": "create-custom-service",
+      "service_type": "llm_worker",
+      "instanceOf": "llm-worker",
+      "position": {
+        "x": 926,
+        "y": 230
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"llm-worker-2\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"llm-worker-2\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"llm-worker-2\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"llm-worker-2\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"llm-worker-2\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        },
+        {
+          "label": "tokens/s",
+          "query": "sum(rate(llm_tokens_streamed_total{job=\"llm-worker-2\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "batch",
+          "query": "sum(llm_active_sequences{job=\"llm-worker-2\"}) or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"llm-worker-2\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "grpc": {
+        "servers": [
+          "Worker"
+        ],
+        "clients": [],
+        "overrides": []
+      }
+    },
+    {
+      "id": "llm-worker-3",
+      "label": "llm-worker-3",
+      "type": "service",
+      "origin": "create-custom-service",
+      "service_type": "llm_worker",
+      "instanceOf": "llm-worker",
+      "position": {
+        "x": 926,
+        "y": 230
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"llm-worker-3\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"llm-worker-3\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"llm-worker-3\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"llm-worker-3\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"llm-worker-3\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        },
+        {
+          "label": "tokens/s",
+          "query": "sum(rate(llm_tokens_streamed_total{job=\"llm-worker-3\"}[1m])) or vector(0)",
+          "unit": "/s"
+        },
+        {
+          "label": "batch",
+          "query": "sum(llm_active_sequences{job=\"llm-worker-3\"}) or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"llm-worker-3\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      },
+      "grpc": {
+        "servers": [
+          "Worker"
+        ],
+        "clients": [],
+        "overrides": []
+      }
     }
   ],
   "edges": [
@@ -521,9 +657,9 @@
     }
   ],
   "boundary": {
-    "x": -26,
-    "y": 103,
+    "x": -36,
+    "y": 117,
     "w": 1499,
-    "h": 649
+    "h": 857
   }
 }

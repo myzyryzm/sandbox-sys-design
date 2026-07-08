@@ -380,3 +380,87 @@ async def metrics():
 @app.get("/llm/state")
 async def llm_state():
     return engine.state()
+
+
+# ---------------------------------------------------------------------------
+# etcd worker registration (sandbox-etcd skill)
+#
+# Each worker keeps a leased key alive under /services/llm-worker/ (value
+# host:port) so listeners discover the live worker set. The lease TTL comes from
+# the mounted /etcd/etcd.json (re-read by mtime, so a UI TTL change applies
+# live); on ANY error the loop reconnects (possibly to another member), re-grants
+# and re-puts — so it survives cluster recreation and quorum loss.
+#
+# Transport note: the etcd3 python client pins protobuf<4, which is incompatible
+# with this worker's own protobuf 5.x gRPC (Worker_pb2 requires the 5.28 runtime,
+# and both can't load in one process). We therefore talk to etcd through its
+# stock v3 JSON gRPC-gateway over httpx — the skill's documented fallback. The
+# gateway is real etcd, so the lease keepalive below is a genuine lease refresh
+# (a vanished lease returns TTL 0, exactly like the native refresh()).
+# ---------------------------------------------------------------------------
+
+import base64
+import random
+import socket
+
+import httpx
+
+ETCD_SERVICE = "llm-worker"
+ETCD_WORKER_ID = os.environ.get("ETCD_WORKER_ID", socket.gethostname())
+ETCD_ENDPOINTS = os.environ.get("ETCD_ENDPOINTS", "etcd-1:2379").split(",")
+
+_ETCD_CFG = "/etcd/etcd.json"
+_ttl_cache = {"mtime": 0.0, "ttl": 15}
+
+
+def _lease_ttl():
+    try:
+        m = os.stat(_ETCD_CFG).st_mtime
+        if m != _ttl_cache["mtime"]:
+            with open(_ETCD_CFG) as f:
+                ttl = int(json.load(f)["cluster"]["leaseTtlSeconds"])
+            _ttl_cache.update(mtime=m, ttl=ttl)
+    except Exception:
+        pass  # keep last good value
+    return _ttl_cache["ttl"]
+
+
+def _b64(s):
+    return base64.b64encode(s.encode()).decode()
+
+
+def _register_worker():
+    key = f"/services/{ETCD_SERVICE}/{ETCD_WORKER_ID}"
+    value = f"{SERVICE_ID}:8000"  # this container's OWN compose DNS name (base=llm-worker, instance=llm-worker-N)
+    while True:
+        try:
+            host, port = random.choice(ETCD_ENDPOINTS).split(":")
+            base = f"http://{host}:{port}"
+            ttl = _lease_ttl()
+            with httpx.Client(base_url=base, timeout=5) as c:
+                grant = c.post("/v3/lease/grant", json={"TTL": str(ttl)})
+                grant.raise_for_status()
+                lease_id = grant.json()["ID"]
+                put = c.post(
+                    "/v3/kv/put",
+                    json={"key": _b64(key), "value": _b64(value), "lease": lease_id},
+                )
+                put.raise_for_status()
+                while True:
+                    time.sleep(max(1, ttl / 3))
+                    if _lease_ttl() != ttl:
+                        break  # TTL changed in the UI -> re-grant with the new TTL
+                    # A vanished lease (cluster recreated) is NOT an error: gRPC
+                    # transparently reconnects to the new cluster and keepalive
+                    # returns TTL 0 instead of failing.
+                    ka = c.post("/v3/lease/keepalive", json={"ID": lease_id})
+                    ka.raise_for_status()
+                    new_ttl = int(ka.json().get("result", {}).get("TTL", 0) or 0)
+                    if new_ttl <= 0:
+                        break  # lease vanished -> re-grant + re-put
+        except Exception:
+            time.sleep(2)  # quorum lost / member down / connect failure
+        # fall through: reconnect, re-grant, re-put
+
+
+threading.Thread(target=_register_worker, daemon=True).start()

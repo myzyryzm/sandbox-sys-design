@@ -31,7 +31,7 @@ import {
   HttpError, bad, NAME_RE, readJsonBody, serviceMetrics, serviceHealth,
   composePath, loadCompose, saveCompose, composeServiceDef, setComposeService,
   removeComposeService, loadPrometheus, savePrometheus, addScrapeJobDoc,
-  removeScrapeJobDoc, setScrapeJobTarget,
+  removeScrapeJobDoc, setScrapeJobTarget, withEtcdWorkerId,
 } from './scaffold.js'
 
 const pexec = promisify(execFile)
@@ -345,24 +345,6 @@ function enable(ctx) {
   writeManifest(system, manifest)
 
   return { buildNames: ids, recreate: [service, 'lb'], removeOrphans: false }
-}
-
-// A cloned instance def must carry its OWN etcd worker identity: the def being cloned
-// may belong to an etcd-registered service (env ETCD_WORKER_ID, written by etcd.js),
-// and copying it verbatim would make every instance register under the SAME key —
-// one worker on the diagram instead of N. No-op for services with no etcd role.
-// Handles both compose environment forms (map and KEY=VAL list).
-function withEtcdWorkerId(def, id) {
-  const env = def?.environment
-  if (Array.isArray(env)) {
-    if (!env.some((e) => String(e).startsWith('ETCD_WORKER_ID='))) return def
-    return {
-      ...def,
-      environment: env.map((e) => (String(e).startsWith('ETCD_WORKER_ID=') ? `ETCD_WORKER_ID=${id}` : e)),
-    }
-  }
-  if (!env || env.ETCD_WORKER_ID === undefined) return def
-  return { ...def, environment: { ...env, ETCD_WORKER_ID: id } }
 }
 
 // A fresh instance node: a normal service card that carries the grouping back-link and

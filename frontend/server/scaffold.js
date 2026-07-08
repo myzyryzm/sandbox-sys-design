@@ -322,19 +322,52 @@ export function setScrapeJobTarget(doc, jobName, target) {
 // INSTANCES and recreate the sidecar, not try to `docker compose build <name>` (which
 // would fail on the image-only haproxy service). A plain service resolves to itself.
 //
+// The containers that actually run a service's code — the single source of truth shared by
+// the rebuild path (below), etcd registration (etcd.js), and per-service load balancing
+// (serviceLb.js). Two scaling shapes carry instances: a per-service load balancer keeps them
+// under `svcLb.instances` (the `<name>` entry is the sidecar, NOT a code container), while a
+// worker replica group (customTypes/llmWorker.js) keeps them under `replicas.instances` (the
+// `<name>` base IS a real code container). Anything else is a plain single-container service.
+export function serviceCodeContainers(node) {
+  if (node?.svcLb?.instances?.length) return [...node.svcLb.instances]
+  if (node?.replicas?.instances?.length) return [node.id, ...node.replicas.instances]
+  return [node?.id].filter(Boolean)
+}
+
+// A cloned instance def must carry its OWN etcd worker identity: the def being cloned may
+// belong to an etcd-registered service (env ETCD_WORKER_ID, written by etcd.js), and copying
+// it verbatim would make every instance register under the SAME key — one worker on the
+// diagram instead of N. No-op for services with no etcd role. Handles both compose
+// environment forms (map and KEY=VAL list). Used by serviceLb.js (scale/enable/disable) and
+// customTypes/llmWorker.js (replica scale-up).
+export function withEtcdWorkerId(def, id) {
+  const env = def?.environment
+  if (Array.isArray(env)) {
+    if (!env.some((e) => String(e).startsWith('ETCD_WORKER_ID='))) return def
+    return {
+      ...def,
+      environment: env.map((e) => (String(e).startsWith('ETCD_WORKER_ID=') ? `ETCD_WORKER_ID=${id}` : e)),
+    }
+  }
+  if (!env || env.ETCD_WORKER_ID === undefined) return def
+  return { ...def, environment: { ...env, ETCD_WORKER_ID: id } }
+}
+
 // A worker replica group (customTypes/llmWorker.js — N instances sharing one id with NO
-// load balancer) is the mirror image: `<name>` IS a real serving container, and its
-// instances `<name>-2..N` all `build: ./<name>`, so a per-service edit must rebuild the
-// base AND every instance (no sidecar to recreate).
+// load balancer) is the mirror image of a per-service LB: `<name>` IS a real serving
+// container, and its instances `<name>-2..N` all `build: ./<name>`, so a per-service edit
+// must rebuild the base AND every instance (no sidecar to recreate). Both shapes (and the
+// plain single service) resolve through `serviceCodeContainers`; only a load-balanced
+// service also needs its `<name>` sidecar force-recreated.
 function resolveBuildTargets(system, name) {
   try {
     const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
     const node = manifest.nodes.find((n) => n.id === name)
-    if (node?.svcLb?.instances?.length) {
-      return { buildNames: [...node.svcLb.instances], recreate: [name] }
-    }
-    if (node?.replicas?.instances?.length) {
-      return { buildNames: [name, ...node.replicas.instances], recreate: [] }
+    if (node) {
+      return {
+        buildNames: serviceCodeContainers(node),
+        recreate: node.svcLb?.instances?.length ? [name] : [],
+      }
     }
   } catch {
     /* fall back to the plain single-service path */

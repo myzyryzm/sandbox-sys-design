@@ -109,12 +109,7 @@ async def metrics():
 
 
 # ---------------------------------------------------------------------------
-# etcd listener on /services/chat-service/ (sandbox-etcd skill)
-#
-# Keeps a live in-memory map of chat-service workers (worker id -> host:port).
-# etcd PUSHES every change over the watch stream — a PUT adds/updates a worker,
-# a DELETE (explicit or lease expiry when a worker dies) removes it. Never
-# polls. On any watch error: reconnect and resync from a fresh get_prefix.
+# etcd discovery — shared client setup (sandbox-etcd skill)
 # ---------------------------------------------------------------------------
 
 import os
@@ -124,11 +119,22 @@ import threading
 import etcd3
 
 ETCD_ENDPOINTS = os.environ.get("ETCD_ENDPOINTS", "etcd-1:2379").split(",")
-_WATCH_PREFIX = "/services/chat-service/"
-WORKERS: dict = {}  # worker id -> host:port — the live view other code reads
 
 
-def _watch_workers():
+# ---------------------------------------------------------------------------
+# etcd listener on /services/llm-worker/ (sandbox-etcd skill)
+#
+# Keeps a live in-memory map of llm-worker workers (worker id -> host:port).
+# etcd PUSHES every change over the watch stream — a PUT adds/updates a worker,
+# a DELETE (explicit or lease expiry when a worker dies) removes it. Never
+# polls. On any watch error: reconnect and resync from a fresh get_prefix.
+# ---------------------------------------------------------------------------
+
+_LLM_WORKER_PREFIX = "/services/llm-worker/"
+LLM_WORKERS: dict = {}  # worker id -> host:port — the live view other code reads
+
+
+def _watch_llm_workers():
     while True:
         client = None
         try:
@@ -137,20 +143,20 @@ def _watch_workers():
 
             def _apply(resp):  # etcd PUSHES each change here — the hot path
                 for ev in resp.events:
-                    wid = ev.key.decode()[len(_WATCH_PREFIX):]
+                    wid = ev.key.decode()[len(_LLM_WORKER_PREFIX):]
                     if isinstance(ev, etcd3.events.PutEvent):
-                        WORKERS[wid] = ev.value.decode()
+                        LLM_WORKERS[wid] = ev.value.decode()
                     else:  # DeleteEvent: explicit delete OR lease expiry
-                        WORKERS.pop(wid, None)
+                        LLM_WORKERS.pop(wid, None)
 
-            client.add_watch_prefix_callback(_WATCH_PREFIX, _apply)
+            client.add_watch_prefix_callback(_LLM_WORKER_PREFIX, _apply)
             # baseline AFTER the watch is armed, so no change can fall in the gap
             fresh = {
-                m.key.decode()[len(_WATCH_PREFIX):]: v.decode()
-                for v, m in client.get_prefix(_WATCH_PREFIX)
+                m.key.decode()[len(_LLM_WORKER_PREFIX):]: v.decode()
+                for v, m in client.get_prefix(_LLM_WORKER_PREFIX)
             }
-            WORKERS.clear()
-            WORKERS.update(fresh)
+            LLM_WORKERS.clear()
+            LLM_WORKERS.update(fresh)
             # Slow anti-entropy sweep: after a cluster recreate the re-armed watch can
             # silently wait on a "future revision" and deliver nothing — the sweep
             # detects any silent staleness and forces a full resync. Updates still
@@ -158,10 +164,10 @@ def _watch_workers():
             while True:
                 time.sleep(30)
                 fresh = {
-                    m.key.decode()[len(_WATCH_PREFIX):]: v.decode()
-                    for v, m in client.get_prefix(_WATCH_PREFIX)
+                    m.key.decode()[len(_LLM_WORKER_PREFIX):]: v.decode()
+                    for v, m in client.get_prefix(_LLM_WORKER_PREFIX)
                 }
-                if fresh != WORKERS:
+                if fresh != LLM_WORKERS:
                     raise RuntimeError("stale watch — full resync")
         except Exception:
             time.sleep(2)  # reconnect + full resync from scratch
@@ -173,10 +179,10 @@ def _watch_workers():
                 pass
 
 
-threading.Thread(target=_watch_workers, daemon=True).start()
+threading.Thread(target=_watch_llm_workers, daemon=True).start()
 
 
-@app.get("/discovery/chat-service")
-async def discovery_chat_service():
-    """The live chat-service worker set, as maintained by the etcd watch."""
-    return {"keyspace": _WATCH_PREFIX, "workers": dict(WORKERS)}
+@app.get("/discovery/llm-worker")
+async def discovery_llm_worker():
+    """The live llm-worker worker set, as maintained by the etcd watch."""
+    return {"keyspace": _LLM_WORKER_PREFIX, "workers": dict(LLM_WORKERS)}
