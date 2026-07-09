@@ -4,8 +4,10 @@ Roles in one process:
   - Worker gRPC SERVER : AddPrompt admits a user message into the batch;
                          GetStatus reports capacity. (:50051, intra-network)
   - worker loop thread : steps every active sequence (prefill, then one decode
-                         per tick), XADDs each generated token to the linked
-                         redis stream tokens:<user_message_id>, END token 26 last.
+                         per tick), XADDs each generated token as its a-z character
+                         to the linked redis stream tokens:<user_message_id>; a
+                         finished sequence emits the configurable LAST_TOKEN string
+                         (etcd /config/app-settings/, default "DONE") as the last entry.
   - reaper loop thread : every 2s evicts prefix-cache entries older than the TTL
                          and fires the user-authored on_cache_evict hook.
 
@@ -244,7 +246,11 @@ class InferenceEngine:
     def _stream_token(self, um_id, token):
         try:
             key = f"tokens:{um_id}"
-            _redis.xadd(key, {"t": int(token)}, maxlen=STREAM_MAXLEN, approximate=True)
+            # Stream the CHARACTER, not the int id: tokens 0-25 -> their a-z letter,
+            # the END token (26) -> the configurable LAST_TOKEN string (live etcd
+            # /config/app-settings/, default "DONE"). See _char below. Control flow
+            # still keys off the INTEGER arg — only the redis value becomes a char.
+            _redis.xadd(key, {"t": _char(token)}, maxlen=STREAM_MAXLEN, approximate=True)
             llm_tokens_streamed_total.inc()
             if token == END_TOKEN:
                 _redis.expire(key, STREAM_TTL_S)
@@ -464,3 +470,161 @@ def _register_worker():
 
 
 threading.Thread(target=_register_worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# etcd config-keyspace listener  (/config/app-settings/, sandbox-etcd skill)
+#
+# The worker keeps a live CONFIG map from the app-settings config keyspace and
+# reads CONFIG["LAST_TOKEN"] (default "DONE") at token-emit time (_last_token
+# above) as the redis token stream's END marker.
+#
+# Transport: the SAME httpx-over-v3-JSON-gateway fallback the registration loop
+# uses (the etcd3 client pins protobuf<4, incompatible with this worker's
+# protobuf 5.x Worker_pb2). We honor the config-listener contract — arm the watch
+# FIRST, baseline AFTER arm (no gap), maintain the map from PUSHED PUT/DELETE
+# events (never poll for reads), back it with a ~30s anti-entropy resync that
+# tears down a silently-stale watch (survives cluster recreate), and reconnect on
+# any error keeping the last-known map — over the gateway's streaming
+# POST /v3/watch instead of etcd3's add_watch_prefix_callback.
+# ---------------------------------------------------------------------------
+
+CONFIG_PREFIX = "/config/app-settings/"
+CONFIG: dict[str, str] = {}      # key -> value — the live settings _last_token reads
+_config_lock = threading.Lock()  # one writer (watch thread) + whole-map readers
+
+
+def _last_token():
+    """The stream's END marker string, from the live app-settings config (pushed
+    over etcd). Falls back to "DONE" when the key is unset, empty, deleted, or the
+    map has not populated yet — CONFIG.get() is an atomic single read (no lock)."""
+    return CONFIG.get("LAST_TOKEN") or "DONE"
+
+
+def _char(token):
+    """Redis stream VALUE for a token: normal tokens (0-25) -> their a-z letter
+    (via model.detokenize); the END token (26, the "last token") -> the
+    configurable LAST_TOKEN string (default "DONE")."""
+    if token == END_TOKEN:
+        return _last_token()
+    return detokenize([token])   # letter for 0-25, "" for anything outside the vocab
+
+
+def _prefix_range_end(prefix):
+    """etcd prefix range_end (base64): the prefix with its last non-0xff byte
+    incremented (trailing 0xff dropped). '/config/app-settings/' -> '…settings0'."""
+    b = bytearray(prefix.encode())
+    while b and b[-1] == 0xFF:
+        b.pop()
+    if not b:                       # all-0xff prefix -> scan to the end of keyspace
+        return _b64("\0")
+    b[-1] += 1
+    return base64.b64encode(bytes(b)).decode()
+
+
+def _range_config(base):
+    """Prefix read of the config keyspace -> {key(without prefix): value}. A short
+    call on its OWN connection (never the long-lived watch stream)."""
+    with httpx.Client(base_url=base, timeout=5) as c:
+        r = c.post(
+            "/v3/kv/range",
+            json={"key": _b64(CONFIG_PREFIX), "range_end": _prefix_range_end(CONFIG_PREFIX)},
+        )
+        r.raise_for_status()
+        out = {}
+        for kv in r.json().get("kvs", []):  # "kvs" is absent when the range is empty
+            k = base64.b64decode(kv["key"]).decode()[len(CONFIG_PREFIX):]
+            out[k] = base64.b64decode(kv.get("value", "") or "").decode()
+        return out
+
+
+def _config_sweeper(base, resp, stale):
+    """~30s anti-entropy backstop for ONE watch connection: re-range, compare to
+    the live CONFIG, and only on drift (a silently-stale watch — e.g. a gateway
+    connection to a recreated cluster hanging with no error) close the stream so
+    the watch loop reconnects and rebaselines. Quorum loss -> keep last-known."""
+    while not stale.is_set():
+        time.sleep(30)
+        if stale.is_set():
+            return
+        try:
+            fresh = _range_config(base)
+        except Exception:
+            continue                # member down / quorum loss -> retry next sweep
+        with _config_lock:
+            drifted = fresh != CONFIG
+        if drifted:
+            stale.set()
+            try:
+                resp.close()        # unblock the watch loop's iter_lines() -> reconnect
+            except Exception:
+                pass
+            return
+
+
+def _watch_config():
+    while True:
+        host, port = random.choice(ETCD_ENDPOINTS).split(":")
+        base = f"http://{host}:{port}"
+        # Infinite read for the never-ending stream, short connect; the baseline
+        # and sweep use SEPARATE short-timeout clients (see _range_config).
+        stream_client = httpx.Client(base_url=base, timeout=httpx.Timeout(5.0, read=None))
+        stale = threading.Event()
+        try:
+            body = {
+                "create_request": {
+                    "key": _b64(CONFIG_PREFIX),
+                    "range_end": _prefix_range_end(CONFIG_PREFIX),
+                }
+            }
+            with stream_client.stream("POST", "/v3/watch", json=body) as resp:
+                resp.raise_for_status()
+                # Baseline AFTER the watch is armed, so no change falls in the gap.
+                try:
+                    fresh = _range_config(base)
+                    with _config_lock:
+                        CONFIG.clear()
+                        CONFIG.update(fresh)
+                except Exception:
+                    pass            # keep last-known; the sweep reconciles
+                threading.Thread(
+                    target=_config_sweeper, args=(base, resp, stale), daemon=True
+                ).start()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        result = json.loads(line).get("result") or {}
+                    except Exception:
+                        continue
+                    if result.get("created"):
+                        continue    # watch-created ack — carries no events
+                    for ev in result.get("events", []):
+                        kv = ev.get("kv") or {}
+                        k = base64.b64decode(kv.get("key", "")).decode()[len(CONFIG_PREFIX):]
+                        if ev.get("type") == "DELETE":  # PUT omits "type" (proto3 enum 0)
+                            with _config_lock:
+                                CONFIG.pop(k, None)
+                        else:
+                            v = base64.b64decode(kv.get("value", "") or "").decode()
+                            with _config_lock:
+                                CONFIG[k] = v
+        except Exception:
+            pass                    # connect fail / stale close -> reconnect below
+        finally:
+            stale.set()             # stop this connection's sweeper (no leak)
+            try:
+                stream_client.close()
+            except Exception:
+                pass
+        time.sleep(2)               # keep last-known CONFIG, then reconnect
+
+
+@app.get("/config/app-settings")
+async def config_app_settings():
+    with _config_lock:
+        snapshot = dict(CONFIG)
+    return {"keyspace": CONFIG_PREFIX, "config": snapshot}
+
+
+threading.Thread(target=_watch_config, daemon=True).start()

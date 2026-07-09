@@ -4,19 +4,15 @@
 # source: Worker.proto
 # Protobuf Python Version: 5.28.1
 """Generated protocol buffer code."""
+# NOTE (coordinator-local copy): the protobuf runtime-version guard emitted
+# by protoc 5.28 was stripped so these import under protobuf 3.20.3 — the
+# version the etcd3 client pins (protobuf<4). The wire format is unchanged
+# (proto3), so this client talks to the 5.28-generated Worker/Consumer
+# servers unmodified. Regenerate from grpc/<name>.proto if the contract changes.
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import descriptor_pool as _descriptor_pool
-from google.protobuf import runtime_version as _runtime_version
 from google.protobuf import symbol_database as _symbol_database
 from google.protobuf.internal import builder as _builder
-_runtime_version.ValidateProtobufRuntimeVersion(
-    _runtime_version.Domain.PUBLIC,
-    5,
-    28,
-    1,
-    '',
-    'Worker.proto'
-)
 # @@protoc_insertion_point(imports)
 
 _sym_db = _symbol_database.Default()

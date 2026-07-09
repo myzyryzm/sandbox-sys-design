@@ -4,11 +4,13 @@ package llmworker;
 
 // Simulated LLM inference worker. AddPrompt admits a user message into the
 // continuous-batching loop — generated tokens stream to the worker's linked
-// redis (stream key tokens:<id>, END token 26 last). GetStatus reports whether
-// the worker has space for another prompt.
+// redis (stream key tokens:<id>, values are the a-z characters of each token,
+// the configurable LAST_TOKEN string (default "DONE") last). GetStatus reports
+// whether the worker has space for another prompt.
 service Worker {
   rpc AddPrompt (AddPromptRequest) returns (AddPromptReply);
   rpc GetStatus (StatusRequest) returns (StatusReply);
+  rpc UpdateConsumer (UpdateConsumerRequest) returns (UpdateConsumerReply);
 }
 
 message AddPromptRequest {
@@ -32,4 +34,15 @@ message StatusReply {
   int32 active_count = 2;
   int32 cached_count = 3;
   int32 max_active = 4;   // current live-config value
+}
+
+// Point the worker at the consumer (source) it is connected to — the worker
+// stores this host:port as its local `source` so it can reach back to it.
+message UpdateConsumerRequest {
+  string host = 1;   // source consumer host
+  int32 port = 2;    // source consumer port
+}
+
+message UpdateConsumerReply {
+  bool ok = 1;       // true once the local source was updated
 }

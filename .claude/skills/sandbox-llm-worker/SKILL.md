@@ -30,9 +30,10 @@ the stack only with `docker compose -f systems/<id>/docker-compose.yml ...`.
   - `GetStatus()` — `has_space` + active/cached counts.
 - **Worker loop** (thread): every ~0.25s steps all active sequences — prefill first
   (history + prompt through the model, filling per-layer KV caches), then one decode
-  step per tick. Each decoded token is `XADD`ed to the linked redis, key
-  **`tokens:<user_message_id>`** (field `t`); when a sequence hits its random target
-  length (1-100), **END token `26`** is XADDed and the key gets a 600s expiry.
+  step per tick. Each decoded token is `XADD`ed **as its a-z character** to the linked
+  redis, key **`tokens:<user_message_id>`** (field `t`); when a sequence finishes, the
+  configurable **`LAST_TOKEN`** string — watched live from etcd `/config/app-settings/`,
+  default **`DONE`** — is XADDed as the end marker and the key gets a 600s expiry.
 - **Prefix cache**: a finished sequence's KV caches are kept, keyed by **chat id** —
   a follow-up AddPrompt in the same chat pops the entry and prefills only its new
   tokens (`cache_hit: true`). On a cache miss with a chat id, prior messages come from
@@ -153,7 +154,7 @@ EOF
 # 3. Wait for it to finish + expire (target_len is random 1-100 → up to ~30s + ttl),
 #    then confirm the hook's side effect and the log line:
 docker compose -f systems/$S/docker-compose.yml logs --tail 50 $W
-# tokens on the stream (END=26 last):
+# tokens on the stream (a-z characters, then the LAST_TOKEN string "DONE" last):
 docker compose -f systems/$S/docker-compose.yml exec -T $W-stream redis-cli XRANGE tokens:901 - +
 # 4. Restore the TTL via the same config route, and set implemented:true in hook.json.
 ```

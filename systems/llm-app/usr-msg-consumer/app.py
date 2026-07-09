@@ -58,7 +58,71 @@ http_requests_in_flight = Gauge(
 # req/s query reflecting actual traffic through the system.
 EXCLUDED_PATHS = {"/metrics"}
 
-app = FastAPI(title="sandbox service")
+
+# ---------------------------------------------------------------------------
+# Consumer gRPC server (sandbox-grpc-attach skill)
+#
+# usr-msg-consumer SERVES the Consumer contract: UpdateWorkers hands this
+# consumer the full, current set of worker host:port endpoints it should use,
+# replacing its local list. The single shared servicer
+# (systems/llm-app/grpc/Consumer_servicer.py, vendored into this build context)
+# is a thin protobuf<->python adapter; the worker registry it drives is the
+# WorkerRegistry injected below. One grpc.aio server hosts the contract on the
+# fixed intra-network port 50051 (no nginx route — gRPC is binary), started in
+# the FastAPI lifespan alongside the existing HTTP app. This service has no
+# gRPC client role (manifest grpc.clients is empty), so no stubs are built.
+# ---------------------------------------------------------------------------
+
+import threading
+from contextlib import asynccontextmanager
+
+import grpc
+
+import Consumer_pb2_grpc as consumer_grpc
+from Consumer_servicer import ConsumerServicer
+
+GRPC_PORT = 50051
+
+
+class WorkerRegistry:
+    """Thread-safe holder for the worker set pushed via Consumer.UpdateWorkers.
+
+    The shared servicer calls update_workers() with the full replacement set of
+    (host, port) endpoints; we store it under a lock. This is the wiring the
+    attach asks for — how these endpoints get consumed for dispatch is business
+    logic left out of scope."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._workers = []  # list[(host, port)]
+
+    def update_workers(self, workers):
+        with self._lock:
+            self._workers = list(workers)
+        print(f"[Consumer] worker set updated ({len(self._workers)}): {self._workers}", flush=True)
+
+    def workers(self):
+        with self._lock:
+            return list(self._workers)
+
+
+worker_registry = WorkerRegistry()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    server = grpc.aio.server()
+    consumer_grpc.add_ConsumerServicer_to_server(ConsumerServicer(worker_registry), server)
+    server.add_insecure_port(f"[::]:{GRPC_PORT}")
+    await server.start()
+    print(f"[Consumer] gRPC server listening on :{GRPC_PORT}", flush=True)
+    try:
+        yield
+    finally:
+        await server.stop(grace=2)
+
+
+app = FastAPI(title="usr-msg-consumer", lifespan=lifespan)
 
 
 @app.middleware("http")

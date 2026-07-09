@@ -560,6 +560,13 @@
             "when": "value >= 1"
           }
         ]
+      },
+      "grpc": {
+        "servers": [
+          "Consumer"
+        ],
+        "clients": [],
+        "overrides": []
       }
     },
     {

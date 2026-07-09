@@ -16,7 +16,7 @@
       "implemented": true,
       "conversationId": "77c34876-353d-4b7a-8698-25f6af36ec79",
       "createdAt": "2026-07-08T19:23:43.945Z",
-      "updatedAt": "2026-07-09T14:53:21.732Z",
+      "updatedAt": "2026-07-09T21:06:38.529Z",
       "history": [
         {
           "at": "2026-07-08T19:23:43.945Z",
@@ -26,15 +26,19 @@
       "listeners": [
         {
           "service": "coordinator",
-          "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events.",
+          "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events. rebalance the mapping of usr-msg-consumer to llm-worker(s) using WORKER_RATIO from config/app-settings as a guide. there should be max WORKER_RATIO llm workers per usr-msg-consumer. when either the llm-workers, usr-msg-consumers, or WORKER_RATIO update the new assignments should be sent to the llm-workers via UpdateConsumer and sent to usr-msg-consumers via UpdateWorkers. during rebalancing, llm workers should stay connected to their same usr-msg-consumer if possible. if they have no current usr-message-consumer then least-connections should be used to assign.",
           "implemented": true,
-          "conversationId": "a43fb6b0-0e4d-409b-ba37-ed08cb9e0adc",
+          "conversationId": "f9a78840-7cd6-4b02-bfe9-80e431b2eab0",
           "createdAt": "2026-07-09T14:53:21.732Z",
-          "updatedAt": "2026-07-09T14:53:21.732Z",
+          "updatedAt": "2026-07-09T21:06:38.529Z",
           "history": [
             {
               "at": "2026-07-09T14:53:21.732Z",
               "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events."
+            },
+            {
+              "at": "2026-07-09T21:06:38.529Z",
+              "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events. rebalance the mapping of usr-msg-consumer to llm-worker(s) using WORKER_RATIO from config/app-settings as a guide. there should be max WORKER_RATIO llm workers per usr-msg-consumer. when either the llm-workers, usr-msg-consumers, or WORKER_RATIO update the new assignments should be sent to the llm-workers via UpdateConsumer and sent to usr-msg-consumers via UpdateWorkers. during rebalancing, llm workers should stay connected to their same usr-msg-consumer if possible. if they have no current usr-message-consumer then least-connections should be used to assign."
             }
           ]
         }
@@ -48,7 +52,7 @@
       "implemented": true,
       "conversationId": "2f689fe6-aba0-496d-bd89-e890a222fd71",
       "createdAt": "2026-07-09T14:24:56.177Z",
-      "updatedAt": "2026-07-09T14:53:38.688Z",
+      "updatedAt": "2026-07-09T21:06:53.054Z",
       "history": [
         {
           "at": "2026-07-09T14:24:56.177Z",
@@ -58,15 +62,19 @@
       "listeners": [
         {
           "service": "coordinator",
-          "description": "Watch /services/usr-msg-consumer/ and keep a live in-memory map of usr-msg-consumer workers (worker id -> host:port), updated by pushed etcd events.",
+          "description": "Watch /services/usr-msg-consumer/ and keep a live in-memory map of usr-msg-consumer workers (worker id -> host:port), updated by pushed etcd events. rebalance the mapping of usr-msg-consumer to llm-worker(s) using WORKER_RATIO from config/app-settings as a guide. there should be max WORKER_RATIO llm workers per usr-msg-consumer. when either the llm-workers, usr-msg-consumers, or WORKER_RATIO update the new assignments should be sent to the llm-workers via UpdateConsumer and sent to usr-msg-consumers via UpdateWorkers. during rebalancing, llm workers should stay connected to their same usr-msg-consumer if possible. if they have no current usr-message-consumer then least-connections should be used to assign.",
           "implemented": true,
-          "conversationId": "cfc3dbea-08de-46f5-a6b5-11077a17df62",
+          "conversationId": "5772cd34-c1a2-4daf-a302-cd5e942062db",
           "createdAt": "2026-07-09T14:53:38.688Z",
-          "updatedAt": "2026-07-09T14:53:38.688Z",
+          "updatedAt": "2026-07-09T21:06:53.054Z",
           "history": [
             {
               "at": "2026-07-09T14:53:38.688Z",
               "description": "Watch /services/usr-msg-consumer/ and keep a live in-memory map of usr-msg-consumer workers (worker id -> host:port), updated by pushed etcd events."
+            },
+            {
+              "at": "2026-07-09T21:06:53.054Z",
+              "description": "Watch /services/usr-msg-consumer/ and keep a live in-memory map of usr-msg-consumer workers (worker id -> host:port), updated by pushed etcd events. rebalance the mapping of usr-msg-consumer to llm-worker(s) using WORKER_RATIO from config/app-settings as a guide. there should be max WORKER_RATIO llm workers per usr-msg-consumer. when either the llm-workers, usr-msg-consumers, or WORKER_RATIO update the new assignments should be sent to the llm-workers via UpdateConsumer and sent to usr-msg-consumers via UpdateWorkers. during rebalancing, llm workers should stay connected to their same usr-msg-consumer if possible. if they have no current usr-message-consumer then least-connections should be used to assign."
             }
           ]
         }
@@ -80,14 +88,20 @@
       "description": "Config keyspace /config/app-settings/ — key/value settings pushed live to watching services.",
       "values": [
         {
-          "key": "MAX_WORKERS",
+          "key": "WORKER_RATIO",
           "value": "3",
-          "createdAt": "2026-07-09T16:34:43.703Z",
-          "updatedAt": "2026-07-09T16:34:43.703Z"
+          "createdAt": "2026-07-09T21:01:27.921Z",
+          "updatedAt": "2026-07-09T21:01:27.921Z"
+        },
+        {
+          "key": "LAST_TOKEN",
+          "value": "DONE",
+          "createdAt": "2026-07-09T21:21:51.280Z",
+          "updatedAt": "2026-07-09T21:21:51.280Z"
         }
       ],
       "createdAt": "2026-07-09T16:34:43.703Z",
-      "updatedAt": "2026-07-09T16:35:11.402Z",
+      "updatedAt": "2026-07-09T21:21:51.280Z",
       "history": [
         {
           "at": "2026-07-09T16:34:43.703Z",
@@ -97,15 +111,33 @@
       "listeners": [
         {
           "service": "coordinator",
-          "description": "Watch /config/app-settings/ and keep a live in-memory config map (key -> value), updated by pushed etcd events.",
+          "description": "Watch /config/app-settings/ and keep a live in-memory config map (key -> value), updated by pushed etcd events. rebalance the mapping of usr-msg-consumer to llm-worker(s) using WORKER_RATIO from config/app-settings as a guide. there should be max WORKER_RATIO llm workers per usr-msg-consumer. when either the llm-workers, usr-msg-consumers, or WORKER_RATIO update the new assignments should be sent to the llm-workers via UpdateConsumer and sent to usr-msg-consumers via UpdateWorkers. during rebalancing, llm workers should stay connected to their same usr-msg-consumer if possible. if they have no current usr-message-consumer then least-connections should be used to assign.",
           "implemented": true,
-          "conversationId": "d1a9960c-b392-49d8-84ec-798915b88d37",
+          "conversationId": "0fdc7b68-6253-42c6-96ed-62e0cfdd5e4f",
           "createdAt": "2026-07-09T16:35:11.402Z",
-          "updatedAt": "2026-07-09T16:35:11.402Z",
+          "updatedAt": "2026-07-09T21:07:05.897Z",
           "history": [
             {
               "at": "2026-07-09T16:35:11.402Z",
               "description": "Watch /config/app-settings/ and keep a live in-memory config map (key -> value), updated by pushed etcd events."
+            },
+            {
+              "at": "2026-07-09T21:07:05.897Z",
+              "description": "Watch /config/app-settings/ and keep a live in-memory config map (key -> value), updated by pushed etcd events. rebalance the mapping of usr-msg-consumer to llm-worker(s) using WORKER_RATIO from config/app-settings as a guide. there should be max WORKER_RATIO llm workers per usr-msg-consumer. when either the llm-workers, usr-msg-consumers, or WORKER_RATIO update the new assignments should be sent to the llm-workers via UpdateConsumer and sent to usr-msg-consumers via UpdateWorkers. during rebalancing, llm workers should stay connected to their same usr-msg-consumer if possible. if they have no current usr-message-consumer then least-connections should be used to assign."
+            }
+          ]
+        },
+        {
+          "service": "llm-worker",
+          "description": "Watch /config/app-settings/ and keep a live in-memory config map (key -> value), updated by pushed etcd events. Read CONFIG['LAST_TOKEN'] (default \"DONE\") at token-emit time and stream it, in place of token id 26, as the END marker of the redis token stream tokens:<id> (whose values are the a-z characters of each generated token).",
+          "implemented": true,
+          "conversationId": "00000000-0000-0000-0000-000000000000",
+          "createdAt": "2026-07-09T00:00:00.000Z",
+          "updatedAt": "2026-07-09T00:00:00.000Z",
+          "history": [
+            {
+              "at": "2026-07-09T00:00:00.000Z",
+              "description": "Watch /config/app-settings/ and keep a live config map; read LAST_TOKEN (default \"DONE\") as the redis token stream's END marker."
             }
           ]
         }
