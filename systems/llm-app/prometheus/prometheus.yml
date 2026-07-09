@@ -47,14 +47,19 @@ scrape_configs:
         job_name: etcd,
         static_configs: [ { targets: [ etcd-1:2379, etcd-2:2379, etcd-3:2379 ] } ]
       },
-    # Instance of LLM worker "llm-worker"
+    # Scaler for LLM worker "llm-worker"
     {
-        job_name: llm-worker-2,
-        static_configs: [ { targets: [ llm-worker-2:8000 ] } ]
+        job_name: llm-worker-scaler,
+        static_configs: [ { targets: [ llm-worker-scaler:8000 ] } ]
       },
-    # Instance of LLM worker "llm-worker"
+    # Consumer group service "usr-msg-consumer" — custom service type
     {
-        job_name: llm-worker-3,
-        static_configs: [ { targets: [ llm-worker-3:8000 ] } ]
+        job_name: usr-msg-consumer,
+        static_configs: [ { targets: [ usr-msg-consumer:8000 ] } ]
+      },
+    # Scaler for consumer group service "usr-msg-consumer"
+    {
+        job_name: usr-msg-consumer-scaler,
+        static_configs: [ { targets: [ usr-msg-consumer-scaler:8000 ] } ]
       }
   ]

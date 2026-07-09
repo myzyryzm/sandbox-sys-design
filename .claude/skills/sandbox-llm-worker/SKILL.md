@@ -50,25 +50,38 @@ the stack only with `docker compose -f systems/<id>/docker-compose.yml ...`.
 | `<w>/app.py`, `<w>/model.py` | engine, loops, gRPC/HTTP wiring, transformer | **NO** — off-limits |
 | `<w>/hooks.py` | `on_cache_evict(entry)` — bind-mounted at `/app/hooks.py` | **YES** (the hook task) |
 | `<w>/worker.json` | live tunables, bind-mounted + mtime-polled (no rebuild) | via the config route / Edit tab |
+| `<w>/scaler.json` | autoscaling policy, bind-mounted into `<w>-scaler` + mtime-polled | via the policy route / Scaling tab |
 | `<w>/hook.json` | hook registry: `{ description, implemented, conversationId, history }` | you set `implemented` |
+| `<w>-scaler/*` | the scaler sidecar (utilization watcher) | **NO** — template-owned |
 | `grpc/Worker*` | the shared contract + servicer | NO (bank-owned) |
 
-`worker.json` / `hooks.py` are **single-file bind mounts — always edit them in place**
-(tmp+rename swaps the inode and detaches the mount on macOS Docker Desktop).
+`worker.json` / `scaler.json` / `hooks.py` are **single-file bind mounts — always edit them
+in place** (tmp+rename swaps the inode and detaches the mount on macOS Docker Desktop).
 
 ## Scaling: worker replicas (no load balancer)
 
 A worker can run as **N instances under one service id**, with **no load balancer** — the
 consumer that calls it does its own request forwarding across the group (see the
 [[sandbox-grpc-attach]] entry+`instanceOf` expansion). Set the count in the worker's
-Edit ▸ **Replicas** section (1 = a single worker); it POSTs
+Edit ▸ **Scaling** tab (1 = a single worker); it POSTs
 `/api/custom/llm-worker/scale {system, node, instances}` — mechanical, no launched session.
+
+The group also **autoscales**: onAdd creates a `<w>-scaler` sidecar
+(`service_type:"llm_scaler"`, `scalerOf:"<w>"`, drawn at the top of the group's stack
+carrying the group's Edit button). It polls every member's `/llm/state`, computes **batch
+utilization** = sum(active sequences) / sum(`max_active`) over reachable workers, and steps
+a desired count per `<w>/scaler.json` (`{ enabled, min, max, scale_up_util, scale_down_util,
+up_stable_seconds, down_stable_seconds, cooldown_seconds }` — live-mounted, edits apply with
+no rebuild). The dev server's apply loop reads the scaler's `/state` through the lb and
+applies `desired` via the same reconciler as the manual count — so **the member set can
+change under you while autoscaling is enabled**; disable it (Scaling tab or
+`enabled:false`) if a session needs a stable group, and re-enable after.
 
 - The base `<w>` node **stays a real serving worker**; instances `<w>-2..N` are added as
   `type:"service"`, `service_type:"llm_worker"`, `instanceOf:"<w>"` nodes, and the base
-  gains `replicas:{ instances:[…] }`. The diagram renders the group as a compact `<w>`
-  header card with all workers (`<w>-1` = the base container, `<w>-2..N`) stacked below it
-  in one dotted box.
+  gains `replicas:{ instances:[…] }`. The diagram renders the group as one dotted box:
+  the `<w>-scaler` header card on top (carrying the group's Edit button), with all workers
+  (`<w>-1` = the base container, `<w>-2..N`) stacked below it.
 - All instances **`build: ./<w>`** (one image) and bind-mount the **base's** `worker.json`,
   `hooks.py`, `grpc/`, `manifest.json` — so **config, hook and code are shared** across the
   group. They also share the one **`<w>-stream`** redis (`REDIS_HOST=<w>-stream`; tokens are

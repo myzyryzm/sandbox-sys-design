@@ -349,12 +349,6 @@
       },
       "llm": {
         "stream": "llm-worker-stream"
-      },
-      "replicas": {
-        "instances": [
-          "llm-worker-2",
-          "llm-worker-3"
-        ]
       }
     },
     {
@@ -399,13 +393,56 @@
       }
     },
     {
+      "id": "llm-worker-scaler",
+      "label": "llm-worker-scaler",
+      "type": "service",
+      "origin": "create-custom-service",
+      "service_type": "llm_scaler",
+      "scalerOf": "llm-worker",
+      "position": {
+        "x": 972,
+        "y": 344
+      },
+      "metrics": [
+        {
+          "label": "util",
+          "query": "llm_worker_utilization{job=\"llm-worker-scaler\"} or vector(0)",
+          "unit": "%",
+          "scale": 100
+        },
+        {
+          "label": "desired",
+          "query": "llm_worker_desired_replicas{job=\"llm-worker-scaler\"} or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "workers",
+          "query": "llm_worker_members{job=\"llm-worker-scaler\"} or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"llm-worker-scaler\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
+    },
+    {
       "id": "etcd",
       "label": "etcd",
       "type": "etcd",
       "origin": "create-etcd",
       "position": {
-        "x": 793,
-        "y": 619
+        "x": 763,
+        "y": 590
       },
       "etcd": {
         "size": 3,
@@ -470,56 +507,49 @@
       }
     },
     {
-      "id": "llm-worker-2",
-      "label": "llm-worker-2",
+      "id": "usr-msg-consumer",
+      "label": "usr-msg-consumer",
       "type": "service",
       "origin": "create-custom-service",
-      "service_type": "llm_worker",
-      "instanceOf": "llm-worker",
+      "service_type": "consumer_group",
+      "consumerGroup": {
+        "cluster": "user-messages-stream",
+        "groupId": "processUserMessage-group"
+      },
       "position": {
-        "x": 926,
-        "y": 230
+        "x": 1204,
+        "y": 232
       },
       "metrics": [
         {
           "label": "req/s",
-          "query": "sum(rate(http_requests_total{job=\"llm-worker-2\"}[1m]))",
+          "query": "sum(rate(http_requests_total{job=\"usr-msg-consumer\"}[1m]))",
           "unit": "/s"
         },
         {
           "label": "p95",
-          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"llm-worker-2\"}[1m])) by (le)) * 1000",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"usr-msg-consumer\"}[1m])) by (le)) * 1000",
           "unit": "ms"
         },
         {
           "label": "in-flight",
-          "query": "sum(http_requests_in_flight{job=\"llm-worker-2\"})",
+          "query": "sum(http_requests_in_flight{job=\"usr-msg-consumer\"})",
           "unit": ""
         },
         {
           "label": "errors",
-          "query": "(sum(rate(http_requests_total{job=\"llm-worker-2\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"llm-worker-2\"}[1m])), 0.0001)",
+          "query": "(sum(rate(http_requests_total{job=\"usr-msg-consumer\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"usr-msg-consumer\"}[1m])), 0.0001)",
           "unit": "%",
           "scale": 100
         },
         {
-          "label": "tokens/s",
-          "query": "sum(rate(llm_tokens_streamed_total{job=\"llm-worker-2\"}[1m])) or vector(0)",
-          "unit": "/s"
-        },
-        {
-          "label": "batch",
-          "query": "sum(llm_active_sequences{job=\"llm-worker-2\"}) or vector(0)",
-          "unit": ""
-        },
-        {
-          "label": "cached",
-          "query": "sum(llm_cached_prefixes{job=\"llm-worker-2\"}) or vector(0)",
+          "label": "lag",
+          "query": "sum(kafka_consumergroup_lag{job=\"user-messages-stream\",consumergroup=\"processUserMessage-group\"}) or vector(0)",
           "unit": ""
         }
       ],
       "health": {
-        "query": "up{job=\"llm-worker-2\"}",
+        "query": "up{job=\"usr-msg-consumer\"}",
         "rules": [
           {
             "color": "red",
@@ -530,66 +560,38 @@
             "when": "value >= 1"
           }
         ]
-      },
-      "grpc": {
-        "servers": [
-          "Worker"
-        ],
-        "clients": [],
-        "overrides": []
       }
     },
     {
-      "id": "llm-worker-3",
-      "label": "llm-worker-3",
+      "id": "usr-msg-consumer-scaler",
+      "label": "usr-msg-consumer-scaler",
       "type": "service",
       "origin": "create-custom-service",
-      "service_type": "llm_worker",
-      "instanceOf": "llm-worker",
+      "service_type": "consumer_scaler",
+      "scalerOf": "usr-msg-consumer",
       "position": {
-        "x": 926,
-        "y": 230
+        "x": 1490,
+        "y": 1034
       },
       "metrics": [
         {
-          "label": "req/s",
-          "query": "sum(rate(http_requests_total{job=\"llm-worker-3\"}[1m]))",
-          "unit": "/s"
-        },
-        {
-          "label": "p95",
-          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"llm-worker-3\"}[1m])) by (le)) * 1000",
-          "unit": "ms"
-        },
-        {
-          "label": "in-flight",
-          "query": "sum(http_requests_in_flight{job=\"llm-worker-3\"})",
+          "label": "lag",
+          "query": "consumer_group_lag_total{job=\"usr-msg-consumer-scaler\"} or vector(0)",
           "unit": ""
         },
         {
-          "label": "errors",
-          "query": "(sum(rate(http_requests_total{job=\"llm-worker-3\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"llm-worker-3\"}[1m])), 0.0001)",
-          "unit": "%",
-          "scale": 100
-        },
-        {
-          "label": "tokens/s",
-          "query": "sum(rate(llm_tokens_streamed_total{job=\"llm-worker-3\"}[1m])) or vector(0)",
-          "unit": "/s"
-        },
-        {
-          "label": "batch",
-          "query": "sum(llm_active_sequences{job=\"llm-worker-3\"}) or vector(0)",
+          "label": "desired",
+          "query": "consumer_group_desired_replicas{job=\"usr-msg-consumer-scaler\"} or vector(0)",
           "unit": ""
         },
         {
-          "label": "cached",
-          "query": "sum(llm_cached_prefixes{job=\"llm-worker-3\"}) or vector(0)",
+          "label": "members",
+          "query": "consumer_group_members{job=\"usr-msg-consumer-scaler\"} or vector(0)",
           "unit": ""
         }
       ],
       "health": {
-        "query": "up{job=\"llm-worker-3\"}",
+        "query": "up{job=\"usr-msg-consumer-scaler\"}",
         "rules": [
           {
             "color": "red",
@@ -600,13 +602,6 @@
             "when": "value >= 1"
           }
         ]
-      },
-      "grpc": {
-        "servers": [
-          "Worker"
-        ],
-        "clients": [],
-        "overrides": []
       }
     }
   ],
@@ -623,6 +618,11 @@
       "from": "llm-worker",
       "to": "llm-worker-stream",
       "origin": "create-custom-service"
+    },
+    {
+      "from": "usr-msg-consumer",
+      "to": "user-messages-stream",
+      "origin": "consumer-fn"
     }
   ],
   "boundary": {

@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+prometheus_client==0.21.1
+kafka-python
+# Worker gRPC contract (AddPrompt/GetStatus on llm-worker :50051)
+grpcio==1.68.1
+protobuf==5.28.3
+# etcd worker discovery via the v3 JSON gRPC-gateway (the etcd3 client pins
+# protobuf<4, incompatible with the protobuf 5.x the Worker stubs need)
+httpx==0.28.1

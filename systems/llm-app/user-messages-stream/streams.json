@@ -5,7 +5,14 @@
       "producers": [
         "chat-db-cdc"
       ],
-      "consumers": []
+      "consumers": [
+        {
+          "groupId": "processUserMessage-group",
+          "members": [
+            "usr-msg-consumer"
+          ]
+        }
+      ]
     }
   ]
 }

@@ -197,38 +197,6 @@ services:
       - --heartbeat-interval=100
       - --election-timeout=1000
     restart: unless-stopped
-  llm-worker-2:
-    # Instance of LLM worker "llm-worker" — no load balancer, dialed directly over gRPC
-    build: ./llm-worker
-    environment:
-      SERVICE_ID: llm-worker-2
-      REDIS_HOST: llm-worker-stream
-      ETCD_WORKER_ID: llm-worker-2
-      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
-    volumes:
-      - ./grpc:/app/grpc_pkg:ro
-      - ./manifest.json:/manifest.json:ro
-      - ./llm-worker/worker.json:/config/worker.json:ro
-      - ./llm-worker/hooks.py:/app/hooks.py:ro
-      - ./etcd.json:/etcd/etcd.json:ro
-    depends_on:
-      - llm-worker-stream
-  llm-worker-3:
-    # Instance of LLM worker "llm-worker" — request traffic over gRPC; nginx route is control-plane only
-    build: ./llm-worker
-    environment:
-      SERVICE_ID: llm-worker-3
-      REDIS_HOST: llm-worker-stream
-      ETCD_WORKER_ID: llm-worker-3
-      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
-    volumes:
-      - ./grpc:/app/grpc_pkg:ro
-      - ./manifest.json:/manifest.json:ro
-      - ./llm-worker/worker.json:/config/worker.json:ro
-      - ./llm-worker/hooks.py:/app/hooks.py:ro
-      - ./etcd.json:/etcd/etcd.json:ro
-    depends_on:
-      - llm-worker-stream
   llm-worker-scaler:
     # Scaler for LLM worker "llm-worker" — watches batch utilization, drives autoscaling
     build: ./llm-worker-scaler
@@ -241,3 +209,23 @@ services:
       - ./manifest.json:/manifest.json:ro
     depends_on:
       - llm-worker
+  usr-msg-consumer:
+    # Consumer group "processUserMessage-group" service "usr-msg-consumer" — custom service type
+    build: ./usr-msg-consumer
+    environment:
+      SERVICE_ID: usr-msg-consumer
+    volumes:
+      - ./user-messages-stream/streams.json:/streams/user-messages-stream.json:ro
+    depends_on:
+      - user-messages-stream
+  usr-msg-consumer-scaler:
+    # Scaler for consumer group service "usr-msg-consumer" — watches lag, drives autoscaling
+    build: ./usr-msg-consumer-scaler
+    environment:
+      CLUSTER: user-messages-stream
+      SERVICE_ID: usr-msg-consumer-scaler
+    volumes:
+      - ./usr-msg-consumer/scaler.json:/config/scaler.json:ro
+      - ./user-messages-stream/streams.json:/streams/user-messages-stream.json:ro
+    depends_on:
+      - user-messages-stream
