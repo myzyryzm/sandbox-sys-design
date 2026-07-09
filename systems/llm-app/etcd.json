@@ -6,7 +6,7 @@
     "electionMs": 1000,
     "leaseTtlSeconds": 15,
     "createdAt": "2026-07-08T17:57:24.765Z",
-    "updatedAt": "2026-07-08T17:57:24.765Z"
+    "updatedAt": "2026-07-09T16:07:38.188Z"
   },
   "keyspaces": [
     {
@@ -16,14 +16,100 @@
       "implemented": true,
       "conversationId": "77c34876-353d-4b7a-8698-25f6af36ec79",
       "createdAt": "2026-07-08T19:23:43.945Z",
-      "updatedAt": "2026-07-08T19:26:54.939Z",
+      "updatedAt": "2026-07-09T14:53:21.732Z",
       "history": [
         {
           "at": "2026-07-08T19:23:43.945Z",
           "description": "Register each llm-worker worker under /services/llm-worker/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set."
         }
       ],
-      "listeners": []
+      "listeners": [
+        {
+          "service": "coordinator",
+          "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events.",
+          "implemented": true,
+          "conversationId": "a43fb6b0-0e4d-409b-ba37-ed08cb9e0adc",
+          "createdAt": "2026-07-09T14:53:21.732Z",
+          "updatedAt": "2026-07-09T14:53:21.732Z",
+          "history": [
+            {
+              "at": "2026-07-09T14:53:21.732Z",
+              "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events."
+            }
+          ]
+        }
+      ],
+      "type": "discovery"
+    },
+    {
+      "service": "usr-msg-consumer",
+      "prefix": "/services/usr-msg-consumer/",
+      "description": "Register each usr-msg-consumer worker under /services/usr-msg-consumer/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set.",
+      "implemented": true,
+      "conversationId": "2f689fe6-aba0-496d-bd89-e890a222fd71",
+      "createdAt": "2026-07-09T14:24:56.177Z",
+      "updatedAt": "2026-07-09T14:53:38.688Z",
+      "history": [
+        {
+          "at": "2026-07-09T14:24:56.177Z",
+          "description": "Register each usr-msg-consumer worker under /services/usr-msg-consumer/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set."
+        }
+      ],
+      "listeners": [
+        {
+          "service": "coordinator",
+          "description": "Watch /services/usr-msg-consumer/ and keep a live in-memory map of usr-msg-consumer workers (worker id -> host:port), updated by pushed etcd events.",
+          "implemented": true,
+          "conversationId": "cfc3dbea-08de-46f5-a6b5-11077a17df62",
+          "createdAt": "2026-07-09T14:53:38.688Z",
+          "updatedAt": "2026-07-09T14:53:38.688Z",
+          "history": [
+            {
+              "at": "2026-07-09T14:53:38.688Z",
+              "description": "Watch /services/usr-msg-consumer/ and keep a live in-memory map of usr-msg-consumer workers (worker id -> host:port), updated by pushed etcd events."
+            }
+          ]
+        }
+      ],
+      "type": "discovery"
+    },
+    {
+      "type": "config",
+      "name": "app-settings",
+      "prefix": "/config/app-settings/",
+      "description": "Config keyspace /config/app-settings/ — key/value settings pushed live to watching services.",
+      "values": [
+        {
+          "key": "MAX_WORKERS",
+          "value": "3",
+          "createdAt": "2026-07-09T16:34:43.703Z",
+          "updatedAt": "2026-07-09T16:34:43.703Z"
+        }
+      ],
+      "createdAt": "2026-07-09T16:34:43.703Z",
+      "updatedAt": "2026-07-09T16:35:11.402Z",
+      "history": [
+        {
+          "at": "2026-07-09T16:34:43.703Z",
+          "description": "Config keyspace /config/app-settings/ — key/value settings pushed live to watching services."
+        }
+      ],
+      "listeners": [
+        {
+          "service": "coordinator",
+          "description": "Watch /config/app-settings/ and keep a live in-memory config map (key -> value), updated by pushed etcd events.",
+          "implemented": true,
+          "conversationId": "d1a9960c-b392-49d8-84ec-798915b88d37",
+          "createdAt": "2026-07-09T16:35:11.402Z",
+          "updatedAt": "2026-07-09T16:35:11.402Z",
+          "history": [
+            {
+              "at": "2026-07-09T16:35:11.402Z",
+              "description": "Watch /config/app-settings/ and keep a live in-memory config map (key -> value), updated by pushed etcd events."
+            }
+          ]
+        }
+      ]
     }
   ]
 }

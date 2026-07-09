@@ -36,7 +36,9 @@ body {
 header {
   flex: 0 0 auto;
   display: flex;
-  align-items: baseline;
+  /* center (not baseline): the drag-toggle button is an inline-flex box that synthesizes its
+     baseline from its bottom edge, so baseline alignment floated it above the plain-text buttons. */
+  align-items: center;
   gap: 12px;
   margin-bottom: 20px;
 }
@@ -758,6 +760,18 @@ h1 {
   font-weight: 700;
 }
 
+/* A consumer-function "PULL" badge, tinted to match the amber consume edge (.consume-edge /
+   CONSUME_COLOR) it traces, so the row and its line read as the same relationship. */
+.endpoint-method-consume {
+  fill: #e0a44f;
+}
+
+/* A served-gRPC-method "RPC" badge, tinted to match the purple gRPC edge (.grpc-edge /
+   GRPC_COLOR) its trace lights up, so the row and its caller lines read as the same thing. */
+.endpoint-method-rpc {
+  fill: #b18cf2;
+}
+
 .endpoint-empty {
   fill: var(--muted);
   font-size: 11px;
@@ -1012,6 +1026,62 @@ h1 {
   cursor: default;
 }
 
+/* Node "Edit" modal: tabs live in a vertical, independently-scrollable side
+   menu instead of a top strip. Scoped classes so the shared .modal-tabs /
+   .modal-tab rules (also used by WsSharedMethodsModal) stay a top strip. */
+.modal-card.node-edit-modal {
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 96px); /* 96px = overlay's 48px top+bottom padding */
+}
+
+.node-edit-modal .modal-head {
+  flex-shrink: 0;
+}
+
+.modal-body-split {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-height: 0; /* let children shrink so overflow works */
+  overflow: hidden;
+}
+
+.modal-tabs-side {
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: none;
+  border-right: 1px solid #2a2e37;
+  margin-bottom: 0;
+  padding-right: 8px;
+  overflow-y: auto;
+  flex-shrink: 0;
+  min-width: 132px;
+}
+
+.modal-tabs-side .modal-tab {
+  text-align: left;
+  border-bottom: none;
+  border-left: 2px solid transparent;
+  margin-bottom: 0;
+  white-space: nowrap;
+}
+
+.modal-tabs-side .modal-tab.active {
+  border-left-color: #6ea8fe;
+}
+
+.modal-tabs-side .modal-tab.danger.active {
+  border-left-color: #c62828;
+}
+
+.modal-tab-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
 .form-row {
   display: flex;
   align-items: center;
@@ -1183,6 +1253,11 @@ h1 {
   color: #6ea8fe;
   font-weight: 700;
   min-width: 52px;
+}
+
+/* Consumer-function "PULL" badge in the list, amber to match its diagram row + consume edge. */
+.endpoint-list-method-consume {
+  color: #e0a44f;
 }
 
 .endpoint-list-path {
@@ -2106,12 +2181,11 @@ h1 {
   fill: none;
 }
 
-/* A Kafka consume edge (consumer service -> the cluster it reads from). Amber + a tighter dash
-   than .grpc-edge so it's distinct from a solid-gray producer/dep edge that points the same way. */
+/* A Kafka consume edge (consumer service -> the cluster it reads from). Solid amber so it's
+   distinct from a solid-gray producer/dep edge that points the same way (color, not dash). */
 .consume-edge {
   stroke: #e0a44f;
   stroke-width: 2;
-  stroke-dasharray: 3 3;
   fill: none;
 }
 
@@ -2375,6 +2449,16 @@ h1 {
   stroke-width: 1.5;
   stroke-dasharray: 3 3;
   opacity: 0.7;
+}
+/* Always-on etcd discovery wiring (registrant → etcd → listeners), derived live from
+   etcd.json. Faint + dashed so it stays subordinate to the bright click-trace that lights
+   the same relationship (see the keyspace-trace block in SystemDiagram.jsx). */
+.etcd-edge {
+  stroke: #5aa0c0;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  fill: none;
+  opacity: 0.6;
 }
 /* Per-node bitmap grid drawn inside the node box (SVG). */
 .dc-node-cell {

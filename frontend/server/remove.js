@@ -271,7 +271,9 @@ function readJson(file) {
 // Drop etcd keyspaces owned by a removed service and listener entries naming one, so
 // the discovery registry never references nodes that no longer exist. (Deleting a
 // keyspace owner with LISTENERS is blocked by findDependents; this prunes the
-// unwatched leftovers + the removed service's own listener entries.)
+// unwatched leftovers + the removed service's own listener entries.) Config keyspaces
+// have no `service` (removedIds.has(undefined) is false) so they always survive —
+// only their listener entries get pruned.
 function pruneEtcd(system, removedIds) {
   const file = path.join(systemDir(system), 'etcd.json')
   const data = readJson(file)
@@ -399,7 +401,9 @@ function findDependents(system, manifest, id, kind, cascadeIds = new Set()) {
 
   // etcd — deleting the CLUSTER is blocked while any keyspace still has a registered
   // owner or listeners (their app.py loops point at it); deleting a SERVICE that owns
-  // a keyspace is blocked while other services still watch that keyspace.
+  // a keyspace is blocked while other services still watch that keyspace. Config
+  // keyspaces have no owner (ks.service undefined → skip() is true) — they never
+  // block by themselves, but their listeners still do.
   const etcdReg = readJson(path.join(dir, 'etcd.json'))
   const etcdKeyspaces = etcdReg && Array.isArray(etcdReg.keyspaces) ? etcdReg.keyspaces : []
   if (kind === 'etcd') {

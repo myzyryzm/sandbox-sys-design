@@ -57,12 +57,17 @@ const COLOR_HEX = {
 const TRACE_COLOR = '#6ea8fe'
 const GRPC_COLOR = '#b18cf2'
 const REPLICA_COLOR = '#3fb6a8'
-// Kafka "consume" edge (a consumer service → the cluster it reads from). Amber + dashed so it
+// Kafka "consume" edge (a consumer service → the cluster it reads from). Solid amber so it
 // reads as distinct from a solid-gray producer/dep edge that points the same way (into the cluster).
 const CONSUME_COLOR = '#e0a44f'
 // Base dependency-edge color (matches `.edge` in styles.css) — reused for the arrowhead
 // on the collapsed websocket-fleet in/out edges.
 const EDGE_COLOR = '#5b6270'
+// etcd discovery-wiring edge (registrant → etcd lease-put, etcd → listener watch). A muted
+// cyan, distinct from the brighter trace blue / gRPC purple / replica teal; drawn faint +
+// dashed (see `.etcd-edge`) so the always-on discovery topology stays subordinate to the
+// bright click-trace that lights the same relationship.
+const ETCD_COLOR = '#5aa0c0'
 // When A→B and B→A both exist, each line is nudged this many px perpendicular to its
 // axis so the two opposing arrows render as separate parallel lines instead of overlapping.
 const EDGE_PARALLEL_OFFSET = 7
@@ -70,6 +75,16 @@ const EDGE_PARALLEL_OFFSET = 7
 // A synthetic trace endpoint standing for a websocket tier's whole server fleet (its dotted
 // box), so a lifecycle trace collapses the relay fan-out into one hop into the box and one hop
 // out per downstream — matching the collapsed base edges. Not a real manifest node id.
+// An etcd node's KEY row labels its keyspace by the registrant service's name,
+// camelCased (`llm-worker` → `llmWorker`) — friendlier than the /services/<name>/ prefix.
+const camelName = (id) => id.replace(/-+([a-z0-9])/g, (_, c) => c.toUpperCase())
+// A listening service's SUB row names its subscription after the etcd KEY it watches,
+// `on`-prefixed like an event handler (`llm-worker` → `onLlmWorker`, `app-settings` → `onAppSettings`).
+const onName = (id) => {
+  const c = camelName(id)
+  return 'on' + c.charAt(0).toUpperCase() + c.slice(1)
+}
+
 const WS_FLEET_PREFIX = 'ws-fleet:'
 const wsFleetId = (tier) => `${WS_FLEET_PREFIX}${tier}`
 const isFleetId = (id) => typeof id === 'string' && id.startsWith(WS_FLEET_PREFIX)
@@ -391,6 +406,20 @@ export default function SystemDiagram({
   keyspaceTrace = null,
   onSelectKeyspace,
   onClearKeyspaceTrace,
+  // Trace ONE subscription (a service's SUB row): registrant → etcd → that one listener.
+  // Reuses keyspaceTrace with a single-listener `listeners` + a `focus` marker.
+  onSelectSubscription,
+  // The gRPC contract registry (systems/<id>/grpc/_registry.json via /api/grpc-contracts) as
+  // [{ name, methods:[{ name, … }] }]. A service that SERVES a contract (its manifest
+  // `grpc.servers` lists the name) draws one clickable RPC row per method of that contract —
+  // the method names live here, not on the node. Empty when nothing in the system serves gRPC.
+  grpcContracts = [],
+  // A selected served RPC method, traced each caller (a service dialing this contract with this
+  // server in its `grpc.clients[].targets`) → this server. Mutually exclusive with the other
+  // traces. Set via onSelectRpc, cleared via onClearRpcTrace.
+  rpcTrace = null,
+  onSelectRpc,
+  onClearRpcTrace,
 }) {
   const [selectedKey, setSelectedKey] = useState(null)
   // Index of the trace hop whose description popup is open (or null). Reset whenever the active
@@ -546,19 +575,48 @@ export default function SystemDiagram({
       { label: 'last run', value: wsStats[id].ts ? new Date(wsStats[id].ts).toLocaleTimeString() : '—' },
     ].map((r) => ({ kind: 'wsstat', ...r }))
   }
-  // An etcd cluster's keyspaces, dropping any whose registrant service no longer exists (so a
-  // deleted service can't leave a dangling KEY row that traces to nothing).
-  const keyspacesOf = (id) => (etcdKeyspaces[id] || []).filter((k) => byId[k.service])
+  // An etcd cluster's keyspaces, dropping any DISCOVERY keyspace whose registrant service no
+  // longer exists (so a deleted service can't leave a dangling KEY row that traces to nothing).
+  // Config keyspaces have no registrant and always render.
+  const keyspacesOf = (id) => (etcdKeyspaces[id] || []).filter((k) => k.type === 'config' || byId[k.service])
+  // A SERVICE's etcd subscriptions: every keyspace (across all etcd clusters) whose
+  // `listeners` include this service. Each becomes a clickable SUB row on the service node
+  // (the mirror image of the etcd node's KEY rows) that traces registrant → etcd → this
+  // service. Returns { etcdId, ks } so the row's click knows which cluster owns the keyspace.
+  const subscriptionsOf = (id) =>
+    Object.entries(etcdKeyspaces).flatMap(([etcdId, kss]) =>
+      (kss || [])
+        .filter((ks) => (ks.listeners || []).some((l) => l.service === id))
+        .map((ks) => ({ etcdId, ks })),
+    )
+  // A service's SERVED gRPC methods: for each contract its manifest `grpc.servers` lists, one
+  // row per method of that contract (method names come from the registry, not the node). Only a
+  // server-role attachment produces rows — a pure client (`grpc.clients` only) serves nothing,
+  // and group instances (`instanceOf`) never carry the block, so both list nothing here.
+  const grpcMethodsByContract = new Map((grpcContracts || []).map((c) => [c.name, c.methods || []]))
+  const rpcsOf = (id) => {
+    const servers = byId[id]?.grpc?.servers || []
+    if (!servers.length) return []
+    return servers.flatMap((contract) =>
+      (grpcMethodsByContract.get(contract) || []).map((m) => ({ contract, method: m.name })),
+    )
+  }
   const rowsOf = (node) => {
     if (!node) return []
     return [
       ...methodsOf(node.id).map((e) => ({ kind: 'method', e })),
+      // Served RPC rows sit with the HTTP endpoints — both are callable surfaces this service
+      // exposes. Like CONS/SUB, a worker group serves from its base container, so the virtual
+      // `<name>-1` member card renders them (stateKey = the base id that carries the grpc block).
+      ...rpcsOf(node.groupVirtual ? node.stateKey : node.id).map((r) => ({ kind: 'rpc', ...r })),
       ...functionsOf(node.id).map((fn) => ({ kind: 'fn', fn })),
       // A worker group's base renders as a bare Edit button, so its CONS rows live on
       // the virtual `<name>-1` member card instead (stateKey = the base id). Real
       // instances stay row-less — one row per group, not per member.
       ...consumersOf(node.groupVirtual ? node.stateKey : node.id).map((c) => ({ kind: 'cons', c })),
       ...keyspacesOf(node.id).map((ks) => ({ kind: 'ks', ks })),
+      // A service's etcd subscriptions (SUB rows), anchored on the real node like CONS rows.
+      ...subscriptionsOf(node.groupVirtual ? node.stateKey : node.id).map((s) => ({ kind: 'sub', ...s })),
       ...wsStatRowsOf(node.id),
     ]
   }
@@ -568,6 +626,30 @@ export default function SystemDiagram({
   // module is asked once for the whole system; an edge is { from, to, label?, className? }.
   const customModules = [...new Set(Object.values(CUSTOM_TYPES))]
   const customEdges = customModules.flatMap((m) => m.diagramEdges?.({ manifest, customState }) || [])
+
+  // etcd discovery wiring as ALWAYS-ON faint arrows, derived live from etcd.json (etcdKeyspaces)
+  // — the persistent mirror of the click-trace: each discovery keyspace's registrant service →
+  // its etcd cluster (the leased-key keepalive in), and etcd → each listener service (the watch
+  // push out). Config keyspaces have no registrant, so they contribute only the listener edges.
+  // Deduped per (from,to): a service listening on many keyspaces draws ONE arrow, and a worker
+  // registering draws ONE arrow regardless of instance count. Nodes that no longer exist are
+  // skipped (a deleted registrant/listener can't leave a dangling arrow). These are pure render
+  // state — there are no matching manifest edges (see the keyspace-trace block below).
+  const etcdEdgeMap = new Map() // "from->to" -> { from, to, kind }
+  for (const [etcdId, kss] of Object.entries(etcdKeyspaces)) {
+    if (!byId[etcdId]) continue
+    for (const ks of kss || []) {
+      if (ks.type !== 'config' && ks.service && byId[ks.service]) {
+        etcdEdgeMap.set(`${ks.service}->${etcdId}`, { from: ks.service, to: etcdId, kind: 'register' })
+      }
+      for (const l of ks.listeners || []) {
+        if (l.service && byId[l.service]) {
+          etcdEdgeMap.set(`${etcdId}->${l.service}`, { from: etcdId, to: l.service, kind: 'watch' })
+        }
+      }
+    }
+  }
+  const etcdEdges = [...etcdEdgeMap.values()]
 
   // Layout helpers that fold in a node's live custom-type runtime (so a custom body band
   // reserves the right vertical space and edges hit the recomputed center). A group base
@@ -909,7 +991,11 @@ export default function SystemDiagram({
   const ct = consumerTrace && byId[consumerTrace.cluster] && byId[consumerTrace.service] ? consumerTrace : null
   // A keyspace trace highlights the discovery flow around the etcd cluster: registrant → etcd
   // (the lease-put keepalive in) and etcd → each listener (the watch push out).
-  const kt = keyspaceTrace && byId[keyspaceTrace.etcd] && byId[keyspaceTrace.service] ? keyspaceTrace : null
+  const kt = keyspaceTrace && byId[keyspaceTrace.etcd] &&
+    (keyspaceTrace.type === 'config' || byId[keyspaceTrace.service]) ? keyspaceTrace : null
+  // A served-RPC trace lights the server and every caller → server gRPC edge. The server node
+  // it points at must still exist. Mutually exclusive with the other traces (App nulls the rest).
+  const rpct = rpcTrace && byId[rpcTrace.service] ? rpcTrace : null
   if (ft && ft.wsBuiltin) {
     // A ws pool client's builtin method has no authored steps — trace the TIER path
     // instead: client → its L4 lb → each relay server → the bus + presence redis.
@@ -1033,10 +1119,34 @@ export default function SystemDiagram({
     // Registrant service → etcd (each worker keeps a leased key alive under the prefix), then
     // etcd → each listener (updates are PUSHED over the watch stream — no polling). The arrows
     // exist only while the keyspace row is selected; there are no permanent manifest edges.
+    // A config keyspace has no registrant (the app writes its persistent values), so only the
+    // etcd → listener watch edges are drawn.
     const listeners = (kt.listeners || []).filter((l) => byId[l])
-    traceNodes = new Set([kt.service, kt.etcd, ...listeners])
-    traceEdges.push([kt.service, kt.etcd, `lease-put ${kt.prefix}<worker> · TTL keepalive`])
+    if (kt.type === 'config') {
+      traceNodes = new Set([kt.etcd, ...listeners])
+    } else {
+      traceNodes = new Set([kt.service, kt.etcd, ...listeners])
+      traceEdges.push([kt.service, kt.etcd, `lease-put ${kt.prefix}<worker> · TTL keepalive`])
+    }
     for (const l of listeners) traceEdges.push([kt.etcd, l, `watch ${kt.prefix} (pushed)`])
+  } else if (rpct) {
+    // A served gRPC method: light the server and draw each caller → server edge — every service
+    // whose manifest `grpc.clients` dials this contract with this server in its `targets`. gRPC
+    // is server-driven (the caller opens the channel), so the arrows point caller → server, the
+    // same direction as the permanent gRPC edges. No callers yet → the server alone is lit,
+    // still showing it's the RPC endpoint.
+    const ids = new Set([rpct.service])
+    for (const n of nodes) {
+      if (n.id === rpct.service) continue
+      const dials = (n.grpc?.clients || []).some(
+        (c) => c.contract === rpct.contract && (c.targets || []).includes(rpct.service),
+      )
+      if (dials) {
+        ids.add(n.id)
+        traceEdges.push([n.id, rpct.service, `gRPC ${rpct.contract}.${rpct.method}`])
+      }
+    }
+    traceNodes = ids
   } else if (selected && lbNode) {
     const ids = new Set([lbNode.id, selected.service, ...(selected.downstream || [])])
     // Extend the trace back to the clients that actually call this endpoint:
@@ -1191,6 +1301,20 @@ export default function SystemDiagram({
   const worldH = height * PAN_FACTOR
 
   const dimmed = (id) => traceNodes && !traceNodes.has(id)
+
+  // Node-aware dim test. A trace set only ever carries BASE ids (a service name, a cluster
+  // entry) — never the member cards the group is actually drawn as: the `<base>-scaler`
+  // sidecar (scalerOf), the render-only virtual `<base>::1` (instanceOf/stateKey), and any
+  // real `<base>-N` instances (instanceOf). Keying dim purely on `node.id` therefore fades
+  // every visible card of a worker group / LB cluster whenever a method that touches its
+  // base is selected. Resolve a member card up to its base so selecting such a method lights
+  // up the WHOLE group. See groupVirtuals, isSvcInstance, and the scaler's scalerOf.
+  const dimmedNode = (node) => {
+    if (!traceNodes) return false
+    return ![node.id, node.instanceOf, node.scalerOf, node.stateKey]
+      .filter(Boolean)
+      .some((id) => traceNodes.has(id))
+  }
 
   // Every (service, method) a traced function calls — used to light up each called method
   // row across multiple services at once (as if the user clicked each one).
@@ -1398,7 +1522,7 @@ export default function SystemDiagram({
   // endpoint / function / consumer), so a leftover popup index can't render against a new trace.
   useEffect(() => {
     setOpenInfo(null)
-  }, [methodTrace, functionTrace, consumerTrace, selectedKey])
+  }, [methodTrace, functionTrace, consumerTrace, rpcTrace, selectedKey])
 
   // ctrl/cmd + wheel (and trackpad pinch, which browsers deliver as wheel+ctrlKey) zooms toward the
   // cursor; plain wheel falls through to native scroll (pan). React's onWheel is passive so its
@@ -1500,6 +1624,18 @@ export default function SystemDiagram({
           orient="auto-start-reverse"
         >
           <path d="M 0 0 L 10 5 L 0 10 z" fill={CONSUME_COLOR} />
+        </marker>
+        {/* Arrowhead for the always-on etcd discovery edges (registrant → etcd → listeners). */}
+        <marker
+          id="etcd-arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0 0 L 10 5 L 0 10 z" fill={ETCD_COLOR} />
         </marker>
         {/* Arrowhead for the collapsed websocket-fleet in/out edges (same color as `.edge`). */}
         <marker
@@ -1741,6 +1877,33 @@ export default function SystemDiagram({
         )
       })}
 
+      {/* etcd discovery wiring: always-on faint dashed arrows for the registrant → etcd (lease
+          keepalive) and etcd → listener (watch) relationships, so the discovery topology reads
+          off the static diagram instead of only appearing while a KEY row is selected. Border-to-
+          border like the trace edges; dim during any active trace so the bright click-trace (which
+          lights the same relationship) stands out over the faint underlay. */}
+      {etcdEdges.map(({ from, to, kind }) => {
+        if (!byId[from] || !byId[to]) return null
+        const { a, b } = traceLine(from, to)
+        return (
+          <line
+            key={`etcd-edge-${from}-${to}`}
+            x1={a.x}
+            y1={a.y}
+            x2={b.x}
+            y2={b.y}
+            className={`etcd-edge${traceNodes ? ' dim' : ''}`}
+            markerEnd="url(#etcd-arrow)"
+          >
+            <title>
+              {kind === 'register'
+                ? `etcd discovery · ${from} registers → ${to} (lease keepalive)`
+                : `etcd discovery · ${from} → ${to} watches`}
+            </title>
+          </line>
+        )
+      })}
+
       {/* Highlighted trace edges (only while a trace is selected). Each line runs border-to-border
           (see traceLine) so the arrowhead is visible at the target and the midpoint stays in the
           gap between the boxes. The sequence badges + info buttons that sit at each midpoint are
@@ -1779,7 +1942,7 @@ export default function SystemDiagram({
         // All per-node actions (schema/topics/endpoints/gRPC/shutdown/delete) now live
         // behind the bottom "Edit" button, so the node body itself is no longer clickable.
         const p = effPos(node)
-        const gClass = [dimmed(node.id) ? 'dim' : '', dragMode ? 'draggable' : ''].filter(Boolean).join(' ') || undefined
+        const gClass = [dimmedNode(node) ? 'dim' : '', dragMode ? 'draggable' : ''].filter(Boolean).join(' ') || undefined
 
         // A worker group's base node renders NOTHING when the group has a scaler — the
         // scaler card occupies the base's position as the stack header and carries the
@@ -2057,7 +2220,8 @@ export default function SystemDiagram({
               }
               if (row.kind === 'cons') {
                 // A Kafka consumer function: clicking it traces the consume edge service → cluster.
-                // "CONS" stands in for the GET/POST method badge an HTTP row would show. On a
+                // "PULL" stands in for the GET/POST method badge an HTTP row would show, tinted to
+                // match the consume edge (CONSUME_COLOR) it traces. On a
                 // virtual group-member card the OWNER is the base node (stateKey) — the trace
                 // must anchor on a real manifest node.
                 const c = row.c
@@ -2081,20 +2245,26 @@ export default function SystemDiagram({
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
-                      <tspan className="endpoint-method">CONS</tspan> {c.name}
+                      <tspan className="endpoint-method endpoint-method-consume">PULL</tspan> {c.name}
                     </text>
                   </g>
                 )
               }
               if (row.kind === 'ks') {
                 // An etcd keyspace: clicking it traces registrant → etcd (lease-put) and
-                // etcd → each listener (watch push). "KEY" stands in for the method badge.
+                // etcd → each listener (watch push); a config keyspace has no registrant, so
+                // its trace is etcd → listeners only. "KEY" stands in for the method badge.
                 const ks = row.ks
+                const ident = ks.type === 'config' ? ks.name : ks.service
+                // Active for BOTH a full KEY-row trace and a focused subscription (SUB row)
+                // trace of the same keyspace — clicking a service's SUB row also lights the
+                // matching KEY on etcd.
                 const active =
-                  !!keyspaceTrace && keyspaceTrace.etcd === node.id && keyspaceTrace.service === ks.service
+                  !!keyspaceTrace && keyspaceTrace.etcd === node.id &&
+                  (ks.type === 'config' ? keyspaceTrace.name === ks.name : keyspaceTrace.service === ks.service)
                 return (
                   <g
-                    key={`ks-${ks.service}`}
+                    key={`ks-${ident}`}
                     className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
                     onClick={dragMode ? undefined : (ev) => {
                       ev.stopPropagation()
@@ -2109,7 +2279,75 @@ export default function SystemDiagram({
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
-                      <tspan className="endpoint-method">KEY</tspan> {ks.prefix}
+                      <tspan className="endpoint-method">KEY</tspan> {camelName(ident)}
+                    </text>
+                  </g>
+                )
+              }
+              if (row.kind === 'sub') {
+                // A service's etcd subscription: clicking it traces just this one watch —
+                // registrant → etcd → this service (a config keyspace has no registrant, so
+                // etcd → this service only). "SUB" stands in for the method badge; the name is
+                // the KEY it watches, `on`-prefixed. On a virtual group-member card the OWNER is
+                // the base node (stateKey), matching the CONS rows.
+                const ks = row.ks
+                const etcdId = row.etcdId
+                const owner = node.stateKey || node.id
+                const ident = ks.type === 'config' ? ks.name : ks.service
+                const active =
+                  !!keyspaceTrace && keyspaceTrace.etcd === etcdId && keyspaceTrace.focus === owner &&
+                  (ks.type === 'config' ? keyspaceTrace.name === ks.name : keyspaceTrace.service === ks.service)
+                return (
+                  <g
+                    key={`sub-${etcdId}-${ident}`}
+                    className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      // A subscription trace is exclusive with the LB / method / function / consumer selections.
+                      setSelectedKey(null)
+                      onClearMethodTrace?.()
+                      onClearFunctionTrace?.()
+                      onClearConsumerTrace?.()
+                      if (active) onClearKeyspaceTrace?.()
+                      else onSelectSubscription?.(ks, etcdId, owner)
+                    }}
+                  >
+                    <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={y + 12} className="endpoint-row">
+                      <tspan className="endpoint-method">SUB</tspan> {onName(ident)}
+                    </text>
+                  </g>
+                )
+              }
+              if (row.kind === 'rpc') {
+                // A SERVED gRPC method (this service is in the contract's server set). Clicking it
+                // traces each caller → this server. "RPC" stands in for the HTTP method badge,
+                // tinted purple to match the gRPC edges it lights; the name is the RPC method. On a
+                // virtual group-member card the OWNER is the base node (stateKey), which carries the
+                // grpc block and is the real manifest node the trace must anchor on — like CONS/SUB.
+                const owner = node.stateKey || node.id
+                const active =
+                  !!rpcTrace && rpcTrace.service === owner &&
+                  rpcTrace.contract === row.contract && rpcTrace.method === row.method
+                return (
+                  <g
+                    key={`rpc-${row.contract}-${row.method}`}
+                    className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      // An RPC trace is exclusive with the LB / method / function / consumer / keyspace selections.
+                      setSelectedKey(null)
+                      onClearMethodTrace?.()
+                      onClearFunctionTrace?.()
+                      onClearConsumerTrace?.()
+                      onClearKeyspaceTrace?.()
+                      if (active) onClearRpcTrace?.()
+                      else onSelectRpc?.(row, owner)
+                    }}
+                  >
+                    <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={y + 12} className="endpoint-row">
+                      <tspan className="endpoint-method endpoint-method-rpc">RPC</tspan> {row.method}
                     </text>
                   </g>
                 )

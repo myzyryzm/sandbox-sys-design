@@ -13,6 +13,7 @@ import WsClientMethodsTab from './WsClientMethodsTab.jsx'
 import ConsumerTab from './ConsumerTab.jsx'
 import EtcdClusterTab from './EtcdClusterTab.jsx'
 import EtcdKeyspacesTab from './EtcdKeyspacesTab.jsx'
+import ServiceSubscribersTab from './ServiceSubscribersTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
 import ServiceLbTab from './ServiceLbTab.jsx'
 import { customTypeOf } from './customTypes/index.js'
@@ -72,6 +73,11 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     // sidecar is HTTP-only and its backend rejects custom services — such a service
     // scales through its OWN tab (client-side, no load balancer) instead.
     if (!node.service_type) tabs.push({ id: 'lb', label: 'Load Balancing', Component: ServiceLbTab })
+    // Subscribers: the etcd keyspaces this service watches (its SUB rows on the diagram),
+    // where new subscriptions are added/implemented. Only shown when the system has an etcd
+    // cluster to subscribe to; custom-typed services can subscribe too (no service_type guard).
+    const hasEtcd = (manifest?.nodes || []).some((n) => n.type === 'etcd')
+    if (hasEtcd) tabs.push({ id: 'subscribers', label: 'Subscribers', Component: ServiceSubscribersTab })
   } else if (isExternal) {
     // External services expose an HTTP API (the third party's endpoints) but never gRPC
     // contracts. The Functions "trigger bank" is client-only, so they have no Functions tab —
@@ -252,7 +258,7 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
 
   return (
     <div className="modal-overlay" onClick={dismiss}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-card node-edit-modal" onClick={(e) => e.stopPropagation()}>
         <header className="modal-head">
           <h2>
             Edit · <code>{node.label}</code>
@@ -260,27 +266,31 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
           <button className="modal-close" onClick={onClose} disabled={busy}>✕</button>
         </header>
 
-        <div className="modal-tabs" role="tablist">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={active === t.id}
-              className={[
-                'modal-tab',
-                active === t.id ? 'active' : '',
-                t.danger ? 'danger' : '',
-              ].filter(Boolean).join(' ')}
-              disabled={busy && active !== t.id}
-              onClick={() => setActive(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <div className="modal-body-split">
+          <div className="modal-tabs modal-tabs-side" role="tablist">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={active === t.id}
+                className={[
+                  'modal-tab',
+                  active === t.id ? 'active' : '',
+                  t.danger ? 'danger' : '',
+                ].filter(Boolean).join(' ')}
+                disabled={busy && active !== t.id}
+                onClick={() => setActive(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
 
-        {renderTab()}
+          <div className="modal-tab-content">
+            {renderTab()}
+          </div>
+        </div>
       </div>
     </div>
   )

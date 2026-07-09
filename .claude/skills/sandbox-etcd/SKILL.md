@@ -1,16 +1,19 @@
 ---
 name: sandbox-etcd
 description: >-
-  Wire real etcd service discovery in a "Distributed Systems Sandbox" system
-  (systems/<id>/). Use whenever the task is to implement or update a service's
-  REGISTRATION with the etcd cluster (each worker keeps a leased key alive under
-  /services/<service>/) or a LISTENER on a keyspace (a watch_prefix loop keeping a
-  live in-memory worker map, updated by pushed etcd events), or to remove either —
-  it covers the etcd.json registry, the pre-wired compose env/mount, the pinned
-  python client deps, the registration/watcher loop contracts (survive cluster
-  recreation, TTL re-read by mtime), and the docker rebuild/verify steps. The
-  cluster itself (N members, Raft knobs, member stop/start) is provisioned and
-  reconfigured by the web app — not by sessions.
+  Wire real etcd service discovery and config watching in a "Distributed Systems
+  Sandbox" system (systems/<id>/). Use whenever the task is to implement or update a
+  service's REGISTRATION with the etcd cluster (each worker keeps a leased key alive
+  under /services/<service>/), a LISTENER on a discovery keyspace (a watch_prefix
+  loop keeping a live in-memory worker map, updated by pushed etcd events), or a
+  CONFIG LISTENER on a config keyspace (/config/<name>/ — persistent app-written
+  key/values, no lease; the same watch loop maintaining a live config map), or to
+  remove any of these — it covers the etcd.json registry, the pre-wired compose
+  env/mount, the pinned python client deps, the registration/watcher loop contracts
+  (survive cluster recreation, TTL re-read by mtime), and the docker rebuild/verify
+  steps. The cluster itself (N members, Raft knobs, member stop/start) AND config
+  keyspace values (edited in the Keyspaces tab, replayed after a recreate) are
+  managed by the web app — not by sessions.
 ---
 
 # Working on sandbox etcd service discovery
@@ -24,27 +27,36 @@ Rebuild with `docker compose` directly (commands below).
 The etcd cluster is a real N-member Raft cluster (N odd — 3/5/7 — one container per
 member, `<etcd>-1..N`, no host ports). The app's "Add etcd" flow (`POST /api/etcd`,
 `frontend/server/etcd.js`) provisions it; the Cluster tab reconfigures it. **Sessions
-never create or resize the cluster** — your job is the CODE half of discovery: the
+never create or resize the cluster, and never create config keyspaces or write their
+values** (the Keyspaces tab does, via etcdctl) — your job is the CODE half: the
 registration loop in a registering service and the watch loop in a listener. Related:
 [[sandbox-event-stream]] consumer functions follow the same mechanical-scaffold-then-
 session split; [[sandbox-endpoint]] covers plain routes.
 
 ## The five places etcd lives (working dir is the repo root)
 
-1. `systems/<id>/etcd.json` — the **discovery registry** AND the live tunables file:
+1. `systems/<id>/etcd.json` — the **keyspace registry** AND the live tunables file:
    ```json
    { "cluster": { "id": "etcd", "size": 3, "heartbeatMs": 100, "electionMs": 1000,
                   "leaseTtlSeconds": 15 },
      "keyspaces": [
-       { "service": "workers", "prefix": "/services/workers/", "description": "…",
-         "implemented": false, "conversationId": "…", "history": [ … ],
+       { "type": "discovery", "service": "workers", "prefix": "/services/workers/",
+         "description": "…", "implemented": false, "conversationId": "…", "history": [ … ],
+         "listeners": [ { "service": "api", "description": "…", "implemented": false } ] },
+       { "type": "config", "name": "app-settings", "prefix": "/config/app-settings/",
+         "description": "…", "values": [ { "key": "LOG_LEVEL", "value": "info" } ],
          "listeners": [ { "service": "api", "description": "…", "implemented": false } ] } ] }
    ```
-   The app writes everything here EXCEPT the `implemented` flags — **you** flip one to
-   `true` after the matching loop is written, rebuilt, and verified (an app edit never
-   resets it). Registering services get this file bind-mounted read-only at
-   `/etcd/etcd.json`; their keepalive loop **re-reads `leaseTtlSeconds` by mtime** so a
-   TTL change in the UI applies live with no rebuild.
+   Two keyspace types (entries without `type` are discovery): **discovery** (identity =
+   `service`, leased worker keys) and **config** (identity = `name`, persistent
+   key/values the app writes via etcdctl — no lease, no registrant, no
+   implemented/conversationId on the keyspace itself; the `values` array is the durable
+   copy the app replays into a recreated cluster). The app writes everything here EXCEPT
+   the `implemented` flags — **you** flip one to `true` after the matching loop is
+   written, rebuilt, and verified (an app edit never resets it). Registering services
+   get this file bind-mounted read-only at `/etcd/etcd.json`; their keepalive loop
+   **re-reads `leaseTtlSeconds` by mtime** so a TTL change in the UI applies live with
+   no rebuild.
 2. `systems/<id>/docker-compose.yml` — N member services `<etcd>-1..N`
    (`gcr.io/etcd-development/etcd:v3.5.21`, static `--initial-cluster` bootstrap, the
    Raft knobs as flags, **no data volume** — a recreate is deliberately a fresh cluster).
@@ -63,10 +75,13 @@ session split; [[sandbox-endpoint]] covers plain routes.
    and discovery arrows are drawn only while a KEY row is selected on the diagram — the
    trace comes from etcd.json, not `manifest.edges`.
 
-Conventions: keyspace prefix is always `/services/<service>/`; each worker registers
-`<prefix><worker-id>` with value `"<container-dns>:8000"`; worker id comes from
+Conventions: a discovery keyspace's prefix is always `/services/<service>/`; each worker
+registers `<prefix><worker-id>` with value `"<container-dns>:8000"`; worker id comes from
 `ETCD_WORKER_ID` (`<service>-1` for a plain service; a load-balanced service's instances
-are `<service>-1..N` and each registers itself — the app maintains per-instance env).
+are `<service>-1..N` and each registers itself — the app maintains per-instance env). A
+config keyspace's prefix is always `/config/<name>/`; its keys are persistent (no lease),
+written by the web app via etcdctl, and replayed by the app after a cluster recreate —
+sessions only ever WATCH them (see "Config keyspaces" below).
 
 ## Talking to etcd from the host
 
@@ -188,7 +203,23 @@ Contract — a **daemon thread**, one per watched keyspace; etcd **pushes** ever
 over the watch stream (this is stock etcd watch — **never poll** the prefix):
 
 ```python
+import traceback   # stdlib — for the per-event handler isolation wrapper
+
 WORKERS: dict[str, str] = {}   # worker id -> host:port — the live view other code reads
+
+def on_<keyspace>(event_type, key, value, workers):
+    """Per-event handler, authored from the listener's DESCRIPTION. Runs once per pushed
+    change, AFTER the map is updated: event_type is "put"/"delete", value is the new value
+    (None on delete), workers is the live map. MUST NOT block or raise (see _fire)."""
+    ...   # description-specific behavior (may be a no-op if the description is map-only)
+
+def _fire(handler, event_type, key, value, current_map):
+    # Isolate the authored handler: it runs on the watch's callback thread, so a slow or
+    # raising handler must never stall/kill the watch or trip the sweep into a resync storm.
+    try:
+        handler(event_type, key, value, current_map)
+    except Exception:
+        traceback.print_exc()            # logged to stdout, swallowed — delivery continues
 
 def _watch_workers():
     prefix = "/services/<keyspace>/"
@@ -202,12 +233,16 @@ def _watch_workers():
                 for ev in resp.events:
                     wid = ev.key.decode()[len(prefix):]
                     if isinstance(ev, etcd3.events.PutEvent):
-                        WORKERS[wid] = ev.value.decode()
+                        val = ev.value.decode()
+                        WORKERS[wid] = val                              # 1) map (base)
+                        _fire(on_<keyspace>, "put", wid, val, WORKERS)  # 2) then handler
                     else:                # DeleteEvent: explicit delete OR lease expiry
                         WORKERS.pop(wid, None)
+                        _fire(on_<keyspace>, "delete", wid, None, WORKERS)
 
             client.add_watch_prefix_callback(prefix, _apply)
-            # baseline AFTER the watch is armed, so no change can fall in the gap
+            # baseline AFTER the watch is armed, so no change can fall in the gap —
+            # do NOT fire the handler for these keys (only for pushed events above)
             fresh = {m.key.decode()[len(prefix):]: v.decode()
                      for v, m in client.get_prefix(prefix)}
             WORKERS.clear(); WORKERS.update(fresh)
@@ -250,18 +285,76 @@ threading.Thread(target=_watch_workers, daemon=True).start()
 - Same deps, same rebuild (incl. the lb force-recreate), then flip this **listener's**
   `"implemented": true` in `etcd.json` (under its keyspace's `listeners`).
 
+### Per-event handler (the trigger)
+
+Beyond keeping the live map, a listener runs a **per-event handler** — the code the listener's
+*description* asks for, fired once per pushed change. Author
+`def on_<keyspace>(event_type, key, value, current_map)` (snake_case, matching the diagram's
+SUB-row label — `llm-worker` → `on_llm_worker`) and invoke it **inside `_apply`, after the map
+mutation, for pushed events only** — never for the baseline `get_prefix` keys, or every resync
+re-fires side effects. `event_type` is `"put"`/`"delete"`, `value` is the new value or `None` on
+a delete, `current_map` is the live map. It runs on the watch's **callback thread**, so it must
+not block (that stalls delivery for the whole keyspace) and must not raise: wrap every call in
+`_fire(...)` (a try/except that logs and swallows). An unguarded throw kills the watch thread; the
+map then goes stale and the 30s sweep force-resyncs on every event — a resync storm. **The map
+maintenance is the non-negotiable base; the handler is strictly additive** — it may be a no-op
+when the description asks only for a live map.
+
+## Config keyspaces & the config watcher loop
+
+A **config keyspace** (`type: "config"` in etcd.json, prefix `/config/<name>/`) is a
+generic key/value keyspace — env vars, settings, feature flags. There is **no
+registration half**: the web app writes the values itself with etcdctl when a human
+edits them in the Keyspaces tab, as **persistent keys (no lease)**, and keeps the
+durable copy in the keyspace's `values` array so a cluster recreate can be replayed
+(`PUT /api/etcd` re-puts every value into the fresh cluster). Sessions are only ever
+asked to author its **listeners**.
+
+A config listener is the same watcher-loop contract as above with three differences:
+
+- The map holds config, not workers — name it accordingly:
+  ```python
+  CONFIG: dict[str, str] = {}   # key -> value — the live settings other code reads
+  ```
+  and the prefix is `"/config/<name>/"`. Apply the values however the listener's
+  description says (e.g. read `CONFIG.get("LOG_LEVEL", "info")` at use time — never
+  cache a value outside the map, or the push is pointless).
+- A **DeleteEvent only ever means an explicit key delete** (there are no leases to
+  expire). Everything else is identical — including the stale-watch trap and the 30s
+  anti-entropy sweep, which is also what picks the replayed values back up if a watch
+  went stale across a cluster recreate.
+- The debug route is `/config/<name>`:
+  ```python
+  @app.get("/config/<name>")
+  def config_view():
+      return {"keyspace": "/config/<name>/", "config": dict(CONFIG)}
+  ```
+- It takes the **same per-event handler seam** as a discovery listener — author
+  `def on_<name>(event_type, key, value, config)` and `_fire` it inside `_apply` after the map
+  update, for pushed events only, exactly as above. Here a `"delete"` only ever means an explicit
+  key delete (no leases). Same rule: never block or raise on the callback thread.
+
+Same deps, same rebuild, then flip this listener's `"implemented": true` under the
+config keyspace's `listeners` in `etcd.json`. Verify by editing a value in the
+Keyspaces tab and watching the map update at watch latency (no rebuild, no poll).
+
 ## Update / delete
 
 - **Update** (description changed): read the existing loop first, modify in place, keep
-  everything else untouched, rebuild that one service. The registry entry is already
-  updated by the app; `implemented` stays true.
+  everything else untouched, rebuild that one service. For a **listener** the description is
+  the body of the per-event handler, so an update re-authors `on_<keyspace>` in place — leave
+  the map maintenance and everything else alone. The registry entry is already updated by the
+  app; `implemented` stays true.
 - **Delete**: the app has already removed the registry entry and scrubbed the compose
-  env/mount (`wasImplemented` told the frontend to launch you). Strip the loop (and the
-  `/discovery/*` route for a listener; drop the etcd deps from requirements.txt only if
+  env/mount (`wasImplemented` told the frontend to launch you). Strip the loop, its
+  `on_<keyspace>` handler and the `_fire` helper if unused elsewhere (and the `/discovery/*`
+  or `/config/*` route for a listener; drop the etcd deps from requirements.txt only if
   nothing else in that service uses them), rebuild that one service.
-- The app BLOCKS deleting a keyspace that still has listeners, deleting a watched
-  service, and deleting the cluster while keyspaces exist (`remove.js` dependents) — so
-  you'll never be asked to orphan a watcher.
+- The app BLOCKS deleting a keyspace that still has listeners (config ones included),
+  deleting a watched service, and deleting the cluster while keyspaces exist
+  (`remove.js` dependents) — so you'll never be asked to orphan a watcher. Deleting a
+  config keyspace with no listeners is pure data (registry entry + a best-effort
+  etcdctl prefix delete) and launches no session.
 
 ## Verify
 
@@ -278,6 +371,11 @@ docker compose -f $COMPOSE start <service>
 curl -s http://localhost:8080/<listener>/discovery/<service>
 # 5. push, not poll: watch from the host while killing/starting a worker
 docker compose -f $COMPOSE exec -T etcd-1 etcdctl watch --prefix /services/<service>/
+# 6. config keyspace: the persistent values are on the cluster…
+docker compose -f $COMPOSE exec -T etcd-1 etcdctl get --prefix /config/<name>/
+# 7. …and a config listener's map tracks a tab edit at watch latency
+docker compose -f $COMPOSE exec -T etcd-1 etcdctl watch --prefix /config/<name>/  # then edit a value in the tab
+curl -s http://localhost:8080/<listener>/config/<name>
 ```
 
 The UI-side checks: the etcd node's `keys` metric counts the worker keys; the Keyspaces

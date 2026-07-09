@@ -537,7 +537,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
             const confirming = confirmKey === k
             return (
               <li key={k} className="endpoint-list-row">
-                <span className="endpoint-list-method">CONS</span>
+                <span className="endpoint-list-method endpoint-list-method-consume">PULL</span>
                 <code className="endpoint-alias">{c.name}</code>
                 <span className="endpoint-list-path" title={`consumer group: ${c.groupId}`}>
                   {c.service} ← {c.topic} · {c.pollRate}ms · <code>{c.groupId}</code>

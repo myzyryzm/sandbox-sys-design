@@ -42,11 +42,6 @@ scrape_configs:
         job_name: llm-worker-stream,
         static_configs: [ { targets: [ llm-worker-stream-exporter:9121 ] } ]
       },
-    # etcd cluster "etcd" — added by Add etcd
-    {
-        job_name: etcd,
-        static_configs: [ { targets: [ etcd-1:2379, etcd-2:2379, etcd-3:2379 ] } ]
-      },
     # Scaler for LLM worker "llm-worker"
     {
         job_name: llm-worker-scaler,
@@ -61,5 +56,15 @@ scrape_configs:
     {
         job_name: usr-msg-consumer-scaler,
         static_configs: [ { targets: [ usr-msg-consumer-scaler:8000 ] } ]
+      },
+    # Service "coordinator" — added by Add service
+    {
+        job_name: coordinator,
+        static_configs: [ { targets: [ coordinator:8000 ] } ]
+      },
+    # etcd cluster "etcd" — added by Add etcd
+    {
+        job_name: etcd,
+        static_configs: [ { targets: [ etcd-1:2379, etcd-2:2379, etcd-3:2379 ] } ]
       }
   ]

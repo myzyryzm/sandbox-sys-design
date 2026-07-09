@@ -19,6 +19,14 @@ import { repoRoot, systemsDir, isValidSystem } from './systems.js'
 // tell the browser, which auto-advances the edit queue. Interactive `claude` never
 // exits when a task finishes, so this is the only reliable "task done" signal.
 const DONE_TOKEN = '<<<SANDBOX_QUEUE_DONE>>>'
+
+// Model + reasoning effort for every editing session we launch. These sessions do
+// real judgment work (authoring FastAPI routes, DB schemas, .proto servicers) with
+// the full manifest inlined, so we pin the strongest model at max thinking. Set
+// explicitly (not left to the host's global settings) so the sandbox behaves the
+// same for anyone running it. `opus[1m]` keeps the 1M-token context so a large
+// manifest + skill files don't crowd out the actual task.
+const MODEL_ARGS = ['--model', 'opus[1m]', '--effort', 'xhigh']
 const DONE_INSTRUCTION = `
 
 --- EDIT QUEUE PROTOCOL ---
@@ -170,6 +178,8 @@ export default function claudeTerminal() {
         } else {
           args = ['--append-system-prompt', buildSystemPrompt(id)]
         }
+        // Pin model + effort ahead of the mode-specific flags for every session.
+        args = [...MODEL_ARGS, ...args]
 
         const pty = nodePty.spawn('claude', args, {
           name: 'xterm-256color',

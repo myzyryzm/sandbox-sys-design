@@ -33,11 +33,12 @@ export default {
     url: (sys) => `/api/custom/consumer-group/state?system=${encodeURIComponent(sys)}`,
   },
 
-  // The scaler's /state is the control-plane read the tab + apply loop poll — internal
-  // (off the load balancer's public surface) and locked from edit/delete.
+  // The scaler's /state is the control-plane read the tab + apply loop poll — pure
+  // plumbing (its state already renders in the Scaling tab card), so it's hidden
+  // from the endpoint lists entirely.
   endpointPolicy(node, p) {
     if (node.service_type === 'consumer_scaler' && p === '/state') {
-      return { visibility: 'internal', locked: true }
+      return { visibility: 'hidden', locked: true }
     }
     return null
   },

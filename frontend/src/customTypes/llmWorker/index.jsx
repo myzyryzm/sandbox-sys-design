@@ -39,15 +39,17 @@ export default {
   },
 
   // /llm/state (worker) and /state (scaler) are the control-plane reads the tabs +
-  // apply loop poll — internal (off the load balancer's public surface) and locked
-  // from edit/delete. Everything else falls through to the generic classification
+  // apply loop poll — never part of any client surface. The worker's stays listed
+  // as a locked internal route; the scaler's is pure plumbing (its state already
+  // renders in the Scaling tab card), so it's hidden from the endpoint lists
+  // entirely. Everything else falls through to the generic classification
   // (/health, /metrics, …).
   endpointPolicy(node, p) {
     if (node.service_type === 'llm_worker' && p === '/llm/state') {
       return { visibility: 'internal', locked: true }
     }
     if (node.service_type === 'llm_scaler' && p === '/state') {
-      return { visibility: 'internal', locked: true }
+      return { visibility: 'hidden', locked: true }
     }
     return null
   },

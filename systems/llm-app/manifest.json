@@ -65,8 +65,8 @@
       "type": "postgres",
       "origin": "create-database",
       "position": {
-        "x": 50,
-        "y": 779
+        "x": 25,
+        "y": 1107
       },
       "metrics": [
         {
@@ -108,8 +108,8 @@
       "type": "postgres",
       "origin": "create-database",
       "position": {
-        "x": 470,
-        "y": 809
+        "x": 440,
+        "y": 1072
       },
       "metrics": [
         {
@@ -153,8 +153,8 @@
       "type": "service",
       "origin": "create-service",
       "position": {
-        "x": 65,
-        "y": 464
+        "x": 40,
+        "y": 671
       },
       "metrics": [
         {
@@ -245,8 +245,8 @@
       "origin": "create-cdc",
       "cdcOf": "chat-db",
       "position": {
-        "x": 833,
-        "y": 833
+        "x": 902,
+        "y": 1090
       },
       "metrics": [
         {
@@ -358,8 +358,8 @@
       "origin": "create-custom-service",
       "streamOf": "llm-worker",
       "position": {
-        "x": 292,
-        "y": 251
+        "x": 266,
+        "y": 249
       },
       "metrics": [
         {
@@ -441,8 +441,8 @@
       "type": "etcd",
       "origin": "create-etcd",
       "position": {
-        "x": 763,
-        "y": 590
+        "x": 694,
+        "y": 831
       },
       "etcd": {
         "size": 3,
@@ -603,6 +603,52 @@
           }
         ]
       }
+    },
+    {
+      "id": "coordinator",
+      "label": "coordinator",
+      "type": "service",
+      "origin": "create-service",
+      "position": {
+        "x": 395,
+        "y": 559
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"coordinator\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"coordinator\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"coordinator\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"coordinator\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"coordinator\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        }
+      ],
+      "health": {
+        "query": "up{job=\"coordinator\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
     }
   ],
   "edges": [
@@ -629,6 +675,6 @@
     "x": -36,
     "y": 117,
     "w": 1499,
-    "h": 857
+    "h": 1142
   }
 }

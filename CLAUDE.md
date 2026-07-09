@@ -135,17 +135,22 @@ rebuild** (the frontend re-reads them on a timer):
   consumer functions** (identity `(service, name)`). The registry entry + consumer-group + manifest edge
   are written live; the actual background poll loop is authored into that service's `app.py` by a
   launched session, which sets `implemented:true` (`frontend/server/consumers.js`).
-- `etcd.json` — `{ cluster:{ id, size, heartbeatMs, electionMs, leaseTtlSeconds }, keyspaces:[{
-  service, prefix, description, implemented, conversationId, history, listeners:[{ service,
-  description, implemented, conversationId, history }] }] }`, the etcd cluster config + **service
-  discovery** registry (`frontend/server/etcd.js`). One keyspace per registered service
-  (`/services/<service>/`); each of its workers keeps a **leased key** alive there (value
-  `host:port`), and listeners run a real etcd **watch** (pushed updates, no polling). Registry entry
-  + compose env/mount (`ETCD_WORKER_ID`, `ETCD_ENDPOINTS`, `etcd.json:ro`) are written live; the
-  lease-keepalive / watch loops are authored by launched sessions (the `sandbox-etcd` skill) which
-  set `implemented:true`. The file is mounted read-only into registrants so a **lease-TTL change
-  applies live** (mtime re-read, no rebuild); size/Raft-knob changes recreate the member containers
-  (leased keys are ephemeral — the loops re-register on reconnect).
+- `etcd.json` — `{ cluster:{ id, size, heartbeatMs, electionMs, leaseTtlSeconds }, keyspaces:[…] }`,
+  the etcd cluster config + **keyspace** registry (`frontend/server/etcd.js`). Two keyspace types
+  (entries without `type` are discovery). **Discovery** (`type:"discovery"`, identity = `service`,
+  prefix `/services/<service>/`): `{ service, prefix, description, implemented, conversationId,
+  history, listeners:[{ service, description, implemented, conversationId, history }] }` — each of
+  the service's workers keeps a **leased key** alive there (value `host:port`). **Config**
+  (`type:"config"`, identity = `name`, prefix `/config/<name>/`): `{ name, prefix, description,
+  values:[{ key, value }], listeners:[…] }` — generic **persistent key/values** (env vars, configs)
+  edited in the Keyspaces tab; the backend puts them via etcdctl (no lease, no session) and replays
+  the `values` copy into a recreated cluster. Either type's listeners run a real etcd **watch**
+  (pushed updates, no polling). Registry entry + compose env/mount (`ETCD_WORKER_ID`,
+  `ETCD_ENDPOINTS`, `etcd.json:ro`) are written live; the lease-keepalive / watch loops are authored
+  by launched sessions (the `sandbox-etcd` skill) which set `implemented:true`. The file is mounted
+  read-only into registrants so a **lease-TTL change applies live** (mtime re-read, no rebuild);
+  size/Raft-knob changes recreate the member containers (leased keys are ephemeral — the loops
+  re-register on reconnect; config values are replayed by the backend).
 - `<db>/seeds.json` — `{ tables:[{ table, rows:[…] }] }`, durable fixture rows for a postgres/mongo DB.
   Applied **live** to the running container and regenerated into an idempotent `<db>/seed.sql|seed.js`
   that's mounted after the schema init script, so a from-scratch rebuild replays them

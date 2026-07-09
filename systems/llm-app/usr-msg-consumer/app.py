@@ -335,3 +335,73 @@ def _consume_processUserMessage():
 
 
 threading.Thread(target=_consume_processUserMessage, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# etcd registration (sandbox-etcd skill)
+#
+# Each usr-msg-consumer worker keeps a leased key alive under
+# /services/usr-msg-consumer/ (value "<container-dns>:8000") so listeners
+# discover the live worker set. Talks to etcd through the same v3 JSON
+# gRPC-gateway as the llm-worker discovery above (the etcd3 client pins
+# protobuf<4, incompatible with the protobuf 5.x the Worker stubs need).
+# ---------------------------------------------------------------------------
+
+import socket
+
+ETCD_SERVICE = "usr-msg-consumer"
+ETCD_WORKER_ID = os.environ.get("ETCD_WORKER_ID", socket.gethostname())
+
+_ETCD_CFG = "/etcd/etcd.json"
+_ttl_cache = {"mtime": 0.0, "ttl": 15}
+
+
+def _lease_ttl():
+    try:
+        m = os.stat(_ETCD_CFG).st_mtime
+        if m != _ttl_cache["mtime"]:
+            with open(_ETCD_CFG) as f:
+                ttl = int(json.load(f)["cluster"]["leaseTtlSeconds"])
+            _ttl_cache.update(mtime=m, ttl=ttl)
+    except Exception:
+        pass  # keep last good value
+    return _ttl_cache["ttl"]
+
+
+def _register_worker():
+    key = f"/services/{ETCD_SERVICE}/{ETCD_WORKER_ID}"
+    # Value is this container's OWN compose DNS name: the group's WORKER_ID is
+    # usr-msg-consumer-1 but no such host exists — the container resolves as
+    # SERVICE_ID, correct for the base and every scaled member alike.
+    value = f"{os.environ['SERVICE_ID']}:8000"
+    while True:
+        try:
+            host, port = random.choice(ETCD_ENDPOINTS).split(":")
+            ttl = _lease_ttl()
+            with httpx.Client(base_url=f"http://{host}:{port}", timeout=5) as c:
+                grant = c.post("/v3/lease/grant", json={"TTL": str(ttl)})
+                grant.raise_for_status()
+                lease_id = grant.json()["ID"]
+                put = c.post(
+                    "/v3/kv/put",
+                    json={"key": _b64(key), "value": _b64(value), "lease": lease_id},
+                )
+                put.raise_for_status()
+                while True:
+                    time.sleep(max(1, ttl / 3))
+                    if _lease_ttl() != ttl:
+                        break  # TTL changed in the UI -> re-grant with the new TTL
+                    # A vanished lease (cluster recreated) is NOT an error: the
+                    # gateway keepalives an unknown lease and returns TTL 0
+                    # instead of failing, so check the returned TTL.
+                    ka = c.post("/v3/lease/keepalive", json={"ID": lease_id})
+                    ka.raise_for_status()
+                    new_ttl = int(ka.json().get("result", {}).get("TTL", 0) or 0)
+                    if new_ttl <= 0:
+                        break  # lease vanished -> re-grant + re-put
+        except Exception:
+            time.sleep(2)  # quorum lost / member down / connect failure
+        # fall through: reconnect (maybe another member), re-grant, re-put
+
+
+threading.Thread(target=_register_worker, daemon=True).start()

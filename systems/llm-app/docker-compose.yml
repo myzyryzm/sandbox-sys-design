@@ -149,7 +149,6 @@ services:
     depends_on:
       - llm-worker-stream
   etcd-1:
-    # etcd cluster "etcd" — added by Add etcd
     image: gcr.io/etcd-development/etcd:v3.5.21
     command:
       - /usr/local/bin/etcd
@@ -161,7 +160,7 @@ services:
       - --initial-advertise-peer-urls=http://etcd-1:2380
       - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
       - --initial-cluster-state=new
-      - --initial-cluster-token=etcd-1783533444765
+      - --initial-cluster-token=etcd-1783613258188
       - --heartbeat-interval=100
       - --election-timeout=1000
     restart: unless-stopped
@@ -177,7 +176,7 @@ services:
       - --initial-advertise-peer-urls=http://etcd-2:2380
       - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
       - --initial-cluster-state=new
-      - --initial-cluster-token=etcd-1783533444765
+      - --initial-cluster-token=etcd-1783613258188
       - --heartbeat-interval=100
       - --election-timeout=1000
     restart: unless-stopped
@@ -193,7 +192,7 @@ services:
       - --initial-advertise-peer-urls=http://etcd-3:2380
       - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
       - --initial-cluster-state=new
-      - --initial-cluster-token=etcd-1783533444765
+      - --initial-cluster-token=etcd-1783613258188
       - --heartbeat-interval=100
       - --election-timeout=1000
     restart: unless-stopped
@@ -214,8 +213,11 @@ services:
     build: ./usr-msg-consumer
     environment:
       SERVICE_ID: usr-msg-consumer
+      ETCD_WORKER_ID: usr-msg-consumer-1
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
     volumes:
       - ./user-messages-stream/streams.json:/streams/user-messages-stream.json:ro
+      - ./etcd.json:/etcd/etcd.json:ro
     depends_on:
       - user-messages-stream
   usr-msg-consumer-scaler:
@@ -229,3 +231,8 @@ services:
       - ./user-messages-stream/streams.json:/streams/user-messages-stream.json:ro
     depends_on:
       - user-messages-stream
+  coordinator:
+    # Service "coordinator" — added by Add service (generic FastAPI backend)
+    build: ./coordinator
+    environment:
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379

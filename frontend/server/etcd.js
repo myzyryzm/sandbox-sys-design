@@ -1,5 +1,6 @@
 // Vite dev-server plugin: provision and manage the system's etcd cluster — real
-// service discovery (leased-key registration + watch) on a real N-member Raft cluster.
+// service discovery (leased-key registration + watch) and config keyspaces
+// (persistent key/values pushed to watchers) on a real N-member Raft cluster.
 //
 //   POST /api/etcd  { system, name, size, heartbeatMs, electionMs, leaseTtlSeconds }
 //     -> creates N etcd member containers (<name>-1..N, static bootstrap), a
@@ -21,16 +22,29 @@
 //        re-bootstrap cleanly) and force-recreates the cluster; leased keys are
 //        ephemeral by design and every registration loop re-registers on reconnect.
 //   POST /api/etcd/keyspace  { system, id, service, description?, conversationId? }
-//     -> upsert the keyspace /services/<service>/ (identity = service; one keyspace
-//        per service). MECHANICAL half only, mirroring consumers.js: the registry
-//        entry (implemented:false, Claude flips it) + the compose edits on the
-//        registering container(s) (mount etcd.json:ro, ETCD_WORKER_ID,
+//     -> upsert the DISCOVERY keyspace /services/<service>/ (identity = service; one
+//        keyspace per service). MECHANICAL half only, mirroring consumers.js: the
+//        registry entry (implemented:false, Claude flips it) + the compose edits on
+//        the registering container(s) (mount etcd.json:ro, ETCD_WORKER_ID,
 //        ETCD_ENDPOINTS). The lease+put+keepalive loop in the service's app.py is
 //        authored by a launched Claude session (sandbox-etcd skill).
-//   DELETE /api/etcd/keyspace { system, id, service }
+//   POST /api/etcd/keyspace  { system, id, type:"config", name, description?, values? }
+//     -> upsert a CONFIG keyspace /config/<name>/ (identity = name, shared with the
+//        discovery identities) — a generic key/value keyspace (env vars, configs)
+//        with NO registrant: the app writes the values itself (persistent keys, no
+//        lease) via etcdctl, so there is no compose edit and no launched session.
+//        `values` seeds [{ key, value }] on create; later edits go key-at-a-time
+//        through /api/etcd/keyvalue.
+//   DELETE /api/etcd/keyspace { system, id, service | name }
 //     -> remove the keyspace. 400 while other services still listen to it. Returns
 //        { ok, removed, wasImplemented } so the frontend knows whether a session is
-//        needed to strip the registration loop.
+//        needed to strip the registration loop (always false for config keyspaces).
+//   POST /api/etcd/keyvalue  { system, id, keyspace, key, value }
+//   DELETE /api/etcd/keyvalue { system, id, keyspace, key }
+//     -> put/delete ONE key in a config keyspace: etcdctl against the live cluster
+//        first (watchers get the change pushed), then the registry copy in
+//        etcd.json — which is what makes the values survive a cluster recreate
+//        (the PUT raft path replays them into the fresh cluster).
 //   POST /api/etcd/listener  { system, id, keyspace, service, description?, conversationId? }
 //     -> upsert a listener (identity = (keyspace, service)): registry entry +
 //        ETCD_ENDPOINTS on the listener's container(s). The watch_prefix loop is
@@ -73,6 +87,11 @@ const ELECTION_FACTOR = 5 // election timeout must be >= 5x heartbeat or electio
 const TTL_MIN = 2
 const TTL_MAX = 3600
 const MAX_DESC = 4000
+// Config-keyspace keys are a single etcd path segment (env-style names allowed, no
+// slash); values are arbitrary strings. Both only ever reach etcdctl as execFile
+// argv elements — never a shell string.
+const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
+const MAX_VALUE = 4096
 
 const quorumOf = (size) => Math.floor(size / 2) + 1
 
@@ -90,14 +109,28 @@ function etcdFile(system) {
 function readEtcd(system) {
   try {
     const raw = JSON.parse(fs.readFileSync(etcdFile(system), 'utf8'))
+    const keyspaces = (Array.isArray(raw?.keyspaces) ? raw.keyspaces : []).filter(
+      (k) => k && typeof k === 'object',
+    )
+    // Entries predate the `type` field: anything not explicitly config is discovery.
+    for (const k of keyspaces) {
+      k.type = k.type === 'config' ? 'config' : 'discovery'
+      if (k.type === 'config' && !Array.isArray(k.values)) k.values = []
+    }
     return {
       cluster: raw?.cluster && typeof raw.cluster === 'object' ? raw.cluster : null,
-      keyspaces: Array.isArray(raw?.keyspaces) ? raw.keyspaces : [],
+      keyspaces,
     }
   } catch {
     return { cluster: null, keyspaces: [] }
   }
 }
+
+// A keyspace's identity: discovery keyspaces are keyed by their registering
+// service, config keyspaces by their name. One shared namespace (enforced on
+// create in both directions) so every by-identity lookup stays unambiguous.
+const ksIdentity = (ks) => (ks.type === 'config' ? ks.name : ks.service)
+const configPrefix = (name) => `/config/${name}/`
 function writeEtcd(system, data) {
   fs.writeFileSync(etcdFile(system), JSON.stringify(data, null, 2) + '\n')
 }
@@ -386,28 +419,107 @@ async function probeMembers(system, members) {
   return Promise.all(probes)
 }
 
-// Every /services/... key currently on the cluster, via the first healthy member.
-// --consistency=s (serializable, local read) so worker listing still works from a
-// quorum-less minority. etcdctl -w json base64-encodes keys/values — decoded here.
-async function probeWorkers(system, members, healthyIds) {
+// Every key under the given prefix roots (/services/, /config/, …), via the first
+// member that answers. --consistency=s (serializable, local read) so the listing
+// still works from a quorum-less minority. etcdctl -w json base64-encodes
+// keys/values — decoded here.
+async function probeWorkers(system, members, healthyIds, roots = ['/services/']) {
   const order = [...healthyIds, ...members.filter((m) => !healthyIds.includes(m))]
   for (const m of order) {
     try {
-      const { stdout } = await pexec(
-        'docker',
-        composeArgs(system, 'exec', '-T', m, 'etcdctl', '--command-timeout=3s', 'get', '--prefix', '/services/', '-w', 'json', '--consistency=s'),
-        EXEC_OPTS,
-      )
-      const kvs = JSON.parse(stdout)?.kvs || []
-      return kvs.map((kv) => ({
-        key: Buffer.from(kv.key, 'base64').toString('utf8'),
-        value: Buffer.from(kv.value || '', 'base64').toString('utf8'),
-      }))
+      const all = []
+      for (const root of roots) {
+        const { stdout } = await pexec(
+          'docker',
+          composeArgs(system, 'exec', '-T', m, 'etcdctl', '--command-timeout=3s', 'get', '--prefix', root, '-w', 'json', '--consistency=s'),
+          EXEC_OPTS,
+        )
+        const kvs = JSON.parse(stdout)?.kvs || []
+        all.push(...kvs.map((kv) => ({
+          key: Buffer.from(kv.key, 'base64').toString('utf8'),
+          value: Buffer.from(kv.value || '', 'base64').toString('utf8'),
+        })))
+      }
+      return all
     } catch {
       /* try the next member */
     }
   }
   return null
+}
+
+// --- config-keyspace writes (etcdctl through a member) -------------------------------
+
+// Run one etcdctl write through the first member that accepts it. Keys/values are
+// validated (KEY_RE / MAX_VALUE) AND passed as execFile argv after a `--`
+// end-of-flags guard, so browser input can never read as an option or shell text.
+async function etcdctlWrite(system, members, args) {
+  let lastErr = null
+  for (const m of members) {
+    try {
+      await pexec(
+        'docker',
+        composeArgs(system, 'exec', '-T', m, 'etcdctl', '--command-timeout=5s', ...args),
+        EXEC_OPTS,
+      )
+      return
+    } catch (err) {
+      lastErr = err
+    }
+  }
+  const detail = `${lastErr?.stdout || ''}${lastErr?.stderr || ''}` || lastErr?.message || 'no members reachable'
+  throw new HttpError(500, `etcdctl ${args[0]} failed on every member (quorum lost?):\n${detail}`)
+}
+
+const etcdctlPut = (system, members, key, value) =>
+  etcdctlWrite(system, members, ['put', '--', key, value])
+const etcdctlDel = (system, members, key, { prefix = false } = {}) =>
+  etcdctlWrite(system, members, prefix ? ['del', '--prefix', '--', key] : ['del', '--', key])
+
+// Writes commit only through a leader. After a force-recreate the fresh members
+// need to bootstrap + elect before puts succeed — poll generously (image pulls and
+// slow machines stretch it). Returns the members healthy-first for the put loop.
+async function waitForLeader(system, members, { attempts = 30, delayMs = 2000 } = {}) {
+  let status = []
+  for (let i = 0; i < attempts; i++) {
+    status = await probeMembers(system, members)
+    if (status.some((m) => m.isLeader)) {
+      const healthy = status.filter((m) => m.healthy).map((m) => m.id)
+      return [...healthy, ...members.filter((m) => !healthy.includes(m))]
+    }
+    await new Promise((r) => setTimeout(r, delayMs))
+  }
+  const healthy = status.filter((m) => m.healthy).length
+  throw new HttpError(
+    500,
+    `etcd has no leader after ${Math.round((attempts * delayMs) / 1000)}s (${healthy}/${members.length} members healthy)`,
+  )
+}
+
+// Re-put every config keyspace's values after a member-set recreate (the fresh
+// cluster bootstrapped empty; leased discovery keys re-register on their own but
+// config values only live in etcd.json). NEVER throws: the reconfigure itself
+// succeeded and the values persist in the registry — any later value save retries
+// the put — so a failure here is reported on the response, not fatal.
+async function replayConfigValues(system, keyspaces, members) {
+  const withValues = keyspaces.filter(
+    (k) => k?.type === 'config' && Array.isArray(k.values) && k.values.length,
+  )
+  if (!withValues.length) return { ok: true, replayed: 0 }
+  if (process.env.ETCD_SKIP_REBUILD === '1') return { ok: true, replayed: 0 }
+  let replayed = 0
+  try {
+    const order = await waitForLeader(system, members)
+    for (const ks of withValues) {
+      for (const v of ks.values) {
+        await etcdctlPut(system, order, ks.prefix + v.key, v.value)
+        replayed++
+      }
+    }
+    return { ok: true, replayed }
+  } catch (err) {
+    return { ok: false, replayed, error: err.message }
+  }
 }
 
 async function getCluster(system, id, { checkLive = true } = {}) {
@@ -423,7 +535,17 @@ async function getCluster(system, id, { checkLive = true } = {}) {
   let kvs = null
   if (checkLive) {
     memberStatus = await probeMembers(system, members)
-    kvs = await probeWorkers(system, members, memberStatus.filter((m) => m.healthy).map((m) => m.id))
+    // One `etcdctl get --prefix` per distinct top-level root (/services/, /config/)
+    // rather than a full-keyspace dump — two execs at most today.
+    const roots = [...new Set(
+      keyspaces.map((ks) => String(ks.prefix || '').split('/')[1]).filter(Boolean).map((seg) => `/${seg}/`),
+    )]
+    kvs = await probeWorkers(
+      system,
+      members,
+      memberStatus.filter((m) => m.healthy).map((m) => m.id),
+      roots.length ? roots : undefined,
+    )
   }
 
   const quorum = quorumOf(size)
@@ -529,21 +651,53 @@ async function handleUpdate(body) {
   writeManifest(system, manifest)
 
   const log = await composeUp(system, members, { removeOrphans: true })
-  return { ok: true, rebuilt: true, cluster: data.cluster, log }
+  const configReplay = await replayConfigValues(system, data.keyspaces, members)
+  return { ok: true, rebuilt: true, cluster: data.cluster, log, configReplay }
 }
 
 // --- keyspaces ----------------------------------------------------------------------------
+
+// Seed values for a config keyspace: [{ key, value }]. Keys are single etcd path
+// segments, values arbitrary strings — sizes bounded so etcd.json stays a registry,
+// not a blob store.
+function validateValues(values) {
+  if (values === undefined || values === null) return []
+  if (!Array.isArray(values)) throw bad('values must be an array of { key, value }')
+  const seen = new Set()
+  return values.map((v) => {
+    const key = v?.key
+    if (typeof key !== 'string' || !KEY_RE.test(key)) {
+      throw bad(`invalid key "${key}" — a letter/digit then letters, digits, _ . - (max 128 chars, no /)`)
+    }
+    if (seen.has(key)) throw bad(`duplicate key "${key}"`)
+    seen.add(key)
+    const value = v?.value === undefined || v?.value === null ? '' : String(v.value)
+    if (value.length > MAX_VALUE) throw bad(`value for "${key}" is too long (max ${MAX_VALUE} chars)`)
+    return { key, value }
+  })
+}
 
 function validateKeyspaceInput(body) {
   const { system, id } = body
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
   const manifest = readManifest(system)
   const node = findEtcdNode(manifest, id)
-  const svcNode = findRegistrableService(manifest, body.service)
   let description = typeof body.description === 'string' ? body.description : ''
   if (description.length > MAX_DESC) throw bad('description is too long')
   const conversationId = typeof body.conversationId === 'string' ? body.conversationId : ''
-  return { system, id, manifest, node, svcNode, service: svcNode.id, description, conversationId }
+
+  // Config keyspace: identity = a NAME (it doubles as the /config/<name>/ path
+  // segment), no owning service, optional seed values.
+  if (body.type === 'config') {
+    const name = body.name
+    if (typeof name !== 'string' || !NAME_RE.test(name) || name.length > 40) {
+      throw bad('keyspace name must be lowercase letters, digits and hyphens (start with a letter)')
+    }
+    return { system, id, manifest, node, type: 'config', name, values: validateValues(body.values), description, conversationId }
+  }
+
+  const svcNode = findRegistrableService(manifest, body.service)
+  return { system, id, manifest, node, type: 'discovery', svcNode, service: svcNode.id, description, conversationId }
 }
 
 function upsertKeyspace(input) {
@@ -551,7 +705,11 @@ function upsertKeyspace(input) {
   const data = readEtcd(system)
   const now = new Date().toISOString()
   const prefix = `/services/${service}/`
-  const i = data.keyspaces.findIndex((k) => k && k.service === service)
+  const clash = data.keyspaces.find((k) => k.type === 'config' && k.name === service)
+  if (clash) {
+    throw bad(`a config keyspace named "${service}" already exists (${clash.prefix}) — keyspace identities are shared`)
+  }
+  const i = data.keyspaces.findIndex((k) => k.type !== 'config' && k.service === service)
   const prev = i >= 0 ? data.keyspaces[i] : null
 
   let description = input.description
@@ -576,6 +734,7 @@ function upsertKeyspace(input) {
     data.keyspaces[i] = ks
   } else {
     ks = {
+      type: 'discovery',
       service,
       prefix,
       description,
@@ -607,6 +766,58 @@ function upsertKeyspace(input) {
   return { ok: true, keyspace: ks }
 }
 
+// Config keyspaces are pure data: a registry entry + etcdctl puts of the seed
+// values. No registrant service, no compose edits, no launched session — hence no
+// implemented/conversationId on the keyspace itself (its listeners still carry both).
+async function upsertConfigKeyspace(input) {
+  const { system, node, name } = input
+  const data = readEtcd(system)
+  const now = new Date().toISOString()
+  const prefix = configPrefix(name)
+  const clash = data.keyspaces.find((k) => k.type !== 'config' && k.service === name)
+  if (clash) {
+    throw bad(`"${name}" already registers ${clash.prefix} — keyspace identities are shared, pick another name`)
+  }
+  const i = data.keyspaces.findIndex((k) => k.type === 'config' && k.name === name)
+  const prev = i >= 0 ? data.keyspaces[i] : null
+
+  let description = input.description
+  if (!prev && !description.trim()) {
+    description = `Config keyspace ${prefix} — key/value settings pushed live to watching services.`
+  }
+
+  // etcd first, registry second (see upsertKeyValue). Seed values apply on create
+  // only; an edit preserves the stored values + listeners (values are managed
+  // key-at-a-time through /api/etcd/keyvalue).
+  const seeded = prev ? [] : input.values
+  for (const v of seeded) {
+    await etcdctlPut(system, node.etcd?.members || [], prefix + v.key, v.value)
+  }
+
+  const snapshot = { at: now, description }
+  let ks
+  if (prev) {
+    const history = Array.isArray(prev.history) ? prev.history : []
+    ks = { ...prev, type: 'config', name, prefix, description, updatedAt: now, history: [...history, snapshot] }
+    data.keyspaces[i] = ks
+  } else {
+    ks = {
+      type: 'config',
+      name,
+      prefix,
+      description,
+      values: seeded.map((v) => ({ key: v.key, value: v.value, createdAt: now, updatedAt: now })),
+      createdAt: now,
+      updatedAt: now,
+      history: [snapshot],
+      listeners: [],
+    }
+    data.keyspaces.push(ks)
+  }
+  writeEtcd(system, data)
+  return { ok: true, keyspace: ks }
+}
+
 // Does this service still need ETCD_ENDPOINTS (it registers or listens somewhere)?
 function hasEtcdRole(keyspaces, service) {
   return keyspaces.some(
@@ -628,33 +839,95 @@ function scrubServiceCompose(system, manifest, service, { workerId = false, endp
   saveCompose(system, doc)
 }
 
-function deleteKeyspace(body) {
-  const { system, id, service } = body
+async function deleteKeyspace(body) {
+  const { system, id } = body
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
   const manifest = readManifest(system)
-  findEtcdNode(manifest, id)
-  if (typeof service !== 'string' || !service) throw bad('service is required')
+  const node = findEtcdNode(manifest, id)
+  // Discovery keyspaces are addressed by their service, config keyspaces by name.
+  const identity = typeof body.name === 'string' && body.name ? body.name : body.service
+  if (typeof identity !== 'string' || !identity) throw bad('service (discovery) or name (config) is required')
 
   const data = readEtcd(system)
-  const gone = data.keyspaces.find((k) => k && k.service === service)
+  const gone = data.keyspaces.find((k) => ksIdentity(k) === identity)
   const listeners = (gone && Array.isArray(gone.listeners) ? gone.listeners : []).map((l) => l.service)
   if (listeners.length) {
-    throw bad(`cannot remove /services/${service}/ — still watched by: ${listeners.join(', ')}. Remove the listeners first.`)
+    throw bad(`cannot remove ${gone.prefix} — still watched by: ${listeners.join(', ')}. Remove the listeners first.`)
   }
-  data.keyspaces = data.keyspaces.filter((k) => !(k && k.service === service))
+  data.keyspaces = data.keyspaces.filter((k) => ksIdentity(k) !== identity)
   const removed = Boolean(gone)
   writeEtcd(system, data)
 
-  if (gone) {
-    scrubServiceCompose(system, manifest, service, {
+  if (gone && gone.type === 'config') {
+    // Best-effort live-key cleanup: a quorum-less cluster must not block the
+    // registry delete — orphan keys are harmless and die with the next recreate.
+    try {
+      await etcdctlDel(system, node.etcd?.members || [], gone.prefix, { prefix: true })
+    } catch {
+      /* best-effort */
+    }
+  } else if (gone) {
+    scrubServiceCompose(system, manifest, identity, {
       workerId: true,
       // Keep ETCD_ENDPOINTS + the mount only if the service still listens elsewhere
       // (the mount is registrant-only, so it always goes; endpoints may stay).
-      endpoints: !hasEtcdRole(data.keyspaces, service),
+      endpoints: !hasEtcdRole(data.keyspaces, identity),
       mount: true,
     })
   }
   return { ok: true, removed, wasImplemented: gone?.implemented === true }
+}
+
+// --- config key/values ---------------------------------------------------------------
+
+// Shared lookups for the /keyvalue routes: the keyspace must exist and be config-typed.
+function findConfigKeyspace(body) {
+  const { system, id } = body
+  if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
+  const manifest = readManifest(system)
+  const node = findEtcdNode(manifest, id)
+  const data = readEtcd(system)
+  const ks = data.keyspaces.find((k) => ksIdentity(k) === body.keyspace)
+  if (!ks) throw bad(`no keyspace "${body.keyspace}" on this cluster`)
+  if (ks.type !== 'config') {
+    throw bad(`${ks.prefix} is a service-discovery keyspace — its keys are leased by workers, not edited here`)
+  }
+  const key = body.key
+  if (typeof key !== 'string' || !KEY_RE.test(key)) {
+    throw bad(`invalid key "${key}" — a letter/digit then letters, digits, _ . - (max 128 chars, no /)`)
+  }
+  return { system, node, data, ks, key }
+}
+
+async function upsertKeyValue(body) {
+  const { system, node, data, ks, key } = findConfigKeyspace(body)
+  const value = body.value === undefined || body.value === null ? '' : String(body.value)
+  if (value.length > MAX_VALUE) throw bad(`value is too long (max ${MAX_VALUE} chars)`)
+
+  // etcd first, registry second: the registry must never claim a value watchers
+  // never saw. (Replay-after-recreate is the one inverse — there the registry IS
+  // the source of truth.)
+  await etcdctlPut(system, node.etcd?.members || [], ks.prefix + key, value)
+
+  const now = new Date().toISOString()
+  const i = ks.values.findIndex((v) => v && v.key === key)
+  if (i >= 0) ks.values[i] = { ...ks.values[i], value, updatedAt: now }
+  else ks.values.push({ key, value, createdAt: now, updatedAt: now })
+  ks.updatedAt = now
+  writeEtcd(system, data)
+  return { ok: true, keyspace: ks.name, values: ks.values }
+}
+
+async function deleteKeyValue(body) {
+  const { system, node, data, ks, key } = findConfigKeyspace(body)
+  const i = ks.values.findIndex((v) => v && v.key === key)
+  if (i < 0) throw bad(`no key "${key}" in ${ks.prefix}`)
+
+  await etcdctlDel(system, node.etcd?.members || [], ks.prefix + key)
+  ks.values.splice(i, 1)
+  ks.updatedAt = new Date().toISOString()
+  writeEtcd(system, data)
+  return { ok: true, keyspace: ks.name, values: ks.values }
 }
 
 // --- listeners -----------------------------------------------------------------------------
@@ -668,8 +941,9 @@ function upsertListener(body) {
   const service = svcNode.id
 
   const data = readEtcd(system)
-  const ks = data.keyspaces.find((k) => k && k.service === body.keyspace)
+  const ks = data.keyspaces.find((k) => ksIdentity(k) === body.keyspace)
   if (!ks) throw bad(`no keyspace for "${body.keyspace}" on this cluster`)
+  // Only bites discovery: a config keyspace has no owning service.
   if (ks.service === service) throw bad(`${service} already owns ${ks.prefix} — a service doesn't listen to its own keyspace`)
 
   let description = typeof body.description === 'string' ? body.description : ''
@@ -681,7 +955,9 @@ function upsertListener(body) {
   const i = ks.listeners.findIndex((l) => l && l.service === service)
   const prev = i >= 0 ? ks.listeners[i] : null
   if (!prev && !description.trim()) {
-    description = `Watch ${ks.prefix} and keep a live in-memory map of ${ks.service} workers (worker id -> host:port), updated by pushed etcd events.`
+    description = ks.type === 'config'
+      ? `Watch ${ks.prefix} and keep a live in-memory config map (key -> value), updated by pushed etcd events.`
+      : `Watch ${ks.prefix} and keep a live in-memory map of ${ks.service} workers (worker id -> host:port), updated by pushed etcd events.`
   }
   const snapshot = { at: now, description }
   let listener
@@ -719,7 +995,7 @@ function upsertListener(body) {
   }
   saveCompose(system, doc)
 
-  return { ok: true, keyspace: ks.service, listener }
+  return { ok: true, keyspace: ksIdentity(ks), listener }
 }
 
 function deleteListener(body) {
@@ -730,7 +1006,7 @@ function deleteListener(body) {
   if (typeof service !== 'string' || !service) throw bad('service is required')
 
   const data = readEtcd(system)
-  const ks = data.keyspaces.find((k) => k && k.service === keyspace)
+  const ks = data.keyspaces.find((k) => ksIdentity(k) === keyspace)
   if (!ks) throw bad(`no keyspace for "${keyspace}" on this cluster`)
   const gone = (Array.isArray(ks.listeners) ? ks.listeners : []).find((l) => l && l.service === service)
   ks.listeners = (Array.isArray(ks.listeners) ? ks.listeners : []).filter((l) => !(l && l.service === service))
@@ -782,8 +1058,18 @@ export default function etcdPlugin() {
         const sub = url.pathname.replace(/\/$/, '')
         try {
           if (sub === '/keyspace') {
-            if (req.method === 'POST') return json(res, 200, upsertKeyspace(validateKeyspaceInput(await readJsonBody(req))))
-            if (req.method === 'DELETE') return json(res, 200, deleteKeyspace(await readJsonBody(req)))
+            if (req.method === 'POST') {
+              const input = validateKeyspaceInput(await readJsonBody(req))
+              return json(res, 200, input.type === 'config'
+                ? await upsertConfigKeyspace(input)
+                : upsertKeyspace(input))
+            }
+            if (req.method === 'DELETE') return json(res, 200, await deleteKeyspace(await readJsonBody(req)))
+            return next()
+          }
+          if (sub === '/keyvalue') {
+            if (req.method === 'POST') return json(res, 200, await upsertKeyValue(await readJsonBody(req)))
+            if (req.method === 'DELETE') return json(res, 200, await deleteKeyValue(await readJsonBody(req)))
             return next()
           }
           if (sub === '/listener') {

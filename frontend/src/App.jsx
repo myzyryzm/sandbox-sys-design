@@ -180,6 +180,12 @@ export default function App() {
   // A keyspace selected on the etcd node, traced registrant → etcd (the lease-put) and
   // etcd → each listener (the watch push). Mutually exclusive with the other traces.
   const [keyspaceTrace, setKeyspaceTrace] = useState(null)
+  // The gRPC contract registry (systems/<id>/grpc/_registry.json via GET /api/grpc-contracts),
+  // as [{ name, methods, … }]. A service that SERVES a contract lists its methods as RPC rows.
+  const [grpcContracts, setGrpcContracts] = useState([])
+  // A served RPC method selected on a server service, traced each caller → this server.
+  // Mutually exclusive with the other traces.
+  const [rpcTrace, setRpcTrace] = useState(null)
   // Live runtime state for custom service types (e.g. Download Coordinator worker
   // bitmaps / distribution progress), keyed by node id. Filled by the poll below.
   const [customState, setCustomState] = useState({})
@@ -364,6 +370,33 @@ export default function App() {
       clearInterval(id)
     }
   }, [etcdIds])
+
+  // Poll the gRPC contract registry so a server service's RPC rows (contract name in its manifest
+  // `grpc.servers`) stay in sync as methods are added/removed. Gated on the manifest having any
+  // node that serves a contract, so systems with no gRPC servers never hit the route.
+  const hasGrpcServers = (manifest?.nodes || []).some((n) => (n.grpc?.servers || []).length > 0)
+  useEffect(() => {
+    if (!hasGrpcServers) {
+      setGrpcContracts([])
+      return
+    }
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/grpc-contracts?system=${SYSTEM_ID}`)
+        const data = await res.json()
+        if (!cancelled && data.ok) setGrpcContracts(data.contracts || [])
+      } catch {
+        /* keep the last good list */
+      }
+    }
+    tick()
+    const id = setInterval(tick, 4000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [hasGrpcServers])
 
   // Fast-poll the in-memory resilience state (breaker/retry) so the diagram can show
   // a breaker trip live, faster than Prometheus' scrape. The aggregator returns {}
@@ -663,7 +696,7 @@ export default function App() {
           onClick={() => setDragMode((v) => !v)}
           title="Drag mode — move nodes and the system boundary"
         >
-          <MoveIcon /> Drag
+          <MoveIcon /> Edit
         </button>
         <button className="header-btn no-auto" onClick={() => setShowEndToEnd(true)}>
           🔁 End-to-End
@@ -738,7 +771,7 @@ export default function App() {
         pausedConsumers={pausedConsumers}
         customState={customState}
         methodTrace={methodTrace}
-        onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setKeyspaceTrace(null); setMethodTrace(ep) }}
+        onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setKeyspaceTrace(null); setRpcTrace(null); setMethodTrace(ep) }}
         onClearMethodTrace={() => setMethodTrace(null)}
         clientFunctions={clientFunctions}
         wsStats={wsStats}
@@ -750,6 +783,7 @@ export default function App() {
           setMethodTrace(null)
           setConsumerTrace(null)
           setKeyspaceTrace(null)
+          setRpcTrace(null)
           // A ws builtin has no authored steps — the diagram traces the tier path itself.
           setFunctionTrace(fn.wsBuiltin
             ? { client: clientId, name: fn.name, wsBuiltin: true, methods: [] }
@@ -758,7 +792,7 @@ export default function App() {
         onClearFunctionTrace={() => setFunctionTrace(null)}
         consumerFunctions={consumerFunctions}
         consumerTrace={consumerTrace}
-        onSelectConsumer={(c, serviceId) => { setMethodTrace(null); setFunctionTrace(null); setKeyspaceTrace(null); setConsumerTrace({ cluster: c.cluster, service: serviceId, topic: c.topic, name: c.name, downstream: c.downstream || [], downstreamDescriptions: c.downstreamDescriptions || {} }) }}
+        onSelectConsumer={(c, serviceId) => { setMethodTrace(null); setFunctionTrace(null); setKeyspaceTrace(null); setRpcTrace(null); setConsumerTrace({ cluster: c.cluster, service: serviceId, topic: c.topic, name: c.name, downstream: c.downstream || [], downstreamDescriptions: c.downstreamDescriptions || {} }) }}
         onClearConsumerTrace={() => setConsumerTrace(null)}
         etcdKeyspaces={etcdKeyspaces}
         keyspaceTrace={keyspaceTrace}
@@ -766,14 +800,46 @@ export default function App() {
           setMethodTrace(null)
           setFunctionTrace(null)
           setConsumerTrace(null)
+          setRpcTrace(null)
           setKeyspaceTrace({
             etcd: etcdId,
+            type: ks.type || 'discovery',
             service: ks.service,
+            name: ks.name,
             prefix: ks.prefix,
             listeners: (ks.listeners || []).map((l) => l.service),
           })
         }}
         onClearKeyspaceTrace={() => setKeyspaceTrace(null)}
+        onSelectSubscription={(ks, etcdId, listenerId) => {
+          setMethodTrace(null)
+          setFunctionTrace(null)
+          setConsumerTrace(null)
+          setRpcTrace(null)
+          // Same keyspaceTrace shape as onSelectKeyspace, but focused on ONE listener: the
+          // `kt` branch draws registrant → etcd → this listener only (config: etcd → listener).
+          // `focus` lets the diagram mark the service's SUB row active without lighting the
+          // etcd node's whole KEY row.
+          setKeyspaceTrace({
+            etcd: etcdId,
+            type: ks.type || 'discovery',
+            service: ks.service,
+            name: ks.name,
+            prefix: ks.prefix,
+            listeners: [listenerId],
+            focus: listenerId,
+          })
+        }}
+        grpcContracts={grpcContracts}
+        rpcTrace={rpcTrace}
+        onSelectRpc={(r, serviceId) => {
+          setMethodTrace(null)
+          setFunctionTrace(null)
+          setConsumerTrace(null)
+          setKeyspaceTrace(null)
+          setRpcTrace({ service: serviceId, contract: r.contract, method: r.method })
+        }}
+        onClearRpcTrace={() => setRpcTrace(null)}
       />
       </div>
       {showTerminal && (
