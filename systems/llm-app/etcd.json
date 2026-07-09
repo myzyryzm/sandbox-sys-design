@@ -23,22 +23,7 @@
           "description": "Register each llm-worker worker under /services/llm-worker/ as a leased key (value host:port) with a TTL keepalive, so listeners discover the live worker set."
         }
       ],
-      "listeners": [
-        {
-          "service": "usr-msg-strm-srvc",
-          "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events.",
-          "implemented": true,
-          "conversationId": "fe127bd0-89ca-4e49-82b0-b372f88eb784",
-          "createdAt": "2026-07-08T19:26:54.939Z",
-          "updatedAt": "2026-07-08T19:26:54.939Z",
-          "history": [
-            {
-              "at": "2026-07-08T19:26:54.939Z",
-              "description": "Watch /services/llm-worker/ and keep a live in-memory map of llm-worker workers (worker id -> host:port), updated by pushed etcd events."
-            }
-          ]
-        }
-      ]
+      "listeners": []
     }
   ]
 }

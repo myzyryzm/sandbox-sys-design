@@ -14,37 +14,59 @@
 // on_cache_evict hook registry (hook.json) is pure metadata: the Edit tab launches a
 // Claude session (sandbox-llm-worker skill) that authors <name>/hooks.py and restarts
 // the worker; the session owns `implemented`.
+//
+// onAdd also creates the group's scaler sidecar `<name>-scaler` (templates/llm-scaler/):
+// a real container that polls every member's /llm/state, computes batch utilization
+// (active sequences / total max_active) and derives a desired worker count from
+// systems/<id>/<name>/scaler.json — a live-mounted policy (mtime-polled; edits apply
+// with no rebuild). It NEVER touches docker: the shared autoscale apply loop
+// (autoscale.js, registered via onServerStart) polls each scaler's /state through the
+// lb and applies changes with the same idempotent setGroupReplicas the manual Scaling
+// tab uses — docker stays host-side, the container stays unprivileged.
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import {
-  bad, HttpError, serviceMetrics, serviceHealth, cloneTemplate, addComposeService,
-  addNginxRoute, ensureNginxRoute, removeNginxRoute, reloadNginx, addScrapeJob,
-  addManifestNode, rebuild, NAME_RE,
-  loadCompose, saveCompose, composeServiceDef, setComposeService, removeComposeService,
-  loadPrometheus, savePrometheus, addScrapeJobDoc, removeScrapeJobDoc, withEtcdWorkerId,
-  withSystemLock,
+  bad, serviceMetrics, serviceHealth, cloneTemplate, addComposeService,
+  addNginxRoute, addScrapeJob, addManifestNode, NAME_RE,
 } from '../scaffold.js'
+import { setGroupReplicas, scaleRebuild } from '../replicaGroup.js'
+import { startAutoscaleLoop } from '../autoscale.js'
 import { addComposeServices, addScrapeJob as addDbScrapeJob, HEALTH_RULES } from '../databases.js'
 import { installContracts } from '../grpcInstall.js'
-import { isValidSystem, systemDir, nextNodePosition, repoRoot, systemsDir } from '../systems.js'
+import { isValidSystem, systemDir, nextNodePosition } from '../systems.js'
 
-const pexec = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const TPL = path.join(__dirname, '..', 'templates', 'llm-worker')
 const WORKER_DIR = path.join(TPL, 'worker')
 const GRPC_DIR = path.join(TPL, 'grpc')
+const SCALER_TPL = path.join(__dirname, '..', 'templates', 'llm-scaler')
 const SERVICE_FILES = ['app.py', 'model.py', 'hooks.py', 'requirements.txt', 'Dockerfile']
+const SCALER_FILES = ['app.py', 'requirements.txt', 'Dockerfile']
 
 const CONFIG_DEFAULTS = { ttl_seconds: 30, chat_db: null, max_active: 5 }
 const TTL_MAX = 60
 const MAX_ACTIVE_MAX = 32
 const MAX_WORKERS = 8 // total workers in a group (base + instances)
-const INSTANCE_PORT = 8000 // instances serve FastAPI / are scraped here (gRPC is 50051)
 const LB = 'http://localhost:8080' // the system's load balancer (compose maps 8080:80)
 const SKIP_REBUILD = () => process.env.CREATE_SVC_SKIP_REBUILD === '1'
+
+// Scaling-policy defaults written into <base>/scaler.json at creation. Utilization is
+// batch occupancy: sum(active sequences) / sum(max_active) over reachable workers.
+const POLICY_DEFAULTS = {
+  enabled: true,
+  min: 1,
+  max: MAX_WORKERS,
+  scale_up_util: 0.8,
+  scale_down_util: 0.3,
+  up_stable_seconds: 15,
+  down_stable_seconds: 60,
+  cooldown_seconds: 90,
+}
+const POLICY_LIMITS = { seconds: 86_400 }
+
+const scalerIdOf = (base) => `${base}-scaler`
+const policyFile = (system, base) => path.join(systemDir(system), base, 'scaler.json')
 
 const read = (dir, f) => fs.readFileSync(path.join(dir, f), 'utf8')
 const readManifest = (system) => JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
@@ -99,21 +121,35 @@ function workerMetrics(name) {
   ]
 }
 
+// The scaler node's cards — its own exported gauges (utilization shown as a %).
+function scalerMetrics(id) {
+  return [
+    { label: 'util', query: `llm_worker_utilization{job="${id}"} or vector(0)`, unit: '%', scale: 100 },
+    { label: 'desired', query: `llm_worker_desired_replicas{job="${id}"} or vector(0)`, unit: '' },
+    { label: 'workers', query: `llm_worker_members{job="${id}"} or vector(0)`, unit: '' },
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // Create the worker + its linked redis (the add-service "onAdd")
 // ---------------------------------------------------------------------------
 async function onAdd({ system, name, manifest }) {
   const streamName = `${name}-stream`
+  const scalerId = scalerIdOf(name)
 
   // 1. Guards for everything onAdd derives beyond validateCreate's <name> checks —
   //    all before any write.
-  if (!NAME_RE.test(streamName) || streamName.length > 50) throw bad('service name too long')
+  for (const derived of [streamName, scalerId]) {
+    if (!NAME_RE.test(derived) || derived.length > 50) throw bad('service name too long')
+  }
   const ids = new Set((manifest.nodes || []).map((n) => n.id))
-  for (const derived of [streamName, `${streamName}-exporter`]) {
+  for (const derived of [streamName, `${streamName}-exporter`, scalerId]) {
     if (ids.has(derived)) throw bad(`"${derived}" already exists in this system`)
   }
-  if (fs.existsSync(path.join(systemDir(system), streamName))) {
-    throw bad(`folder "${streamName}" already exists in this system`)
+  for (const derived of [streamName, scalerId]) {
+    if (fs.existsSync(path.join(systemDir(system), derived))) {
+      throw bad(`folder "${derived}" already exists in this system`)
+    }
   }
   const registry = readJsonFile(path.join(systemDir(system), 'grpc', '_registry.json'), { contracts: {} })
   const existing = registry.contracts?.Worker
@@ -183,9 +219,32 @@ async function onAdd({ system, name, manifest }) {
     'Redis',
   )
 
-  // 5. Manifest: worker node + linked redis node + the worker→redis edge. The edge
-  //    is pushed before the addManifestNode calls persist the manifest, so one write
-  //    lands all three.
+  // 5. Scaffold the scaler: its own template + live policy file + compose + nginx
+  //    (control-plane /state through the lb) + scrape job. It discovers the member
+  //    set from the live-mounted manifest (safe: every backend manifest write is an
+  //    in-place writeFileSync, so the bind-mounted inode never detaches).
+  cloneTemplate(system, scalerId, SCALER_TPL, SCALER_FILES)
+  fs.writeFileSync(policyFile(system, name), JSON.stringify(POLICY_DEFAULTS, null, 2) + '\n')
+  addComposeService(
+    system,
+    scalerId,
+    {
+      build: `./${scalerId}`,
+      environment: { SERVICE_ID: scalerId, BASE: name, SYSTEM_ID: system },
+      volumes: [
+        `./${name}/scaler.json:/config/scaler.json:ro`, // live policy (mtime-polled)
+        './manifest.json:/manifest.json:ro', // member discovery (base + instances)
+      ],
+      depends_on: [name],
+    },
+    ` Scaler for LLM worker "${name}" — watches batch utilization, drives autoscaling`,
+  )
+  addNginxRoute(system, scalerId)
+  addScrapeJob(system, scalerId, 8000, ` Scaler for LLM worker "${name}"`)
+
+  // 6. Manifest: worker node + linked redis node + scaler node + the worker→redis
+  //    edge. The edge is pushed before the addManifestNode calls persist the
+  //    manifest, so one write lands everything.
   manifest.edges = manifest.edges || []
   manifest.edges.push({ from: name, to: streamName, origin: 'create-custom-service' })
   const position = nextNodePosition(manifest)
@@ -211,8 +270,24 @@ async function onAdd({ system, name, manifest }) {
     metrics: redisMetrics(streamName),
     health: { query: `redis_up{job="${streamName}"}`, rules: HEALTH_RULES },
   })
+  addManifestNode(system, manifest, {
+    id: scalerId,
+    label: scalerId,
+    type: 'service',
+    origin: 'create-custom-service',
+    service_type: 'llm_scaler',
+    scalerOf: name,
+    position: { x: position.x + 300, y: position.y + 160 },
+    metrics: scalerMetrics(scalerId),
+    health: serviceHealth(scalerId),
+  })
 
-  const log = SKIP_REBUILD() ? '(rebuild skipped)' : await rebuild(system, name)
+  // 7. One locked rebuild for both built containers (worker + scaler; `up -d` also
+  //    starts the redis pair), lb reload for the new routes, prometheus restart for
+  //    the new scrape jobs.
+  const log = SKIP_REBUILD()
+    ? '(rebuild skipped)'
+    : await scaleRebuild(system, { buildNames: [name, scalerId], reloadLb: true })
   return { ok: true, node, log }
 }
 
@@ -268,6 +343,32 @@ async function handleState(req, res, _next, ctx) {
           config: readJsonFile(configFile(system, baseId), { ...CONFIG_DEFAULTS }),
           hook: readJsonFile(hookFile(system, baseId), { description: '', implemented: false, conversationId: '' }),
         }
+      }),
+    )
+    // Each base also gets its scaler's live /state + the on-disk policy (readable even
+    // while the scaler is down), and the scaler node gets its own entry — the Scaling
+    // tab and the scaler card's diagram body read these.
+    await Promise.all(
+      workers.filter((w) => !w.instanceOf).map(async (b) => {
+        const scalerId = scalerIdOf(b.id)
+        let live = null
+        try {
+          const r = await fetch(`${LB}/${scalerId}/state`, { signal: AbortSignal.timeout(3000) })
+          if (r.ok) {
+            const s = await r.json()
+            // The lb only serves the ACTIVE system — guard against a same-named
+            // scaler in a different system answering.
+            if (s && s.base === b.id && (!s.system || s.system === system)) live = s
+          }
+        } catch {
+          /* scaler not reachable (system inactive or still building) */
+        }
+        nodes[b.id] = {
+          ...(nodes[b.id] || {}),
+          scaler: live,
+          policy: readJsonFile(policyFile(system, b.id), null),
+        }
+        if (manifest.nodes.some((n) => n.id === scalerId)) nodes[scalerId] = { live }
       }),
     )
     ctx.json(res, 200, { ok: true, nodes })
@@ -356,181 +457,87 @@ async function handleHook(req, res, _next, ctx) {
   }
 }
 
+// Resolve + validate the group BASE (policy lives in the base's folder; instances
+// share it and have none of their own).
+function baseWorkerNode(system, node) {
+  const r = workerNode(system, node)
+  if (r.node.instanceOf) throw bad(`"${node}" is an instance — edit the policy on its base "${r.node.instanceOf}"`)
+  return r
+}
+
+// GET reads the live policy file; POST validates + rewrites it IN PLACE (the scaler
+// mtime-polls the bind mount — no rebuild, no restart).
+async function handlePolicy(req, res, _next, ctx) {
+  try {
+    if (req.method === 'GET') {
+      const url = new URL(req.url, 'http://localhost')
+      const system = url.searchParams.get('system')
+      const node = url.searchParams.get('node')
+      baseWorkerNode(system, node)
+      return ctx.json(res, 200, { ok: true, policy: readJsonFile(policyFile(system, node), { ...POLICY_DEFAULTS }) })
+    }
+    if (req.method !== 'POST') return ctx.json(res, 405, { ok: false, error: 'GET or POST only' })
+    const body = await ctx.readJsonBody(req)
+    const { system, node } = body
+    baseWorkerNode(system, node)
+
+    const int = (v, lbl, lo, hi) => {
+      const n = Number(v)
+      if (!Number.isInteger(n) || n < lo || n > hi) throw bad(`${lbl} must be an integer ${lo}-${hi}`)
+      return n
+    }
+    const min = int(body.min, 'min', 1, MAX_WORKERS)
+    const max = int(body.max, 'max', 1, MAX_WORKERS)
+    if (min > max) throw bad('min must be ≤ max')
+    const upUtil = Number(body.scale_up_util)
+    if (!Number.isFinite(upUtil) || upUtil <= 0 || upUtil > 1) throw bad('scale_up_util must be a number in (0, 1]')
+    const downUtil = Number(body.scale_down_util)
+    if (!Number.isFinite(downUtil) || downUtil < 0 || downUtil >= 1) throw bad('scale_down_util must be a number in [0, 1)')
+    if (downUtil >= upUtil) throw bad('scale_down_util must be below scale_up_util')
+    const policy = {
+      enabled: body.enabled !== false,
+      min,
+      max,
+      scale_up_util: upUtil,
+      scale_down_util: downUtil,
+      up_stable_seconds: int(body.up_stable_seconds, 'up_stable_seconds', 0, POLICY_LIMITS.seconds),
+      down_stable_seconds: int(body.down_stable_seconds, 'down_stable_seconds', 0, POLICY_LIMITS.seconds),
+      cooldown_seconds: int(body.cooldown_seconds, 'cooldown_seconds', 0, POLICY_LIMITS.seconds),
+    }
+    // In place, never tmp+rename — single-file bind mounts pin their inode.
+    fs.writeFileSync(policyFile(system, node), JSON.stringify(policy, null, 2) + '\n')
+    ctx.json(res, 200, { ok: true, policy })
+  } catch (err) {
+    fail(ctx, res, err)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Replica scaling — run the worker as N instances under one service id, with NO
-// load balancer. The base `<name>` stays a real serving worker; instances
-// `<name>-2..N` clone its build/config/hook/redis-stream (differing only by
-// SERVICE_ID). The DATA plane stays gRPC-only with caller-side forwarding
-// (`<name>-i:50051` — see the entry+instanceOf expansion in the sandbox-grpc-attach
-// skill); each instance also gets a plain nginx `/<id>/` route so the CONTROL plane
-// (/llm/state, polled by handleState for the diagram) can reach it through the lb.
+// load balancer, via the shared replica-group reconciler (replicaGroup.js). The
+// base `<name>` stays a real serving worker; instances `<name>-2..N` clone its
+// build/config/hook/redis-stream (differing only by SERVICE_ID). The DATA plane
+// stays gRPC-only with caller-side forwarding (`<name>-i:50051` — see the
+// entry+instanceOf expansion in the sandbox-grpc-attach skill); each instance
+// also gets a plain nginx `/<id>/` route so the CONTROL plane (/llm/state,
+// polled by handleState for the diagram) can reach it through the lb.
 // Mechanical (no launched session), mirroring serviceLb.js minus the haproxy sidecar.
 // ---------------------------------------------------------------------------
 
-const instanceOrdinal = (id, base) => {
-  const m = new RegExp(`^${base}-(\\d+)$`).exec(id)
-  return m ? Number(m[1]) : 0
-}
-const instanceId = (base, ord) => `${base}-${ord}`
-function instanceNodes(manifest, base) {
-  return manifest.nodes
-    .filter((n) => n.instanceOf === base)
-    .sort((a, b) => instanceOrdinal(a.id, base) - instanceOrdinal(b.id, base))
-}
-
-// A worker instance node: a service card carrying only the grouping back-link. It shares
-// the base's build/config/hook/redis-stream, keeps service_type so its diagram body +
-// metric cards match the base's, and declares the Worker server it runs. It owns no
-// endpoints (the diagram suppresses those for instanceOf nodes); request traffic reaches
-// it only by gRPC, while its nginx route exists purely for control-plane state polling.
-function workerInstanceNode(base, id, entryNode) {
-  return {
-    id,
-    label: id,
-    type: 'service',
-    origin: 'create-custom-service',
-    service_type: 'llm_worker',
-    instanceOf: base,
-    position: { x: (entryNode.position?.x ?? 80) + 260, y: entryNode.position?.y ?? 80 },
-    metrics: workerMetrics(id),
-    health: serviceHealth(id),
-    grpc: { servers: ['Worker'], clients: [], overrides: [] },
-  }
-}
-
-// Reject a derived instance id that collides with an existing node or folder.
-function assertFreeInstanceId(system, manifest, id) {
-  if (manifest.nodes.some((n) => n.id === id)) throw bad(`a node named "${id}" already exists in this system`)
-  if (fs.existsSync(path.join(systemDir(system), id))) throw bad(`systems/${system}/${id}/ already exists`)
-}
-
-// Resolve + validate the group ENTRY worker (a base llm_worker, never itself an instance).
-function entryWorker(system, nodeId) {
-  const { manifest, node } = workerNode(system, nodeId)
-  if (node.instanceOf) {
-    throw bad(`"${nodeId}" is a worker instance — scale the group from its base worker "${node.instanceOf}"`)
-  }
-  return { manifest, node }
-}
-
-// Frontend-safe rebuild for the worker group: build the new instance images, bring the
-// stack up (creating them, or removing orphaned instance containers on scale-down),
-// recreate the lb when instance routes changed (reloadLb — after `up -d` so nginx can
-// resolve the new upstream hostnames), and restart prometheus so appended/removed scrape
-// jobs are picked up. No haproxy sidecar (there is no load balancer). NEVER ./start.sh.
-async function scaleRebuild(system, opts) {
-  return withSystemLock(system, () => _scaleRebuildImpl(system, opts))
-}
-
-async function _scaleRebuildImpl(system, { buildNames = [], removeOrphans = false, reloadLb = false }) {
-  if (SKIP_REBUILD()) return '(rebuild skipped)'
-  const compose = path.join(systemsDir, system, 'docker-compose.yml')
-  const opts = { cwd: repoRoot, timeout: 600_000, maxBuffer: 16 * 1024 * 1024 }
-  const run = async (args) => {
-    const r = await pexec('docker', ['compose', '-f', compose, ...args], opts)
-    return r.stdout + r.stderr
-  }
-  let log = ''
-  try {
-    if (buildNames.length) log += await run(['build', ...buildNames])
-    const upArgs = ['up', '-d']
-    if (removeOrphans) upArgs.push('--remove-orphans')
-    log += await run(upArgs)
-    if (reloadLb) log += await reloadNginx(system)
-    log += await run(['restart', 'prometheus'])
-  } catch (err) {
-    const detail = `${err.stdout || ''}${err.stderr || ''}` || err.message
-    throw new HttpError(500, `docker compose failed:\n${detail}`)
-  }
-  return log
+const REPLICA_CFG = {
+  serviceType: 'llm_worker',
+  typeLabel: 'LLM worker',
+  maxTotal: MAX_WORKERS,
+  memberMetrics: (id) => workerMetrics(id),
+  instanceExtras: () => ({ grpc: { servers: ['Worker'], clients: [], overrides: [] } }),
+  instanceComment: (base) =>
+    ` Instance of LLM worker "${base}" — request traffic over gRPC; nginx route is control-plane only`,
 }
 
 // The idempotent "set desired worker count" op (total = base + instances). instances==1
 // removes every replica; N>=2 adds/drops the highest-ordinal instances to reach N.
 export async function setReplicas(body) {
-  const { system } = body
-  const { manifest, node } = entryWorker(system, body.node)
-
-  const target = Number(body.instances)
-  if (!Number.isInteger(target) || target < 1 || target > MAX_WORKERS) {
-    throw bad(`instances must be a whole number between 1 and ${MAX_WORKERS}`)
-  }
-
-  const current = instanceNodes(manifest, node.id)
-  const currentTotal = 1 + current.length
-
-  // Idempotent reconciliation — runs on EVERY scale call (including no-change) so
-  // pre-existing groups self-heal: refresh each member's metric cards to the current
-  // workerMetrics shape and make sure every instance has its control-plane nginx route
-  // (added retroactively for groups scaled before instances were routed).
-  node.metrics = workerMetrics(node.id)
-  for (const n of current) n.metrics = workerMetrics(n.id)
-  let routesChanged = false
-  for (const n of current) if (ensureNginxRoute(system, n.id)) routesChanged = true
-
-  if (target === currentTotal) {
-    writeManifest(system, manifest)
-    const log = routesChanged && !SKIP_REBUILD()
-      ? await withSystemLock(system, () => reloadNginx(system))
-      : '(no change)'
-    return { ok: true, node, log }
-  }
-
-  const doc = loadCompose(system)
-  const prom = loadPrometheus(system)
-  let plan
-
-  if (target > currentTotal) {
-    // scale up: base is ordinal 1, so added instances start at 2. Clone the base compose
-    // def and override SERVICE_ID (build/config/hook/redis-stream all shared). If the base is
-    // etcd-registered, `withEtcdWorkerId` rewrites the cloned ETCD_WORKER_ID to this instance
-    // so each worker registers a distinct key instead of all sharing the base's `<name>-1`.
-    const app = composeServiceDef(doc, node.id) || { build: `./${node.id}` }
-    const maxOrd = current.reduce((m, n) => Math.max(m, instanceOrdinal(n.id, node.id)), 1)
-    const newIds = []
-    for (let o = maxOrd + 1; currentTotal + newIds.length < target; o++) {
-      const id = instanceId(node.id, o)
-      assertFreeInstanceId(system, manifest, id)
-      setComposeService(
-        doc,
-        id,
-        withEtcdWorkerId({ ...app, build: `./${node.id}`, environment: { ...(app.environment || {}), SERVICE_ID: id } }, id),
-        ` Instance of LLM worker "${node.id}" — request traffic over gRPC; nginx route is control-plane only`,
-      )
-      addScrapeJobDoc(prom, id, `${id}:${INSTANCE_PORT}`, ` Instance of LLM worker "${node.id}"`)
-      manifest.nodes.push(workerInstanceNode(node.id, id, node))
-      newIds.push(id)
-    }
-    // Route writes go to disk immediately (unlike the in-memory compose/prom/manifest
-    // docs), so they happen only after every id has passed assertFreeInstanceId — a
-    // mid-loop throw must not leave nginx pointing at containers that never exist.
-    for (const id of newIds) addNginxRoute(system, id)
-    node.replicas = { instances: [...current.map((n) => n.id), ...newIds] }
-    plan = { buildNames: newIds, removeOrphans: false, reloadLb: true }
-  } else {
-    // scale down: drop the highest ordinals until base + kept === target
-    const keep = target - 1
-    const drop = current.slice(keep)
-    for (const n of drop) {
-      removeComposeService(doc, n.id)
-      removeScrapeJobDoc(prom, n.id)
-      removeNginxRoute(system, n.id)
-    }
-    const dropIds = new Set(drop.map((n) => n.id))
-    manifest.nodes = manifest.nodes.filter((n) => !dropIds.has(n.id))
-    manifest.edges = (manifest.edges || []).filter((e) => !dropIds.has(e.from) && !dropIds.has(e.to))
-    const remaining = current.slice(0, keep).map((n) => n.id)
-    if (remaining.length) node.replicas = { instances: remaining }
-    else delete node.replicas
-    plan = { buildNames: [], removeOrphans: true, reloadLb: true }
-  }
-
-  saveCompose(system, doc)
-  savePrometheus(system, prom)
-  writeManifest(system, manifest)
-
-  const log = await scaleRebuild(system, plan)
-  return { ok: true, node: readManifest(system).nodes.find((n) => n.id === node.id), log }
+  return setGroupReplicas(REPLICA_CFG, body)
 }
 
 async function handleScale(req, res, _next, ctx) {
@@ -543,16 +550,32 @@ async function handleScale(req, res, _next, ctx) {
   }
 }
 
+// The autoscale APPLY loop lives in the shared autoscale.js (one interval serves
+// every worker-group type); this type just registers its identity guard — the lb
+// only serves the active system, so a same-named scaler from another system is
+// rejected by its base id + SYSTEM_ID.
+function onServerStart(server) {
+  startAutoscaleLoop(server, {
+    tag: 'llm-worker',
+    disabledEnv: 'LLM_AUTOSCALE_DISABLED',
+    replicaCfg: REPLICA_CFG,
+    scalerIdOf,
+    matchesBase: (state, base, system) => state.base === base.id && (!state.system || state.system === system),
+  })
+}
+
 export default {
   serviceType: 'llm_worker',
   displayName: 'LLM Worker',
   description:
-    'Simulated LLM inference: gRPC AddPrompt/GetStatus, continuous batching with a TTL prefix cache, tokens streamed to a linked redis created with it.',
+    'Simulated LLM inference: gRPC AddPrompt/GetStatus, continuous batching with a TTL prefix cache, tokens streamed to a linked redis created with it, and a scaler sidecar driving utilization-based autoscaling.',
   onAdd,
+  onServerStart,
   routes: [
     { path: '/api/custom/llm-worker/state', handler: handleState },
     { path: '/api/custom/llm-worker/config', handler: handleConfig },
     { path: '/api/custom/llm-worker/hook', handler: handleHook },
+    { path: '/api/custom/llm-worker/policy', handler: handlePolicy },
     { path: '/api/custom/llm-worker/scale', handler: handleScale },
   ],
 }

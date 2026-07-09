@@ -536,6 +536,26 @@ h1 {
   dominant-baseline: middle;
 }
 
+/* A worker group's scaler sidecar (consumer groups + LLM workers): amber accent
+   (matches the consume-edge palette) so it reads as the group's control loop, sitting
+   at the top of the group's stack and carrying the group's Edit button. */
+.node-box.scaler {
+  stroke: #e0a44f;
+  stroke-dasharray: 4 3;
+}
+
+/* An LLM worker group's box label — larger than the generic fleet label because it
+   doubles as the group's TITLE (the entry renders as the scaler header card, or a
+   bare Edit button on a scaler-less group). */
+
+.llm-group-label {
+  fill: #c9cdd6;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  dominant-baseline: middle;
+}
+
 /* Drag-mode move target spanning a fleet box: transparent but fully hittable, so a drag
    anywhere inside the combined body (cards, panel, or the gaps between them) moves the whole
    tier stack. Unlike .boundary-move-target this catches the interior too (pointer-events: all). */
@@ -1932,6 +1952,15 @@ h1 {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  border: 1px solid #2a2e37;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.topic-partitions {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.02em;
   border: 1px solid #2a2e37;
   border-radius: 4px;
   padding: 1px 5px;

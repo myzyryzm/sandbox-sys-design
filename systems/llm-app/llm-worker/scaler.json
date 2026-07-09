@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "min": 1,
+  "max": 8,
+  "scale_up_util": 0.8,
+  "scale_down_util": 0.3,
+  "up_stable_seconds": 15,
+  "down_stable_seconds": 60,
+  "cooldown_seconds": 90
+}

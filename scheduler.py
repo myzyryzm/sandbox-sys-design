@@ -1,5 +1,5 @@
-workers = []
-chat_worker_dict = dict() # map of chat id to worker
+workers = [] # all workers assigned to 
+chat_worker_dict = dict() # map of chat id to worker to enable prefix caching
 q = Kafka()
 def find_available_worker(user_message):
     if user_message.chat in chat_worker_dict:
@@ -14,11 +14,10 @@ def find_available_worker(user_message):
 
 def scheduler():
     user_message = q[0]
-    
     worker = find_available_worker(user_message)
     if worker is None:
-        break                      # all workers full -> leave prompts in queue
-    worker.add_prompt(user_message)      # local call now, RPC later
+        break                      
+    worker.add_prompt(user_message)
     q.commit()
 
-# this is going to read from the user-messages-stream 
+# this is going to read from the user-messages-stream. above is psuedocode implementation. each instance of this service will have maximum 2 workers assigned to it.

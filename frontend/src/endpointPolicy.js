@@ -26,8 +26,10 @@ export function localPathOf(e) {
 }
 
 // Generic operational routes that are never part of the external client surface.
+// `/discovery/*` is the etcd listener's service-discovery view (sandbox-etcd skill,
+// authored into the listener's app.py) — internal plumbing, not a client API.
 function genericInternal(p) {
-  return p === '/health' || p.startsWith('/resilience/')
+  return p === '/health' || p.startsWith('/resilience/') || p.startsWith('/discovery/')
 }
 
 // Resolve the policy for one endpoint. `ownerNode` is the manifest node that SERVES

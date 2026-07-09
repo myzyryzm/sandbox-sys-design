@@ -9,6 +9,7 @@
 //      prefix cache; "Author hook" launches a Claude session (edit queue) that follows
 //      the sandbox-llm-worker skill: it writes <worker>/hooks.py, restarts the worker,
 //      and sets implemented:true in hook.json. Resume reopens that session.
+// Worker count (manual + autoscaling policy) lives on the Scaling tab.
 import { useEffect, useState } from 'react'
 
 const STATE_URL = (sys) => `/api/custom/llm-worker/state?system=${encodeURIComponent(sys)}`
@@ -57,7 +58,6 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [savedAt, setSavedAt] = useState(0)
-  const [workerCount, setWorkerCount] = useState(1 + (node.replicas?.instances?.length || 0)) // total = base + instances
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
@@ -91,11 +91,6 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
   const live = state?.live
   const hook = state?.hook
 
-  const currentTotal = 1 + (node.replicas?.instances?.length || 0)
-  const wc = Number(workerCount)
-  const workerCountErr = !Number.isInteger(wc) || wc < 1 || wc > 8
-  const workerCountUnchanged = wc === currentTotal
-
   async function saveConfig() {
     if (!form) return
     setBusy(true)
@@ -118,24 +113,6 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
     } catch (err) {
       setError(err.message)
     } finally {
-      setBusy(false)
-    }
-  }
-
-  async function scaleReplicas() {
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await fetch('/api/custom/llm-worker/scale', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ system: systemId, node: node.id, instances: Number(workerCount) }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      onClose()
-    } catch (err) {
-      setError(err.message)
       setBusy(false)
     }
   }
@@ -313,45 +290,6 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
               Resume session
             </button>
           ) : null}
-        </div>
-      </div>
-
-      {/* Replicas — scale to N instances under one service id, NO load balancer */}
-      <div className="form-section">
-        <div className="form-section-head"><span>Replicas</span></div>
-        <p className="sim-desc">
-          Run <code>{node.id}</code> as multiple instances under one service id —{' '}
-          <strong>no load balancer</strong>. Instances (<code>{node.id}-2…N</code>) share this worker's
-          build, tunables, hook and token stream; a caller reaches them only over gRPC
-          (<code>{node.id}-i:50051</code>) and does its own request forwarding across the group.
-        </p>
-        <label className="form-row">
-          <span>Total workers</span>
-          <input
-            type="number"
-            min={1}
-            max={8}
-            value={workerCount}
-            onChange={(e) => setWorkerCount(e.target.value)}
-            disabled={busy}
-          />
-        </label>
-        {workerCountErr ? (
-          <small className="field-error">Between 1 and 8 workers</small>
-        ) : (
-          <small className="form-hint">
-            {wc >= 2 ? `Creates: ${node.id} + ${node.id}-2…${wc}` : '1 = a single worker (no replicas)'}
-          </small>
-        )}
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="primary"
-            onClick={scaleReplicas}
-            disabled={busy || workerCountErr || workerCountUnchanged}
-          >
-            {busy ? 'Applying… (building instances can take a minute)' : 'Apply'}
-          </button>
         </div>
       </div>
 

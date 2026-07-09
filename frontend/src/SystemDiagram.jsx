@@ -194,24 +194,34 @@ function svcOrdinal(id) {
 }
 
 // Controllable nodes carry a bottom "Edit" button (which opens the tabbed edit modal);
-// the LB, other infra, websocket servers, and load-balanced instances do not.
+// the LB, other infra, websocket servers, and load-balanced instances do not. A scaler
+// sidecar DOES carry one: it sits at the top of its group's stack and hosts the GROUP's
+// Edit button (the click opens its base's modal — see the Edit onClick).
 function hasEditButton(node) {
   return isDeletable(node) && !isWsServer(node) && !isSvcInstance(node)
 }
 
-// The BASE node of an LLM worker group. It renders as a compact cluster-header card
-// (name + Edit, lb-style chrome); its container's live data is shown on a render-only
-// virtual `<name>-1` card stacked below it, alongside the real `<name>-2..N` instances.
-function isLlmBase(node) {
-  return node.service_type === 'llm_worker' && node.type === 'service' && !node.instanceOf
+// The BASE node of a WORKER GROUP — any custom type whose frontend module declares a
+// `workerGroup` predicate (LLM workers, Kafka consumer groups). The group's name lives
+// on the dotted box's enlarged top-left label instead of a header strip; the group's
+// scaler card (scalerOf) renders at the base's position as the stack header, carrying
+// the group's Edit button — a scaler-less group falls back to a bare Edit button. The
+// base container's live data is shown on a render-only virtual `<name>-1` card stacked
+// below, alongside the real `<name>-2..N` instances.
+function isGroupBase(node) {
+  return node.type === 'service' && !node.instanceOf && !!customTypeOf(node)?.workerGroup?.(node)
 }
 
-// Where a node's live data (nodeData / customState / outages) lives: a virtual llm
-// worker card reads the base container's id via stateKey; every real node reads its own.
+// Where a node's live data (nodeData / customState / outages) lives: a virtual group
+// member card reads the base container's id via stateKey; every real node reads its own.
 const dataKeyOf = (node) => node.stateKey || node.id
 
-// Height of the compact llm cluster-header card: header strip + Edit band.
-const LLM_HDR_H = HEADER_H + EDIT_GAP + EDIT_H + PAD
+// Height of a worker group's entry (the bare Edit button).
+const GROUP_ENTRY_H = EDIT_H
+// Member cards stack in columns of at most this many; overflow wraps to a new column
+// to the right, so a big group grows sideways instead of into the nodes below it.
+const GROUP_COL_SIZE = 3
+const GROUP_COL_GAP_X = 16
 
 // y where the metric/endpoint rows end.
 function metricsBottom(node, bodyRows) {
@@ -419,21 +429,21 @@ export default function SystemDiagram({
   const nodes = manifest.nodes
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
 
-  // Render-only ordinal-1 cards for LLM worker groups: the base node draws as the compact
-  // cluster header, and this virtual card shows the base CONTAINER's data (stateKey) as
-  // `<name>-1` in the worker column. `::` is outside NAME_RE, so the synthetic id can
+  // Render-only ordinal-1 cards for worker groups: the base node draws as the compact
+  // group entry, and this virtual card shows the base CONTAINER's data (stateKey) as
+  // `<name>-1` in the member column. `::` is outside NAME_RE, so the synthetic id can
   // never collide with a real node. instanceOf gives it the instance behaviors for free
   // (no Edit button, no method rows, group drag via the base). NOT added to byId — edges,
   // traces and drag-entry lookups must only ever see manifest nodes.
-  const llmVirtuals = nodes.filter(isLlmBase).map((b) => ({
+  const groupVirtuals = nodes.filter(isGroupBase).map((b) => ({
     ...b,
     id: `${b.id}::1`,
     label: `${b.id}-1`,
     instanceOf: b.id,
     stateKey: b.id,
-    llmVirtual: true,
+    groupVirtual: true,
   }))
-  const renderNodes = [...nodes, ...llmVirtuals]
+  const renderNodes = [...nodes, ...groupVirtuals]
 
   // Effective on-screen position of a node: a live drag override wins over the manifest.
   const posOf = (n) => drag[n.id] || n.position
@@ -544,7 +554,10 @@ export default function SystemDiagram({
     return [
       ...methodsOf(node.id).map((e) => ({ kind: 'method', e })),
       ...functionsOf(node.id).map((fn) => ({ kind: 'fn', fn })),
-      ...consumersOf(node.id).map((c) => ({ kind: 'cons', c })),
+      // A worker group's base renders as a bare Edit button, so its CONS rows live on
+      // the virtual `<name>-1` member card instead (stateKey = the base id). Real
+      // instances stay row-less — one row per group, not per member.
+      ...consumersOf(node.groupVirtual ? node.stateKey : node.id).map((c) => ({ kind: 'cons', c })),
       ...keyspacesOf(node.id).map((ks) => ({ kind: 'ks', ks })),
       ...wsStatRowsOf(node.id),
     ]
@@ -557,11 +570,11 @@ export default function SystemDiagram({
   const customEdges = customModules.flatMap((m) => m.diagramEdges?.({ manifest, customState }) || [])
 
   // Layout helpers that fold in a node's live custom-type runtime (so a custom body band
-  // reserves the right vertical space and edges hit the recomputed center). An llm base
-  // renders as the fixed-height cluster header; a virtual `<name>-1` card reads the base
+  // reserves the right vertical space and edges hit the recomputed center). A group base
+  // renders as the fixed-height entry button; a virtual `<name>-1` card reads the base
   // container's runtime via dataKeyOf so its live-body band is reserved too.
   const heightOf = (n) =>
-    isLlmBase(n) ? LLM_HDR_H : nodeHeight(n, bodyRowsOf(n), customState[dataKeyOf(n)], rowsOf(n))
+    isGroupBase(n) ? GROUP_ENTRY_H : nodeHeight(n, bodyRowsOf(n), customState[dataKeyOf(n)], rowsOf(n))
 
   // Websocket relay servers render as ONE combined body: a rigid vertical stack (one shared
   // column x, cascaded top-to-bottom by height + STACK_GAP) instead of each server floating at
@@ -598,7 +611,7 @@ export default function SystemDiagram({
   const SVC_STACK_GAP_X = 28 // horizontal gap between the entry sidecar and its instance column — kept tight so the instances read as sitting right next to their load balancer
   for (const [entryId, instances] of svcInstancesByEntry) {
     const entry = byId[entryId]
-    if (!entry || isLlmBase(entry)) continue // llm groups stack BELOW their header instead
+    if (!entry || isGroupBase(entry)) continue // worker groups stack BELOW their entry instead
     instances.sort((a, b) => svcOrdinal(a.id) - svcOrdinal(b.id))
     const ep = posOf(entry)
     const anchorX = ep.x + NODE_W + SVC_STACK_GAP_X
@@ -612,28 +625,46 @@ export default function SystemDiagram({
     }
   }
 
-  // LLM worker groups: the compact header card sits at the base's position and ONE column
-  // of worker cards hangs below it — the virtual `<name>-1` first (explicitly; its `::1`
-  // id doesn't parse as an ordinal), then the real instances in ordinal order.
-  const llmStackPos = new Map()
-  const llmMembersByBase = new Map() // base id -> [virtual, ...instances] in render order
-  for (const b of nodes.filter(isLlmBase)) {
-    const virtual = llmVirtuals.find((v) => v.stateKey === b.id)
+  // Worker groups (LLM workers, consumer groups): the group's scaler card (scalerOf)
+  // sits at the base's position — the TOP of the stack — as the group header carrying
+  // the group's Edit button; the member cards hang below it in columns of at most
+  // GROUP_COL_SIZE — the virtual `<name>-1` first (explicitly; its `::1` id doesn't
+  // parse as an ordinal), then the real instances in ordinal order, wrapping to a new
+  // column to the right when one fills. A scaler-less group (mid-migration system)
+  // falls back to the bare Edit button at the base's position.
+  const groupStackPos = new Map()
+  const groupMembersByBase = new Map() // base id -> [virtual, ...instances] in render order
+  const scalerByBase = new Map() // base id -> its scaler sidecar node (scalerOf)
+  const scalerPos = new Map()
+  for (const b of nodes.filter(isGroupBase)) {
+    const virtual = groupVirtuals.find((v) => v.stateKey === b.id)
     const instances = (svcInstancesByEntry.get(b.id) || [])
       .slice()
       .sort((a, x) => svcOrdinal(a.id) - svcOrdinal(x.id))
     const members = [virtual, ...instances]
-    llmMembersByBase.set(b.id, members)
+    groupMembersByBase.set(b.id, members)
     const bp = posOf(b)
-    let y = bp.y + LLM_HDR_H + STACK_GAP
-    for (const m of members) {
-      llmStackPos.set(m.id, { x: bp.x, y })
-      y += heightOf(m) + STACK_GAP
+    const scaler = nodes.find((s) => s.scalerOf === b.id)
+    if (scaler) {
+      scalerByBase.set(b.id, scaler)
+      scalerPos.set(scaler.id, { x: bp.x, y: bp.y })
     }
+    const topY = bp.y + (scaler ? heightOf(scaler) : GROUP_ENTRY_H) + STACK_GAP
+    const colYs = [] // per-column running y (cards differ in height when live bodies show)
+    members.forEach((m, i) => {
+      const col = Math.floor(i / GROUP_COL_SIZE)
+      if (colYs[col] == null) colYs[col] = topY
+      groupStackPos.set(m.id, { x: bp.x + col * (NODE_W + GROUP_COL_GAP_X), y: colYs[col] })
+      colYs[col] += heightOf(m) + STACK_GAP
+    })
   }
 
   const effPos = (n) =>
-    stackPosByServerId.get(n.id) || llmStackPos.get(n.id) || svcStackPos.get(n.id) || posOf(n)
+    stackPosByServerId.get(n.id) ||
+    groupStackPos.get(n.id) ||
+    scalerPos.get(n.id) ||
+    svcStackPos.get(n.id) ||
+    posOf(n)
   // Drag payload for a whole tier: captures every server's CURRENT stacked position so a group
   // drag shifts them all by the same delta (the stack then re-derives identically, shifted).
   const fleetDragArg = (tier) => ({
@@ -800,7 +831,7 @@ export default function SystemDiagram({
   // instance. Uses effPos (the derived stacked positions), and labels the box with the
   // service name — the group's "full service" outline. LLM groups are boxed separately
   // below (header + worker column, drawn even for a single-worker group).
-  const groupBox = (entryId, members) => {
+  const groupBox = (entryId, members, labelBand = 16) => {
     const minX = Math.min(...members.map((m) => effPos(m).x))
     const minY = Math.min(...members.map((m) => effPos(m).y))
     const maxX = Math.max(...members.map((m) => effPos(m).x + NODE_W))
@@ -809,22 +840,27 @@ export default function SystemDiagram({
       entryId,
       label: entryId,
       x: minX - CLUSTER_PAD,
-      y: minY - CLUSTER_PAD - 16, // extra top band for the label
+      y: minY - CLUSTER_PAD - labelBand, // extra top band for the label
       w: maxX - minX + 2 * CLUSTER_PAD,
-      h: maxY - minY + 2 * CLUSTER_PAD + 16,
+      h: maxY - minY + 2 * CLUSTER_PAD + labelBand,
     }
   }
   const svcLbBoxes = [...svcInstancesByEntry.entries()]
     .map(([entryId, instances]) => {
-      if (isLlmBase(byId[entryId] || {})) return null
+      if (isGroupBase(byId[entryId] || {})) return null
       const members = [byId[entryId], ...instances].filter(Boolean)
       if (members.length < 2) return null
       return groupBox(entryId, members)
     })
     .filter(Boolean)
-  const llmBoxes = [...llmMembersByBase.entries()].map(([baseId, members]) =>
-    groupBox(baseId, [byId[baseId], ...members].filter(Boolean)),
-  )
+  // A worker-group box's label doubles as the group's TITLE (the entry is the scaler
+  // header card, or a bare Edit button on a scaler-less group), so it gets a taller
+  // band and the larger .llm-group-label style. The scaler sits INSIDE the box, at
+  // the top of the stack.
+  const workerGroupBoxes = [...groupMembersByBase.entries()].map(([baseId, members]) => ({
+    ...groupBox(baseId, [byId[baseId], scalerByBase.get(baseId), ...members].filter(Boolean), 26),
+    group: true,
+  }))
 
   // The system boundary: the dotted box the user owns. It's a PERSISTED, freely
   // movable/resizable rectangle (manifest.boundary). Until the user customizes it, it
@@ -1511,12 +1547,13 @@ export default function SystemDiagram({
       ))}
 
       {/* Dotted box around each per-service load-balancer group (entry sidecar + instances)
-          and each LLM worker group (header card + worker column), labelled with the service
-          name; sits behind the nodes it groups. Non-interactive. */}
-      {[...svcLbBoxes, ...llmBoxes].map((b) => (
+          and each worker group (entry button + member columns — LLM workers, consumer
+          groups), labelled with the service name; sits behind the nodes it groups.
+          Non-interactive. */}
+      {[...svcLbBoxes, ...workerGroupBoxes].map((b) => (
         <g key={`svclb-${b.entryId}`} style={{ pointerEvents: 'none' }}>
           <rect x={b.x} y={b.y} width={b.w} height={b.h} rx="14" className="ws-fleet-box" />
-          <text x={b.x + 12} y={b.y + 16} className="ws-fleet-label">
+          <text x={b.x + 12} y={b.y + (b.group ? 20 : 16)} className={b.group ? 'llm-group-label' : 'ws-fleet-label'}>
             {b.label}
           </text>
         </g>
@@ -1744,12 +1781,16 @@ export default function SystemDiagram({
         const p = effPos(node)
         const gClass = [dimmed(node.id) ? 'dim' : '', dragMode ? 'draggable' : ''].filter(Boolean).join(' ') || undefined
 
-        // An LLM worker group's base node renders as a COMPACT cluster-header card — the
-        // same chrome as the load balancer (standard box + health-colored header strip)
-        // holding just the service name and the Edit button. Its container's metrics/live
-        // body render on the virtual `<name>-1` card stacked below (see llmVirtuals);
-        // edges and traces into the group keep anchoring here.
-        if (isLlmBase(node)) {
+        // A worker group's base node renders NOTHING when the group has a scaler — the
+        // scaler card occupies the base's position as the stack header and carries the
+        // group's Edit button. The base stays the drag/edge anchor (posOf is untouched)
+        // and its container's metrics/live body/health render on the virtual `<name>-1`
+        // card stacked below (see groupVirtuals). A scaler-less group (mid-migration
+        // system) falls back to the bare Edit button, sitting under the dotted box's
+        // enlarged `<name>` label (which doubles as the title). No outage caption
+        // either — the `<name>-1` card shows the countdown.
+        if (isGroupBase(node)) {
+          if (scalerByBase.has(node.id)) return null
           return (
             <g
               key={node.id}
@@ -1761,15 +1802,6 @@ export default function SystemDiagram({
                   : undefined
               }
             >
-              <rect width={NODE_W} height={LLM_HDR_H} rx="8" className="node-box" style={{ stroke: color }} />
-              <rect width={NODE_W} height={HEADER_H} rx="8" fill={color} />
-              <rect width={NODE_W} height={HEADER_H / 2} fill={color} />
-              <text x={PAD} y={HEADER_H / 2 + 5} className="node-label">
-                {node.label}
-              </text>
-              <text x={NODE_W - PAD} y={HEADER_H / 2 + 5} className="node-type">
-                llm workers
-              </text>
               {onRequestEdit && (
                 <g
                   className="node-edit"
@@ -1778,15 +1810,12 @@ export default function SystemDiagram({
                     onRequestEdit(node)
                   }}
                 >
-                  <rect x={PAD} y={HEADER_H + EDIT_GAP} width={NODE_W - 2 * PAD} height={EDIT_H} rx="6" className="node-edit-btn" />
-                  <text x={NODE_W / 2} y={HEADER_H + EDIT_GAP + EDIT_H / 2} className="node-edit-label">
+                  <rect x={PAD} y={0} width={NODE_W - 2 * PAD} height={EDIT_H} rx="6" className="node-edit-btn" />
+                  <text x={NODE_W / 2} y={EDIT_H / 2} className="node-edit-label">
                     Edit
                   </text>
                 </g>
               )}
-              {/* No outage caption here: the `<name>-1` card 8px below shows the same
-                  container's countdown, and a caption would overprint its header. The
-                  orange strip still signals the outage on the header itself. */}
             </g>
           )
         }
@@ -1803,12 +1832,16 @@ export default function SystemDiagram({
                       // A ws-server is part of a combined body: dragging it moves the whole
                       // tier stack (servers + panel) together, not just this one card. A
                       // load-balanced instance likewise moves its whole group — its position is
-                      // derived from the entry, so we drag the entry.
+                      // derived from the entry, so we drag the entry. A scaler sidecar is the
+                      // group's stack header (its position derives from the base), so dragging
+                      // it drags the base — the whole group moves together.
                       isWsServer(node)
                         ? fleetDragArg(node.wsTier)
                         : isSvcInstance(node)
                           ? { kind: 'node', nodeId: node.instanceOf, startPos: posOf(byId[node.instanceOf]) }
-                          : { kind: 'node', nodeId: node.id, startPos: p },
+                          : node.scalerOf && byId[node.scalerOf]
+                            ? { kind: 'node', nodeId: node.scalerOf, startPos: posOf(byId[node.scalerOf]) }
+                            : { kind: 'node', nodeId: node.id, startPos: p },
                     )
                 : undefined
             }
@@ -1827,7 +1860,9 @@ export default function SystemDiagram({
                     ? 'node-box external'
                     : isWsServer(node)
                       ? 'node-box ws-server'
-                      : 'node-box'
+                      : node.scalerOf
+                        ? 'node-box scaler'
+                        : 'node-box'
               }
               style={{ stroke: isWsServer(node) && !inOutage ? COLOR_HEX.green : color }}
             />
@@ -1843,7 +1878,11 @@ export default function SystemDiagram({
             <text x={NODE_W - PAD} y={HEADER_H / 2 + 5} className="node-type">
               {node.type === 'client'
                 ? (node.stateful ? 'client · stateful' : 'client')
-                : node.external ? 'external' : node.type}
+                : node.external
+                  ? 'external'
+                  : node.scalerOf
+                    ? 'scaler'
+                    : node.type}
             </text>
 
             {isLB(node) ? (
@@ -2018,10 +2057,13 @@ export default function SystemDiagram({
               }
               if (row.kind === 'cons') {
                 // A Kafka consumer function: clicking it traces the consume edge service → cluster.
-                // "CONS" stands in for the GET/POST method badge an HTTP row would show.
+                // "CONS" stands in for the GET/POST method badge an HTTP row would show. On a
+                // virtual group-member card the OWNER is the base node (stateKey) — the trace
+                // must anchor on a real manifest node.
                 const c = row.c
+                const owner = node.stateKey || node.id
                 const active =
-                  !!consumerTrace && consumerTrace.service === node.id && consumerTrace.name === c.name
+                  !!consumerTrace && consumerTrace.service === owner && consumerTrace.name === c.name
                 return (
                   <g
                     key={`cons-${c.name}`}
@@ -2034,7 +2076,7 @@ export default function SystemDiagram({
                       onClearFunctionTrace?.()
                       onClearKeyspaceTrace?.()
                       if (active) onClearConsumerTrace?.()
-                      else onSelectConsumer?.(c, node.id)
+                      else onSelectConsumer?.(c, owner)
                     }}
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
@@ -2104,13 +2146,15 @@ export default function SystemDiagram({
 
             {/* Bottom "Edit" button on controllable nodes — opens the tabbed edit modal
                 (endpoints / gRPC / schema / topics / shutdown / delete). Sits below the
-                metrics: id on top, metrics in the middle, Edit at the bottom. */}
+                metrics: id on top, metrics in the middle, Edit at the bottom. A scaler
+                card hosts its GROUP's Edit button — the click opens the BASE's modal
+                (where the Scaling tab lives; Delete there cascades the scaler). */}
             {hasEditButton(node) && onRequestEdit && (
               <g
                 className="node-edit"
                 onClick={dragMode ? undefined : (e) => {
                   e.stopPropagation()
-                  onRequestEdit(node)
+                  onRequestEdit(node.scalerOf ? (byId[node.scalerOf] || node) : node)
                 }}
               >
                 <rect

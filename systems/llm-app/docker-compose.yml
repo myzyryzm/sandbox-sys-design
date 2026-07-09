@@ -148,11 +148,6 @@ services:
       REDIS_ADDR: redis://llm-worker-stream:6379
     depends_on:
       - llm-worker-stream
-  usr-msg-strm-srvc:
-    # Service "usr-msg-strm-srvc" — added by Add service (generic FastAPI backend)
-    build: ./usr-msg-strm-srvc
-    environment:
-      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
   etcd-1:
     # etcd cluster "etcd" — added by Add etcd
     image: gcr.io/etcd-development/etcd:v3.5.21
@@ -234,3 +229,15 @@ services:
       - ./etcd.json:/etcd/etcd.json:ro
     depends_on:
       - llm-worker-stream
+  llm-worker-scaler:
+    # Scaler for LLM worker "llm-worker" — watches batch utilization, drives autoscaling
+    build: ./llm-worker-scaler
+    environment:
+      SERVICE_ID: llm-worker-scaler
+      BASE: llm-worker
+      SYSTEM_ID: llm-app
+    volumes:
+      - ./llm-worker/scaler.json:/config/scaler.json:ro
+      - ./manifest.json:/manifest.json:ro
+    depends_on:
+      - llm-worker

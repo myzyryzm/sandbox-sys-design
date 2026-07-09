@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
 
 /**
  * An event stream's "Consumers" tab (embedded in NodeEditModal for a Kafka cluster node). It
@@ -6,21 +7,34 @@ import { useCallback, useEffect, useState } from 'react'
  * internal service consumes one of the cluster's topics. Each function is OWNED by exactly one
  * service — identity is (service, name) — and lives in systems/<id>/consumers.json.
  *
- * The shape mirrors the Endpoints / client-Functions tabs: a permanent id (the name), an
- * auto-generated + editable (append-style) description, a read-only changelog, and a Resume-able
- * Claude session that implements the real poll loop in the service's app.py. Defining or changing
- * (topic/poll rate) a consumer launches a sandbox-event-stream session to (re)write the loop and
- * rebuild that one service; the streams.json consumer group + the cluster→service manifest edge are
- * written mechanically by POST /api/consumers (no rebuild). On the diagram the service shows a
- * "CONS <name>" row; clicking it traces cluster → service.
+ * DEFINING a consumer CREATES a brand-new consuming service (the consumer_group custom type):
+ * POST /api/custom-services scaffolds the service (plain FastAPI template with the cluster's
+ * streams.json pause-flag mount and SERVICE_ID pre-wired), its `<name>-scaler` autoscaler
+ * container, the named Kafka consumer group, and the consume edge — then a launched
+ * sandbox-event-stream session authors the real poll loop. The group scales to N member
+ * containers from its Scaling tab (all joining the same group id, so Kafka rebalances the
+ * topic's partitions across them) and the scaler drives that automatically from lag.
+ *
+ * EDITING an existing function (topic / poll rate / group / description) keeps the original
+ * mechanical path — POST /api/consumers — plus a session when code must change. The shape
+ * mirrors the Endpoints / client-Functions tabs: a permanent id (the name), an auto-generated +
+ * editable (append-style) description, a read-only changelog, and a Resume-able Claude session.
+ * On the diagram the service shows a "CONS <name>" row; clicking it traces cluster → service.
  */
 
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+const GROUP_RE = /^[a-zA-Z0-9._-]+$/ // mirrors GROUP_RE in server/consumers.js
 const POLL_MIN = 100
 const POLL_MAX = 600_000
 
 function blankForm() {
-  return { name: '', service: '', topic: '', pollRate: 1000, description: '' }
+  return { name: '', service: '', serviceName: '', topic: '', pollRate: 1000, groupId: '', description: '' }
+}
+
+// The default Kafka group id for a function — mirrors groupIdFor in server/consumers.js.
+// Shown live in the group field until the user takes it over.
+function defaultGroupId(service, name) {
+  return service && name ? `${service}-${name}` : ''
 }
 
 // A history entry's ISO timestamp -> a short, local, human label (best-effort).
@@ -56,11 +70,15 @@ function diffEntry(curr, prev) {
   }
   if (curr.topic !== prev.topic) diff.topic = { from: prev.topic, to: curr.topic }
   if (curr.pollRate !== prev.pollRate) diff.pollRate = { from: prev.pollRate, to: curr.pollRate }
+  // Pre-named-groups snapshots lack groupId — only diff when both sides carry one.
+  if (curr.groupId && prev.groupId && curr.groupId !== prev.groupId) {
+    diff.group = { from: prev.groupId, to: curr.groupId }
+  }
   // A rename snapshot carries `renamedFrom` (the spec is otherwise unchanged).
   if (curr.renamedFrom && curr.name && curr.renamedFrom !== curr.name) {
     diff.rename = { from: curr.renamedFrom, to: curr.name }
   }
-  diff.empty = !diff.description && !diff.topic && !diff.pollRate && !diff.rename
+  diff.empty = !diff.description && !diff.topic && !diff.pollRate && !diff.group && !diff.rename
   return diff
 }
 
@@ -68,8 +86,7 @@ function diffEntry(curr, prev) {
 // repeatable procedure lives in the sandbox-event-stream skill, so this stays short. The
 // consumers.json entry, the streams.json consumer group, and the cluster→service edge already
 // exist (written by POST /api/consumers); the session writes the code + rebuilds the service.
-function buildConsumerPrompt({ systemId, service, cluster, name, topic, pollRate, description, editing, priorDescription, priorTopic, priorPollRate }) {
-  const groupId = `${service}-${name}`
+function buildConsumerPrompt({ systemId, service, cluster, name, topic, pollRate, groupId, description, editing, created, priorDescription, priorTopic, priorPollRate, priorGroupId }) {
   const lines = [
     `Use the sandbox-event-stream skill to ${editing ? 'UPDATE' : 'IMPLEMENT'} a Kafka CONSUMER FUNCTION in the "${systemId}" system.`,
     '',
@@ -79,12 +96,25 @@ function buildConsumerPrompt({ systemId, service, cluster, name, topic, pollRate
     `Poll rate: ${pollRate}ms`,
     '',
   ]
+  if (created) {
+    lines.push(
+      `The consuming service "${service}" was JUST created for this function (a consumer-group service:`,
+      `fresh FastAPI code from the plain template, container already built and running, with a`,
+      `"${service}-scaler" autoscaler alongside it). Its compose entry ALREADY mounts`,
+      `./${cluster}/streams.json at /streams/${cluster}.json:ro (the pause flag) and sets`,
+      `SERVICE_ID=${service} — do NOT edit docker-compose.yml. Set client_id=os.environ["SERVICE_ID"]`,
+      `on the KafkaConsumer: the group scales to N member containers that all run this same loop, and`,
+      `the diagram maps members to their assigned partitions by that client id.`,
+      '',
+    )
+  }
   if (editing) {
     lines.push(
       `This consumer ALREADY EXISTS and is implemented in systems/${systemId}/${service}/app.py. FIRST read it,`,
       `then MODIFY it in place to match the values above` +
         (priorTopic && priorTopic !== topic ? ` (topic changed ${priorTopic} → ${topic})` : '') +
         (priorPollRate && priorPollRate !== pollRate ? ` (poll rate changed ${priorPollRate}ms → ${pollRate}ms)` : '') +
+        (priorGroupId && priorGroupId !== groupId ? ` (consumer group changed ${priorGroupId} → ${groupId} — a fresh group, so it starts from auto_offset_reset)` : '') +
         `. Keep the metrics middleware and every other route/loop untouched.`,
       '',
       `Current behavior (existing description):`,
@@ -140,35 +170,41 @@ function buildConsumerDescriptionsPrompt({ systemId, service, cluster, name, top
 // Prompt for renaming an IMPLEMENTED consumer: the consumers.json entry + streams.json group are
 // already renamed by the PUT; this session renames the poll loop + its group id in app.py and
 // rebuilds. (A pending consumer is registry-only — no session.)
-function buildConsumerRenamePrompt({ systemId, service, cluster, oldName, newName, topic }) {
+function buildConsumerRenamePrompt({ systemId, service, cluster, oldName, newName, topic, oldGroupId, newGroupId }) {
+  const groupChanged = oldGroupId !== newGroupId
   return [
     `Use the sandbox-event-stream skill to RENAME a Kafka consumer function in the "${systemId}" system.`,
     '',
     `Service "${service}" had a consumer function "${oldName}" (consuming topic "${topic}" on cluster "${cluster}").`,
-    `It is now "${newName}" in the registry, and its streams.json consumer group has already been moved`,
-    `from "${service}-${oldName}" to "${service}-${newName}". Update the CODE to match.`,
+    `It is now "${newName}" in the registry` +
+      (groupChanged
+        ? `, and its streams.json consumer group has already been moved from "${oldGroupId}" to "${newGroupId}". Update the CODE to match.`
+        : `. Its consumer group "${newGroupId}" is user-named and UNCHANGED — only the function name moves.`),
     '',
     `In systems/${systemId}/${service}/app.py:`,
     `- Rename the poll-loop function _consume_${oldName} → _consume_${newName} (and its thread start).`,
-    `- Change that consumer's Kafka group_id from "${service}-${oldName}" to "${service}-${newName}".`,
+    groupChanged
+      ? `- Change that consumer's Kafka group_id from "${oldGroupId}" to "${newGroupId}".`
+      : `- Leave that consumer's Kafka group_id ("${newGroupId}") exactly as it is.`,
     `- Leave the topic, poll cadence, pause-awareness, metrics middleware and every other route/loop intact.`,
     '',
     `Then rebuild ONLY that service:`,
     `    docker compose -f systems/${systemId}/docker-compose.yml up -d --build ${service}`,
-    '',
-    `(The new group id is a fresh Kafka consumer group, so it starts from auto_offset_reset = earliest.)`,
+    ...(groupChanged
+      ? ['', `(The new group id is a fresh Kafka consumer group, so it starts from auto_offset_reset = earliest.)`]
+      : []),
   ].join('\n')
 }
 
 // Prompt for deleting an implemented consumer: its consumers.json entry + streams.json group + edge
 // are already removed by the DELETE; this session strips the poll loop from app.py and rebuilds.
-function buildConsumerDeletePrompt({ systemId, service, cluster, name, topic }) {
+function buildConsumerDeletePrompt({ systemId, service, cluster, name, topic, groupId }) {
   return [
     `Use the sandbox-event-stream skill to DELETE the Kafka consumer function "${name}" from service`,
     `"${service}" in the "${systemId}" system (it consumed topic "${topic}" on cluster "${cluster}").`,
     '',
     `Its consumers.json entry, streams.json consumer group, and the ${cluster}→${service} manifest edge`,
-    `have already been removed. Remove the matching background consumer loop (group id "${service}-${name}")`,
+    `have already been removed. Remove the matching background consumer loop (group id "${groupId}")`,
     `from systems/${systemId}/${service}/app.py, leaving the metrics middleware and every other route/loop`,
     `intact, then rebuild only that service:`,
     `    docker compose -f systems/${systemId}/docker-compose.yml up -d --build ${service}`,
@@ -190,16 +226,14 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
   const [editingDownstream, setEditingDownstream] = useState([]) // Claude-managed node ids this loop calls/reads/writes
   const [editingDownstreamDescriptions, setEditingDownstreamDescriptions] = useState({}) // node id -> connection blurb
   const [editingHistory, setEditingHistory] = useState([])
-  const [editingOriginal, setEditingOriginal] = useState(null) // { topic, pollRate } baseline for change detection
+  const [editingOriginal, setEditingOriginal] = useState(null) // { topic, pollRate, groupId } baseline for change detection
+  const [groupTouched, setGroupTouched] = useState(false) // once the user edits the group field it stops tracking service+name
   const [form, setForm] = useState(blankForm)
   const [confirmKey, setConfirmKey] = useState(null) // function pending delete confirm
   const [renamingKey, setRenamingKey] = useState(null) // function whose name is being edited inline
   const [renameValue, setRenameValue] = useState('')
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
-
-  // The internal services that can own a consumer function (external services are third-party).
-  const services = (manifest?.nodes || []).filter((n) => n.type === 'service').map((n) => n.id)
 
   const load = useCallback(() => {
     return Promise.all([
@@ -220,7 +254,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
   const key = (c) => `${c.service} ${c.name}`
 
   function startAdd() {
-    setForm({ ...blankForm(), service: services[0] || '', topic: topics[0] || '' })
+    setForm({ ...blankForm(), topic: topics[0] || '' })
     setEditingName(null)
     setEditingService(null)
     setEditingDescription('')
@@ -228,12 +262,14 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
     setEditingDownstreamDescriptions({})
     setEditingHistory([])
     setEditingOriginal(null)
+    setGroupTouched(false)
     setError(null)
     setAdding(true)
   }
 
   function startEdit(c) {
-    setForm({ name: c.name, service: c.service, topic: c.topic, pollRate: c.pollRate, description: '' })
+    setForm({ name: c.name, service: c.service, topic: c.topic, pollRate: c.pollRate, groupId: c.groupId || defaultGroupId(c.service, c.name), description: '' })
+    setGroupTouched(true) // an existing group id never auto-tracks; it's edited deliberately
     setEditingName(c.name)
     setEditingService(c.service)
     setEditingDescription(c.description || '')
@@ -245,7 +281,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
     setEditingDownstream(ds)
     setEditingDownstreamDescriptions(Object.fromEntries(ds.filter((d) => typeof dd[d] === 'string').map((d) => [d, dd[d]])))
     setEditingHistory(Array.isArray(c.history) ? c.history : [])
-    setEditingOriginal({ topic: c.topic, pollRate: c.pollRate })
+    setEditingOriginal({ topic: c.topic, pollRate: c.pollRate, groupId: c.groupId || defaultGroupId(c.service, c.name) })
     setConfirmKey(null)
     setError(null)
     setAdding(true)
@@ -266,39 +302,69 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
   async function submit() {
     setError(null)
     const name = editing ? editingName : form.name.trim()
-    const service = editing ? editingService : form.service
+    const service = editing ? editingService : form.serviceName.trim()
     if (!editing) {
       if (!name) return setError('Function name is required')
       if (!IDENT_RE.test(name)) {
         return setError('Function name must start with a letter or underscore and use only letters, digits and underscores')
       }
-      if (!service) return setError('Pick a consuming service')
-      if ((consumers || []).some((c) => c.service === service && c.name === name)) {
-        return setError(`a consumer function "${name}" already exists on ${service}`)
+      const svcErr = !service ? 'New service name is required' : nodeNameError(service)
+      if (svcErr) return setError(svcErr)
+      if ((manifest?.nodes || []).some((n) => n.id === service || n.id === `${service}-scaler`)) {
+        return setError(`a node named "${service}" (or its scaler) already exists in this system`)
       }
     }
     if (!form.topic) return setError('Pick a topic to consume')
     const pollRate = Math.min(POLL_MAX, Math.max(POLL_MIN, Math.round(Number(form.pollRate) || 0)))
     if (!Number.isFinite(pollRate) || pollRate <= 0) return setError('Poll rate must be a positive number (ms)')
 
+    // The Kafka group id: the field's value once touched, else the live default.
+    const groupId = (groupTouched ? form.groupId.trim() : '') || defaultGroupId(service, name)
+    if (!GROUP_RE.test(groupId) || groupId.length > 100) {
+      return setError('Consumer group must use only letters, digits, dot, underscore and hyphen (max 100)')
+    }
+    if ((consumers || []).some((c) => c.groupId === groupId && !(c.service === service && c.name === name))) {
+      return setError(`consumer group "${groupId}" is already used by another consumer on this cluster`)
+    }
+
     // On edit the Describe field holds only the NEW text — append it to the existing description.
     const description = editing ? joinDescription(editingDescription, form.description) : form.description
     // A code change (needs a Claude session + rebuild) = create, or an edit that moved the topic /
-    // poll rate. A description-only edit is registry-only (no session).
+    // poll rate / group id. A description-only edit is registry-only (no session).
     const dirtyCode =
-      !editing || form.topic !== editingOriginal.topic || pollRate !== editingOriginal.pollRate
+      !editing ||
+      form.topic !== editingOriginal.topic ||
+      pollRate !== editingOriginal.pollRate ||
+      groupId !== editingOriginal.groupId
     const conversationId = crypto.randomUUID()
 
     setBusy(true)
     try {
-      // 1. Persist the consumer (records history; writes streams.json group + manifest edge).
-      const res = await fetch('/api/consumers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ system: systemId, service, name, cluster, topic: form.topic, pollRate, description, conversationId }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      // 1. Persist. A NEW consumer creates its own consuming service + scaler (the
+      //    consumer_group custom type — builds two containers, so this takes a minute);
+      //    an EDIT is the original registry-only upsert.
+      if (!editing) {
+        const res = await fetch('/api/custom-services', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            system: systemId,
+            serviceType: 'consumer_group',
+            name: service,
+            options: { cluster, topic: form.topic, fn: name, groupId, pollRate, description, conversationId },
+          }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      } else {
+        const res = await fetch('/api/consumers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ system: systemId, service, name, cluster, topic: form.topic, pollRate, groupId, description, conversationId }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      }
 
       // 2. A code change launches the implement/update session; a description-only edit just closes.
       if (dirtyCode) {
@@ -306,11 +372,13 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
           sessionId: conversationId,
           mode: 'new',
           prompt: buildConsumerPrompt({
-            systemId, service, cluster, name, topic: form.topic, pollRate, description,
+            systemId, service, cluster, name, topic: form.topic, pollRate, groupId, description,
             editing,
+            created: !editing,
             priorDescription: editingDescription,
             priorTopic: editingOriginal?.topic,
             priorPollRate: editingOriginal?.pollRate,
+            priorGroupId: editingOriginal?.groupId,
           }),
         }, { kind: 'consumer', target: service, title: name })
         onClose()
@@ -392,7 +460,11 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
         onLaunch({
           sessionId: crypto.randomUUID(),
           mode: 'new',
-          prompt: buildConsumerRenamePrompt({ systemId, service: c.service, cluster, oldName: c.name, newName, topic: c.topic }),
+          prompt: buildConsumerRenamePrompt({
+            systemId, service: c.service, cluster, oldName: c.name, newName, topic: c.topic,
+            oldGroupId: data.oldGroupId || c.groupId,
+            newGroupId: data.consumer?.groupId || c.groupId,
+          }),
         }, { kind: 'consumer', target: c.service, title: `rename ${newName}` })
         onClose()
         return
@@ -432,7 +504,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
         onLaunch({
           sessionId: crypto.randomUUID(),
           mode: 'new',
-          prompt: buildConsumerDeletePrompt({ systemId, service: c.service, cluster, name: c.name, topic: c.topic }),
+          prompt: buildConsumerDeletePrompt({ systemId, service: c.service, cluster, name: c.name, topic: c.topic, groupId: data.groupId || c.groupId }),
         }, { kind: 'consumer', target: c.service, title: `delete ${c.name}` })
         onClose()
         return
@@ -467,7 +539,9 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
               <li key={k} className="endpoint-list-row">
                 <span className="endpoint-list-method">CONS</span>
                 <code className="endpoint-alias">{c.name}</code>
-                <span className="endpoint-list-path">{c.service} ← {c.topic} · {c.pollRate}ms</span>
+                <span className="endpoint-list-path" title={`consumer group: ${c.groupId}`}>
+                  {c.service} ← {c.topic} · {c.pollRate}ms · <code>{c.groupId}</code>
+                </span>
                 {!c.implemented && (
                   <span className="scenario-pending" title="Poll loop not implemented yet — open or resume the Claude session">pending</span>
                 )}
@@ -529,13 +603,10 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
       {/* ---- Define / edit a consumer function ---- */}
       {!adding ? (
         <div className="form-section">
-          <button className="link" onClick={startAdd} disabled={busy || consumers === null || services.length === 0 || topics.length === 0}>
+          <button className="link" onClick={startAdd} disabled={busy || consumers === null || topics.length === 0}>
             ＋ Define a consumer
           </button>
-          {consumers !== null && services.length === 0 && (
-            <small className="form-hint">Add an internal service first — only services can consume.</small>
-          )}
-          {consumers !== null && topics.length === 0 && services.length > 0 && (
+          {consumers !== null && topics.length === 0 && (
             <small className="form-hint">This cluster has no topics yet — add one in the Topics tab first.</small>
           )}
         </div>
@@ -596,6 +667,14 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
                               <code>{diff.topic.to}</code>
                             </div>
                           )}
+                          {diff.group && (
+                            <div className="endpoint-history-change">
+                              <span className="endpoint-history-field">group:</span>
+                              <code>{diff.group.from}</code>
+                              <span className="endpoint-history-arrow">→</span>
+                              <code>{diff.group.to}</code>
+                            </div>
+                          )}
                           {diff.pollRate && (
                             <div className="endpoint-history-change">
                               <span className="endpoint-history-field">poll:</span>
@@ -622,15 +701,28 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
             />
           </label>
 
-          <label className="form-row">
-            <span>Service</span>
-            <select value={form.service} onChange={setField('service')} disabled={busy || editing}>
-              {!form.service && <option value="">— pick a service —</option>}
-              {services.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-          </label>
+          {editing ? (
+            <label className="form-row">
+              <span>Service</span>
+              <input value={editingService} disabled />
+            </label>
+          ) : (
+            <>
+              <label className="form-row">
+                <span>New service name</span>
+                <input
+                  value={form.serviceName}
+                  onChange={setField('serviceName')}
+                  placeholder="order-consumer  (a brand-new consuming service)"
+                  disabled={busy}
+                />
+              </label>
+              <small className="form-hint">
+                Creates a NEW service to own this consumer (plus a <code>-scaler</code> that autoscales
+                its members from consumer lag). {NODE_NAME_HINT}
+              </small>
+            </>
+          )}
 
           <label className="form-row">
             <span>Topic</span>
@@ -641,6 +733,24 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
               ))}
             </select>
           </label>
+
+          <label className="form-row">
+            <span>Consumer group</span>
+            <input
+              value={groupTouched ? form.groupId : defaultGroupId(editing ? editingService : form.serviceName.trim(), editing ? editingName : form.name.trim())}
+              onChange={(e) => {
+                setGroupTouched(true)
+                setForm((f) => ({ ...f, groupId: e.target.value }))
+              }}
+              placeholder="kafka consumer-group id"
+              disabled={busy}
+            />
+          </label>
+          <small className="form-hint">
+            The Kafka consumer-group id — every instance of the consuming service joins it, and Kafka
+            spreads the topic's partitions across them.
+            {editing && ' Changing it makes a FRESH group (offsets restart from auto_offset_reset).'}
+          </small>
 
           <label className="form-row">
             <span>Poll rate (ms)</span>
@@ -695,8 +805,8 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
 
           <p className="sim-desc">
             {editing
-              ? 'Changing the topic or poll rate re-authors the loop in a fresh Claude session; a description-only edit just saves.'
-              : 'Creating opens a Claude session that writes the real Kafka poll loop and rebuilds the service.'}
+              ? 'Changing the topic, poll rate or group re-authors the loop in a fresh Claude session; a description-only edit just saves.'
+              : 'Creating builds the new service + its scaler (about a minute), then opens a Claude session that writes the real Kafka poll loop.'}
           </p>
 
           {error && <p className="modal-error">{error}</p>}
@@ -704,7 +814,9 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
           <div className="modal-actions">
             <button type="button" onClick={cancelForm} disabled={busy}>Cancel</button>
             <button type="button" className="primary" onClick={submit} disabled={busy}>
-              {busy ? 'Working…' : editing ? 'Save' : 'Define & open Claude'}
+              {busy
+                ? editing ? 'Working…' : 'Creating service… (builds two containers)'
+                : editing ? 'Save' : 'Create service & open Claude'}
             </button>
           </div>
         </div>

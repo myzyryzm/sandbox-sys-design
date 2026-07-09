@@ -20,8 +20,8 @@
       "type": "prometheus",
       "origin": "create-prometheus",
       "position": {
-        "x": -23,
-        "y": 253
+        "x": -29,
+        "y": 317
       },
       "metrics": [
         {
@@ -286,8 +286,8 @@
       "origin": "create-custom-service",
       "service_type": "llm_worker",
       "position": {
-        "x": 666,
-        "y": 230
+        "x": 672,
+        "y": 184
       },
       "metrics": [
         {
@@ -399,59 +399,13 @@
       }
     },
     {
-      "id": "usr-msg-strm-srvc",
-      "label": "usr-msg-strm-srvc",
-      "type": "service",
-      "origin": "create-service",
-      "position": {
-        "x": 1208,
-        "y": 460
-      },
-      "metrics": [
-        {
-          "label": "req/s",
-          "query": "sum(rate(http_requests_total{job=\"usr-msg-strm-srvc\"}[1m]))",
-          "unit": "/s"
-        },
-        {
-          "label": "p95",
-          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"usr-msg-strm-srvc\"}[1m])) by (le)) * 1000",
-          "unit": "ms"
-        },
-        {
-          "label": "in-flight",
-          "query": "sum(http_requests_in_flight{job=\"usr-msg-strm-srvc\"})",
-          "unit": ""
-        },
-        {
-          "label": "errors",
-          "query": "(sum(rate(http_requests_total{job=\"usr-msg-strm-srvc\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"usr-msg-strm-srvc\"}[1m])), 0.0001)",
-          "unit": "%",
-          "scale": 100
-        }
-      ],
-      "health": {
-        "query": "up{job=\"usr-msg-strm-srvc\"}",
-        "rules": [
-          {
-            "color": "red",
-            "when": "value < 1"
-          },
-          {
-            "color": "green",
-            "when": "value >= 1"
-          }
-        ]
-      }
-    },
-    {
       "id": "etcd",
       "label": "etcd",
       "type": "etcd",
       "origin": "create-etcd",
       "position": {
-        "x": 950,
-        "y": 560
+        "x": 793,
+        "y": 619
       },
       "etcd": {
         "size": 3,

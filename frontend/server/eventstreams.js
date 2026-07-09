@@ -43,6 +43,15 @@ const bad = (msg) => new HttpError(400, msg)
 const NAME_RE = /^[a-z][a-z0-9-]*$/ // node id == compose service == folder name
 const TOPIC_RE = /^[a-zA-Z0-9._-]+$/ // Kafka topic naming (also keeps it shell-safe)
 const MODEL_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/ // mirrors MODEL_NAME_RE in models.js
+const PARTITIONS_MAX = 64
+
+// A topic's declared partition count: a clamped positive integer. Absent/garbage
+// (incl. every pre-partitioning streams.json) means 1 — Kafka's own default here.
+function normPartitions(raw) {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 1) return 1
+  return Math.min(PARTITIONS_MAX, n)
+}
 
 // Health rule shared by every node: red when the target is down, green up.
 const HEALTH_RULES = [
@@ -80,7 +89,7 @@ function buildKafka({ name, topics }) {
   // shape as the redis/minio `-init` seeders in databases.js. Topic ids are
   // regex-validated, so this generated shell string can't be injected into.
   const creates = topics
-    .map((t) => `/opt/kafka/bin/kafka-topics.sh --bootstrap-server ${name}:9092 --create --if-not-exists --topic ${t.id} --partitions 1 --replication-factor 1`)
+    .map((t) => `/opt/kafka/bin/kafka-topics.sh --bootstrap-server ${name}:9092 --create --if-not-exists --topic ${t.id} --partitions ${normPartitions(t.partitions)} --replication-factor 1`)
     .join('\n')
   const seed = [
     'set -e',
@@ -173,7 +182,7 @@ function validate(body) {
     if (!TOPIC_RE.test(id) || id.length > 100) throw bad(`invalid topic id "${id}"`)
     if (seen.has(id)) throw bad(`duplicate topic "${id}"`)
     seen.add(id)
-    topics.push({ id, producers: [], consumers: [] })
+    topics.push({ id, partitions: normPartitions(raw && raw.partitions), producers: [], consumers: [] })
   }
 
   return { system, type, spec, name, manifest, topics }
@@ -299,7 +308,7 @@ function loadRegistry(system, id) {
     // producer/consumer code. Absent fields mean "no schema / documented-only".
     const schemaModel = typeof t.schemaModel === 'string' ? t.schemaModel : ''
     const enforceSchema = t.enforceSchema === true
-    map.set(t.id, { id: t.id, producers, consumers, schemaModel, enforceSchema })
+    map.set(t.id, { id: t.id, partitions: normPartitions(t.partitions), producers, consumers, schemaModel, enforceSchema })
   }
   return map
 }
@@ -357,9 +366,10 @@ async function getStreams(system, id, { checkLive = true } = {}) {
     order.push({ ...meta, live: checkLive ? Boolean(live && live.has(tid)) : null })
   }
   // Broker topics not in the registry (created out-of-band) — show them too.
+  // Their partition count is unknown without a per-topic --describe probe: null.
   if (live) {
     for (const tid of live) {
-      if (!registry.has(tid)) order.push({ id: tid, producers: [], consumers: [], schemaModel: '', enforceSchema: false, live: true })
+      if (!registry.has(tid)) order.push({ id: tid, partitions: null, producers: [], consumers: [], schemaModel: '', enforceSchema: false, live: true })
     }
   }
   order.sort((a, b) => a.id.localeCompare(b.id))
@@ -413,6 +423,55 @@ function setTopicSchema(system, id, topic, schemaModel, enforceSchema) {
   else delete t.enforceSchema
   fs.writeFileSync(file, JSON.stringify(raw, null, 2) + '\n')
   return { id: t.id, schemaModel: model, enforceSchema: enforce }
+}
+
+// Grow a topic's partition count on the LIVE broker, then persist it in the
+// registry. Kafka can only ever ADD partitions (`--alter --partitions N` rejects a
+// decrease), so this is increase-only by validation too. Mechanical — no rebuild;
+// consumer groups on the topic rebalance onto the new partitions automatically.
+async function alterTopicPartitions(system, id, topic, partitions) {
+  if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
+  const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
+  const node = manifest.nodes.find((n) => n.id === id)
+  if (!node || node.origin !== 'create-event-stream') {
+    throw bad(`"${id}" is not an event stream in this system`)
+  }
+  if (typeof topic !== 'string' || !TOPIC_RE.test(topic)) throw bad(`invalid topic "${topic}"`)
+
+  const file = path.join(systemDir(system), id, 'streams.json')
+  let raw
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    throw bad(`no topic registry for "${id}"`)
+  }
+  const t = (Array.isArray(raw?.topics) ? raw.topics : []).find((x) => x && x.id === topic)
+  if (!t) throw bad(`topic "${topic}" not found on "${id}"`)
+
+  const current = normPartitions(t.partitions)
+  const n = Number(partitions)
+  if (!Number.isInteger(n) || n <= current) {
+    throw bad(`partitions must be an integer greater than the current ${current} (Kafka cannot shrink a topic)`)
+  }
+  if (n > PARTITIONS_MAX) throw bad(`partitions must be at most ${PARTITIONS_MAX}`)
+
+  const compose = path.join(systemsDir, system, 'docker-compose.yml')
+  try {
+    await pexec(
+      'docker',
+      ['compose', '-f', compose, 'exec', '-T', id,
+        '/opt/kafka/bin/kafka-topics.sh', '--bootstrap-server', `${id}:9092`,
+        '--alter', '--topic', topic, '--partitions', String(n)],
+      { cwd: repoRoot, timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
+    )
+  } catch (err) {
+    const detail = `${err.stdout || ''}${err.stderr || ''}` || err.message
+    throw new HttpError(500, `kafka-topics --alter failed:\n${detail}`)
+  }
+
+  t.partitions = n
+  fs.writeFileSync(file, JSON.stringify(raw, null, 2) + '\n')
+  return { id: t.id, partitions: n }
 }
 
 // Set (or clear) the cluster-level "pause consumers" flag in streams.json. Like
@@ -498,12 +557,18 @@ export default function eventStreams() {
         if (req.method === 'POST') {
           try {
             const body = await readJsonBody(req)
-            // Two cluster registry writes share this route: a per-topic schema set
-            // (carries `topic`) and the cluster-level consumers-pause toggle (no
-            // `topic`, carries a boolean `consumersPaused`). Both are rebuild-free.
+            // Three cluster registry writes share this route: a per-topic schema set
+            // (carries `topic`, no `partitions`), a per-topic partition grow (carries
+            // `topic` + `partitions` — the only one that touches the live broker), and
+            // the cluster-level consumers-pause toggle (no `topic`, carries a boolean
+            // `consumersPaused`). None needs a docker rebuild.
             if (body.topic === undefined && typeof body.consumersPaused === 'boolean') {
               const result = setClusterPause(body.system, body.id, body.consumersPaused)
               return json(200, { ok: true, ...result })
+            }
+            if (body.topic !== undefined && body.partitions !== undefined) {
+              const topic = await alterTopicPartitions(body.system, body.id, body.topic, body.partitions)
+              return json(200, { ok: true, topic })
             }
             const topic = setTopicSchema(body.system, body.id, body.topic, body.schemaModel, body.enforceSchema)
             return json(200, { ok: true, topic })
