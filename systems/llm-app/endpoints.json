@@ -106,6 +106,37 @@
           "description": "verify user exists in user_id via user_id in auth header. if not then error\nverify chat exists via chat_id and user_id matchest up. if not then error\nuser_msg_id = snowflake_id\nassistant_msg_id = snowflake_id\nwrite in single transaction [\nMessage(id: user_msg_id, content: request.content, chat: Chat(id: request.chat_id), role: 'user')\nUserMessage(id: assistant_msg_id, message: user_msg_id, chat: Chat(id: request.chat_id))\n]\nthen relay the llm-worker's generated tokens as SSE. The worker XADDs TYPED entries to redis stream tokens:{assistant_msg_id} on llm-worker-stream — each entry is {type: \"token\"|\"done\"|\"error\", text: string}. Read with XREAD BLOCK 5000 from id \"0\" and dispatch on type (NEVER on the text):\n- type==\"token\": yield data: {\"token\": <text>}   # one a-z char\n- type==\"done\": yield data: {\"done\": true, \"last\": <text>} and close — <text> is the worker's configurable LAST_TOKEN marker (etcd /config/app-settings/, default \"DONE\"), informational only\n- type==\"error\": yield data: {\"error\": <text>} and close — the generation aborted\nA timed-out XREAD sends an SSE keepalive comment and blocks again; the whole stream is hard-capped at 120s so the request always terminates. (The worker also XADDs {run_id: assistant_msg_id} to the runs:started stream on every accepted AddPrompt — that announcement drives the persistence readers, not this endpoint.)"
         }
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/chat-messages/{chat_id}",
+      "protocol": "http",
+      "alias": "getMessagesForChat",
+      "request": {},
+      "response": {},
+      "requestModel": "",
+      "responseModel": "GetChatResponse",
+      "description": "get all messages for params.chat_id ordered by created_at (earliest first)",
+      "downstream": [
+        "chat-db"
+      ],
+      "downstreamDescriptions": {
+        "chat-db": "fetches the chat row (404 if missing) to embed in each message, then reads all of the chat's message rows ordered by created_at ascending"
+      },
+      "downstreamMethods": {},
+      "conversationId": "57db9161-db8c-4d5c-b617-c2e84b2dab68",
+      "history": [
+        {
+          "at": "2026-07-10T04:33:38.871Z",
+          "alias": "getMessagesForChat",
+          "path": "/chat-messages/{chat_id}",
+          "request": {},
+          "response": {},
+          "requestModel": "",
+          "responseModel": "GetChatResponse",
+          "description": "get all messages for params.chat_id ordered by created_at (earliest first)"
+        }
+      ]
     }
   ]
 }

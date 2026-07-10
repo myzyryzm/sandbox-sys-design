@@ -9,8 +9,8 @@
       "label": "nginx LB",
       "type": "load_balancer",
       "position": {
-        "x": -24,
-        "y": 155
+        "x": -27,
+        "y": 98
       },
       "metrics": []
     },
@@ -20,8 +20,8 @@
       "type": "prometheus",
       "origin": "create-prometheus",
       "position": {
-        "x": 207,
-        "y": 146
+        "x": 211,
+        "y": 79
       },
       "metrics": [
         {
@@ -199,8 +199,8 @@
       "type": "kafka",
       "origin": "create-event-stream",
       "position": {
-        "x": 1209,
-        "y": 652
+        "x": 1420,
+        "y": 857
       },
       "metrics": [
         {
@@ -286,8 +286,8 @@
       "origin": "create-custom-service",
       "service_type": "llm_worker",
       "position": {
-        "x": 672,
-        "y": 184
+        "x": 811,
+        "y": 111
       },
       "metrics": [
         {
@@ -358,8 +358,8 @@
       "origin": "create-custom-service",
       "streamOf": "llm-worker",
       "position": {
-        "x": 67,
-        "y": 360
+        "x": 105,
+        "y": 309
       },
       "metrics": [
         {
@@ -441,8 +441,8 @@
       "type": "etcd",
       "origin": "create-etcd",
       "position": {
-        "x": 694,
-        "y": 831
+        "x": 847,
+        "y": 739
       },
       "etcd": {
         "size": 3,
@@ -517,8 +517,8 @@
         "groupId": "processUserMessage-group"
       },
       "position": {
-        "x": 1204,
-        "y": 232
+        "x": 1396,
+        "y": 300
       },
       "metrics": [
         {
@@ -617,8 +617,8 @@
       "type": "service",
       "origin": "create-service",
       "position": {
-        "x": 419,
-        "y": 421
+        "x": 473,
+        "y": 409
       },
       "metrics": [
         {
@@ -687,8 +687,8 @@
         "field": "content"
       },
       "position": {
-        "x": 327,
-        "y": 695
+        "x": 362,
+        "y": 723
       },
       "metrics": [
         {
@@ -770,8 +770,8 @@
   ],
   "boundary": {
     "x": -36,
-    "y": 117,
-    "w": 1499,
-    "h": 1142
+    "y": 42,
+    "w": 1743,
+    "h": 1217
   }
 }

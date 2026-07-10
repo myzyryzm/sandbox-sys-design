@@ -1,22 +1,3 @@
 {
-  "processes": [
-    {
-      "id": "cf18dc3a-b29d-4f9e-9d7d-7ea0d1985a28",
-      "name": "LLM",
-      "client_list": [
-        {
-          "client": "frontend",
-          "method": "getChats",
-          "intervalSeconds": 5
-        }
-      ],
-      "websocket_list": [],
-      "failure_list": [],
-      "constraint_list": [
-        "all client calls have a valid user_id in header"
-      ],
-      "createdAt": "2026-07-09T22:36:47.101Z",
-      "updatedAt": "2026-07-09T22:36:47.101Z"
-    }
-  ]
+  "processes": []
 }

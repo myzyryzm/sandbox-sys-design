@@ -226,9 +226,9 @@ def create_chat(
 # offset (default 0) and `maxChats` is the page size (default 10). Chats are
 # returned newest-updated first, so callers can walk them with cursor += page.
 #
-# GetChatsResponse types `chats` as a single Chat, but the described behavior
-# (a user's chats, ordered, paginated by cursor/maxChats) is a page of rows —
-# we return `chats` as a list of Chat objects.
+# GetChatsResponse types `chats` as Chat[] — a page of the caller's chats,
+# ordered by updated_at and paginated by cursor/maxChats. Each element mirrors
+# the Chat model (id, user_id, title, updated_at, created_at).
 # ---------------------------------------------------------------------------
 
 DEFAULT_CURSOR = 0
@@ -463,6 +463,92 @@ async def create_message(
         # Disable nginx (lb) response buffering for THIS response so tokens reach
         # the caller incrementally — no nginx.conf change needed.
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# List a chat's messages (GET /chat-messages/{chat_id})
+#
+# Reads chat-db only. Returns every Message in the chat, oldest first (ordered
+# by created_at ascending). Each Message embeds the full Chat it belongs to
+# (GetChatResponse -> Message[] -> Message.chat: Chat), so we fetch the chat row
+# once and reuse it for every message. 404s if the chat doesn't exist.
+#
+# Sync `def` so FastAPI runs the blocking psycopg calls in its thread pool.
+# ---------------------------------------------------------------------------
+
+
+class MessageChat(BaseModel):
+    id: int
+    user_id: int
+    title: str
+    updated_at: str
+    created_at: str
+
+
+class MessageItem(BaseModel):
+    id: int
+    chat: MessageChat
+    content: str
+    role: str
+    created_at: str
+
+
+class GetChatResponse(BaseModel):
+    messages: list[MessageItem]
+
+
+@app.get("/chat-messages/{chat_id}", response_model=GetChatResponse)
+def get_messages_for_chat(chat_id: int):
+    """Return all messages for a chat, earliest first (ordered by created_at).
+
+    Fetches the chat row once (404 if it doesn't exist) so each Message can embed
+    its Chat, then reads the chat's messages ordered by created_at ascending (id
+    ascending to break ties for a stable order).
+    """
+    try:
+        with psycopg.connect(
+            CHAT_DB_DSN, row_factory=dict_row, autocommit=True
+        ) as conn:
+            chat = conn.execute(
+                "SELECT id, user_id, title, updated_at, created_at"
+                " FROM chat WHERE id = %s",
+                (chat_id,),
+            ).fetchone()
+            if chat is None:
+                raise HTTPException(status_code=404, detail="chat not found")
+            rows = conn.execute(
+                """
+                SELECT id, content, role, created_at
+                FROM message
+                WHERE chat_id = %s
+                ORDER BY created_at ASC, id ASC
+                """,
+                (chat_id,),
+            ).fetchall()
+    except HTTPException:
+        raise
+    except psycopg.Error:
+        raise HTTPException(status_code=503, detail="chat-db unavailable")
+
+    chat_obj = MessageChat(
+        id=chat["id"],
+        user_id=chat["user_id"],
+        title=chat["title"],
+        updated_at=chat["updated_at"].isoformat(),
+        created_at=chat["created_at"].isoformat(),
+    )
+    return GetChatResponse(
+        messages=[
+            MessageItem(
+                id=row["id"],
+                chat=chat_obj,
+                content=row["content"],
+                role=row["role"],
+                created_at=row["created_at"].isoformat(),
+            )
+            for row in rows
+        ]
     )
 
 

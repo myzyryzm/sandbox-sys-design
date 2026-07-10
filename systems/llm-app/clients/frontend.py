@@ -32,6 +32,9 @@ earlier one saved) — otherwise `state` is an in-memory scratchpad discarded at
         token = state.get("token")           # value login() saved on an earlier run
         return lb.get("/auth-service/me?token=" + (token or ""))
 """
+import json
+import random
+import string
 import sys
 import time
 import urllib.request
@@ -90,12 +93,141 @@ def getChats():
     return result
 
 
+# --- endToEnd: simulate a full, human-like chat session -------------------------
+# Mimics a person using the chat UI for `user_id`: open a chat (a random existing
+# one, else create one), load its history, then loop — send a random message,
+# stream the assistant's reply, pause proportional to the reply length, and
+# probabilistically stay / return to a previous chat / start a new one.
+
+# The client run is hard-killed at 30s, so we bound our own loop well under that and
+# exit cleanly (so the recorded calls are still emitted). These are safety caps, not
+# part of the behavior the description asks for.
+_END_TO_END_BUDGET_SECONDS = 25.0
+_END_TO_END_MAX_TURNS = 100
+
+
+def _random_content():
+    """A user message: lower-case letters, 1..100 characters long."""
+    n = random.randint(1, 100)
+    return "".join(random.choices(string.ascii_lowercase, k=n))
+
+
+def _as_messages(resp):
+    """Normalize a getMessagesForChat response into [{role, content}] (earliest first)."""
+    rows = resp.get("messages", []) if isinstance(resp, dict) else []
+    return [{"role": m.get("role"), "content": m.get("content")} for m in rows]
+
+
+def _assistant_text_from_sse(raw):
+    """Reconstruct the assistant's reply from the createMessage SSE response.
+
+    createMessage streams `data: {"token": "<char>"}` frames, then a done/error
+    frame. lb.post returns the raw event-stream text; we concatenate the per-token
+    payloads into the full assistant message (non-token frames contribute nothing).
+    """
+    if not isinstance(raw, str):
+        return ""
+    out = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            frame = json.loads(line[5:].strip())
+        except ValueError:
+            continue
+        if isinstance(frame, dict) and "token" in frame:
+            out.append(str(frame["token"]))
+    return "".join(out)
+
+
+def endToEnd(user_id):
+    """Drive a full chat session for `user_id` against chat-service.
+
+    `user_id` (a string arg) identifies the caller in the X-User-Id header on every
+    call. Opens a chat, loads its messages, then loops: send a random user message,
+    stream the assistant's reply, wait a bit, then decide to stay on the chat, go
+    back to a previous chat, or start a new one.
+    """
+    # Every lb.* call this run carries `X-User-Id: <user_id>` (chat-service reads the
+    # caller from this header for all four endpoints below).
+    _send_user_header(user_id)
+
+    # chats = chat-service.getChats()
+    listed = lb.get("/chat-service/chats")
+    chats = listed.get("chats", []) if isinstance(listed, dict) else []
+
+    # cur_chat = a random existing chat, or a freshly created one if the user has none.
+    if chats:
+        cur_chat = random.choice(chats)
+    else:
+        created = lb.post("/chat-service/chats", {})
+        cur_chat = created if isinstance(created, dict) else {}
+        chats = [cur_chat]
+    cur_chat_id = cur_chat.get("id")
+
+    # messages = chat-service.getMessagesForChat(cur_chat)
+    messages = _as_messages(lb.get(f"/chat-service/chat-messages/{cur_chat_id}"))
+
+    deadline = time.monotonic() + _END_TO_END_BUDGET_SECONDS
+    for _ in range(_END_TO_END_MAX_TURNS):
+        if time.monotonic() >= deadline:
+            break
+
+        # A random user turn.
+        content = _random_content()
+        messages.append({"role": "user", "content": content})
+
+        # assistant_content = stream chat-service.createMessage(chat_id, content).
+        # createMessage is an SSE POST; lb.post sends the body, reads the whole
+        # event-stream, and we rebuild the reply text from its token frames.
+        assistant_content = _assistant_text_from_sse(
+            lb.post(
+                "/chat-service/messages",
+                {"chat_id": cur_chat_id, "content": content},
+            )
+        )
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        # Read time: proportional to reply length, capped at 10s.
+        time.sleep(min(len(assistant_content) * 0.1, 10))
+
+        # Decide what to do next. The longer the current conversation, the more
+        # likely the user moves on (switches chats).
+        turns = len(messages) // 2
+        p_switch = min(0.9, 0.2 * turns)
+        if random.random() >= p_switch:
+            continue  # stay on the same chat
+
+        # Switching: start a NEW chat vs. return to a PREVIOUS one. With fewer chats
+        # to return to, a new chat is more likely (only the current chat -> always new).
+        n_chats = max(1, len(chats))
+        others = [c for c in chats if c.get("id") != cur_chat_id]
+        if not others or random.random() < 1.0 / n_chats:
+            # New chat -> create it, switch to it, and clear the conversation.
+            created = lb.post("/chat-service/chats", {})
+            new_id = created.get("id") if isinstance(created, dict) else None
+            if new_id is not None:
+                cur_chat = created
+                cur_chat_id = new_id
+                chats.append(cur_chat)
+                messages = []
+        else:
+            # Previous chat -> switch to a different existing chat and load its history.
+            cur_chat = random.choice(others)
+            cur_chat_id = cur_chat.get("id")
+            messages = _as_messages(
+                lb.get(f"/chat-service/chat-messages/{cur_chat_id}")
+            )
+
+
 # === end functions ===
 
 
 # Maps a function name to its callable. Register every function defined above.
 FUNCTIONS = {
     "getChats": getChats,
+    "endToEnd": endToEnd,
 }
 
 

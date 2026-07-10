@@ -785,18 +785,27 @@ export default function SystemDiagram({
   // source's BORDER (not its center) matters for short hops: with a center start the midpoint —
   // where the sequence badge + info button sit — lands inside the source box, and the nodes
   // (drawn after the edges) cover it. Border-to-border keeps the midpoint in the visible gap.
-  // A trace endpoint is a real node OR a synthetic ws-fleet:<tier> box (used to collapse the
-  // relay fan-out into one hop in / one hop out per downstream). Resolve either to its center
-  // and to the border point facing the other end. (rectCenter/rectBorderToward/fleetBoxByTier
-  // are declared below but only read at render time, so the forward reference is fine.)
+  // A trace endpoint is a real node, a synthetic ws-fleet:<tier> box (used to collapse the
+  // relay fan-out into one hop in / one hop out per downstream), OR a worker-group base
+  // (LLM workers, consumer groups, persistence readers) whose whole scaled stack is one
+  // dotted box — its edges anchor on that box border, not the entry card inside it. Resolve
+  // any of these to its center and to the border point facing the other end.
+  // (rectCenter/rectBorderToward/fleetBoxByTier/workerGroupBoxByBase are declared below but
+  // only read at render time, so the forward reference is fine.)
   const traceCenter = (id) =>
-    isFleetId(id) ? rectCenter(fleetBoxByTier.get(fleetTierOf(id))) : centerOf(id)
+    isFleetId(id)
+      ? rectCenter(fleetBoxByTier.get(fleetTierOf(id)))
+      : workerGroupBoxByBase.has(id)
+        ? rectCenter(workerGroupBoxByBase.get(id))
+        : centerOf(id)
   const traceBorder = (id, toward) =>
     isFleetId(id)
       ? rectBorderToward(fleetBoxByTier.get(fleetTierOf(id)), toward)
-      : byId[id]
-        ? borderPointToward(toward, byId[id])
-        : centerOf(id)
+      : workerGroupBoxByBase.has(id)
+        ? rectBorderToward(workerGroupBoxByBase.get(id), toward)
+        : byId[id]
+          ? borderPointToward(toward, byId[id])
+          : centerOf(id)
   const traceLine = (fromId, toId) => {
     const ac = traceCenter(fromId)
     const bc = traceCenter(toId)
@@ -943,6 +952,9 @@ export default function SystemDiagram({
     ...groupBox(baseId, [byId[baseId], scalerByBase.get(baseId), ...members].filter(Boolean), 26),
     group: true,
   }))
+  // Edges address a worker group by its base id; anchor them on the group's dotted box
+  // (like a ws fleet) instead of the entry card inside it — see traceCenter/traceBorder.
+  const workerGroupBoxByBase = new Map(workerGroupBoxes.map((b) => [b.entryId, b]))
 
   // The system boundary: the dotted box the user owns. It's a PERSISTED, freely
   // movable/resizable rectangle (manifest.boundary). Until the user customizes it, it

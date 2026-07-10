@@ -2,24 +2,49 @@
   "functions": [
     {
       "client": "frontend",
-      "name": "getChats",
-      "args": [],
-      "description": "calls chat-service.getChats. always supply a valid user_id at runtime",
+      "name": "endToEnd",
+      "args": [
+        {
+          "name": "user_id",
+          "type": "string"
+        }
+      ],
+      "description": "args.user_id will be used in the header for all function calls. \nchats = chat-service.getChats(). \ncur_chat = random chat if len(chats) else chat-service.createChat()\nmessages = chat-service.getMessagesForChat(cur_chat)\nloop {\ncontent = lower case letters from 1 to 100 characters long.\nmessages.append[{role: user, content}]\nassistant_content = stream chat-service.createMessage(chat_id: cur_chat.id, content)\nmessages.append[{role: assistant, content: assistant_content}]\nwait(min(len(assistant_content) * 0.1, 10))\ndecide if the user should create a new chat, stay on same chat, or go to previous chat (more messages in current conversation the more likely to switch; if switching then more likely to create a new chat if less chats; if new chat then clear messages)\n}",
       "steps": [
         {
           "method": "GET",
           "path": "/chat-service/chats",
           "label": ""
+        },
+        {
+          "method": "POST",
+          "path": "/chat-service/chats",
+          "label": ""
+        },
+        {
+          "method": "GET",
+          "path": "/chat-service/chat-messages/{cur_chat_id}",
+          "label": ""
+        },
+        {
+          "method": "POST",
+          "path": "/chat-service/messages",
+          "label": ""
         }
       ],
-      "conversationId": "43f194f4-b496-4104-afe3-08d025252082",
-      "createdAt": "2026-07-09T22:36:16.376Z",
-      "updatedAt": "2026-07-09T22:36:16.376Z",
+      "conversationId": "15022965-896a-4c8d-9212-462beeb716e5",
+      "createdAt": "2026-07-10T04:41:26.664Z",
+      "updatedAt": "2026-07-10T04:41:26.664Z",
       "history": [
         {
-          "at": "2026-07-09T22:36:16.376Z",
-          "description": "calls chat-service.getChats. always supply a valid user_id at runtime",
-          "args": []
+          "at": "2026-07-10T04:41:26.664Z",
+          "description": "args.user_id will be used in the header for all function calls. \nchats = chat-service.getChats(). \ncur_chat = random chat if len(chats) else chat-service.createChat()\nmessages = chat-service.getMessagesForChat(cur_chat)\nloop {\ncontent = lower case letters from 1 to 100 characters long.\nmessages.append[{role: user, content}]\nassistant_content = stream chat-service.createMessage(chat_id: cur_chat.id, content)\nmessages.append[{role: assistant, content: assistant_content}]\nwait(min(len(assistant_content) * 0.1, 10))\ndecide if the user should create a new chat, stay on same chat, or go to previous chat (more messages in current conversation the more likely to switch; if switching then more likely to create a new chat if less chats; if new chat then clear messages)\n}",
+          "args": [
+            {
+              "name": "user_id",
+              "type": "string"
+            }
+          ]
         }
       ]
     }

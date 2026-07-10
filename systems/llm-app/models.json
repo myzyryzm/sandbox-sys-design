@@ -44,10 +44,10 @@
     },
     {
       "name": "GetChatsResponse",
-      "ts": "interface GetChatsResponse {\n  chats: Chat;\n}",
+      "ts": "interface GetChatsResponse {\n  chats: Chat[];\n}",
       "description": "",
       "createdAt": "2026-07-07T22:53:40.106Z",
-      "updatedAt": "2026-07-07T22:53:40.106Z"
+      "updatedAt": "2026-07-10T04:25:55.568Z"
     },
     {
       "name": "CreateMessageRequest",
@@ -62,6 +62,13 @@
       "description": "",
       "createdAt": "2026-07-07T23:12:46.170Z",
       "updatedAt": "2026-07-07T23:43:20.595Z"
+    },
+    {
+      "name": "GetChatResponse",
+      "ts": "interface GetChatResponse {\n  messages: Message[];\n}",
+      "description": "",
+      "createdAt": "2026-07-10T04:30:36.702Z",
+      "updatedAt": "2026-07-10T04:30:36.702Z"
     }
   ]
 }
