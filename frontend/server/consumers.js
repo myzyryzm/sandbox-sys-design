@@ -14,8 +14,10 @@
 //        one short line) is the matching Claude-authored blurb the diagram prints on each of those
 //        trace lines when the CONS row is clicked. Both are edited directly in consumers.json by a
 //        launched session and preserved across modal upserts (see upsertConsumer's ...prev).
-//   POST   /api/consumers  { system, service, name, cluster, topic, pollRate, description?, conversationId? }
-//     -> upsert the consumer function identified by (service, name). The actual poll loop in
+//   POST   /api/consumers  { system, service, name, cluster, topic, pollRate, groupId?, description?, conversationId? }
+//     -> upsert the consumer function identified by (service, name). `groupId` is the Kafka
+//        consumer-group id — user-named, defaulting to "<service>-<name>", unique per cluster
+//        across functions (stored on the record; authoritative everywhere). The actual poll loop in
 //        the service's app.py is authored by a launched Claude session (sandbox-event-stream
 //        skill) — like the endpoint flow. This plugin only does the MECHANICAL scaffold (no
 //        docker rebuild): register the consumer group in the cluster's streams.json and add the
@@ -30,7 +32,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { systemDir, isValidSystem } from './systems.js'
-import { bad, readJsonBody } from './scaffold.js'
+import { bad, readJsonBody, serviceMetrics, serviceCodeContainers } from './scaffold.js'
 
 // A consumer function name is a code-style identifier; with its owner service the name is the
 // function's permanent id (unique per service). Mirrors the endpoint alias / scenario name rule.
@@ -40,6 +42,10 @@ const MAX_DESC = 4000
 const POLL_MIN = 100
 const POLL_MAX = 600_000
 const POLL_DEFAULT = 1000
+// Kafka consumer-group id charset (mirrors TOPIC_RE in eventstreams.js — also keeps
+// the id safe to embed in generated code/prompts).
+const GROUP_RE = /^[a-zA-Z0-9._-]+$/
+const MAX_GROUP = 100
 
 // --- registry (systems/<id>/consumers.json) -------------------------------------
 
@@ -47,10 +53,16 @@ function consumersFile(system) {
   return path.join(systemDir(system), 'consumers.json')
 }
 // Tolerate an absent/garbled file (a system with no consumers yet has an empty list).
+// Records written before named groups existed lack `groupId` — normalize to the
+// historical derived id on read, so every consumer of this registry (the API, the
+// diagram, the delete flow, launched sessions) can rely on `c.groupId` being set.
 function readConsumers(system) {
   try {
     const raw = JSON.parse(fs.readFileSync(consumersFile(system), 'utf8'))
-    return Array.isArray(raw?.consumers) ? { consumers: raw.consumers } : { consumers: [] }
+    const consumers = (Array.isArray(raw?.consumers) ? raw.consumers : []).map((c) =>
+      c && typeof c.groupId !== 'string' ? { ...c, groupId: groupIdFor(c.service, c.name) } : c,
+    )
+    return { consumers }
   } catch {
     return { consumers: [] }
   }
@@ -69,8 +81,10 @@ function writeManifest(system, manifest) {
   )
 }
 
-// The consumer group a function maps to: one Kafka group per (service, name) so each function
-// consumes the topic independently with its own offset. Group ids allow letters/digits/.-_ .
+// The DEFAULT consumer group id for a function: one Kafka group per (service, name) so each
+// function consumes the topic independently with its own offset. Since named groups landed
+// this is only the default/back-compat derivation — the stored `groupId` on the record is
+// authoritative everywhere (registry, prompts, delete). Group ids allow letters/digits/.-_ .
 function groupIdFor(service, name) {
   return `${service}-${name}`
 }
@@ -90,8 +104,10 @@ function readStreams(system, cluster) {
 
 // Add this function's consumer group to `topic` and remove it from every other topic on the
 // cluster (so an edit that changes the topic MOVES the group). Additive for other groups — a
-// manually-wired or different-function group is never touched. Returns true if the file changed.
-function setConsumerGroup(system, cluster, topic, groupId, member) {
+// manually-wired or different-function group is never touched. `members` is the full list of
+// CONTAINERS in the group (a scaled service contributes every replica — they all join the
+// same Kafka group and split the topic's partitions). Returns true if the file changed.
+export function setConsumerGroup(system, cluster, topic, groupId, members) {
   const data = readStreams(system, cluster)
   if (!data || !Array.isArray(data.topics)) return false
   const before = JSON.stringify(data)
@@ -106,7 +122,7 @@ function setConsumerGroup(system, cluster, topic, groupId, member) {
   const t = data.topics.find((x) => x && x.id === topic)
   if (!t) return false
   if (!Array.isArray(t.consumers)) t.consumers = []
-  t.consumers.push({ groupId, members: [member] })
+  t.consumers.push({ groupId, members: Array.isArray(members) ? [...members] : [members] })
   const after = JSON.stringify(data)
   if (after === before) return false
   fs.writeFileSync(streamsFile(system, cluster), JSON.stringify(data, null, 2) + '\n')
@@ -160,14 +176,22 @@ function autoDescription({ service, cluster, topic, pollRate }) {
   return `Consume messages from topic "${topic}" on the ${cluster} Kafka cluster, polling every ${pollRate}ms, in service ${service}.`
 }
 
-function validateInput(body) {
+// Validate a consumer-function spec. `requireServiceNode:false` lets the consumer-group
+// creation flow (customTypes/consumerGroup.js) pre-validate the whole spec BEFORE the
+// owning service node exists — everything else (cluster, topic, name, group, pollRate)
+// is checked identically, so a bad spec fails before any file is written.
+export function validateInput(body, { requireServiceNode = true } = {}) {
   if (!isValidSystem(body.system)) throw bad(`unknown system "${body.system}"`)
   const system = body.system
   const manifest = readManifest(system)
 
   const service = body.service
-  const svcNode = manifest.nodes.find((n) => n.id === service && n.type === 'service')
-  if (!svcNode) throw bad(`"${service}" is not an internal service in this system`)
+  if (requireServiceNode) {
+    const svcNode = manifest.nodes.find((n) => n.id === service && n.type === 'service')
+    if (!svcNode) throw bad(`"${service}" is not an internal service in this system`)
+  } else if (typeof service !== 'string' || !service) {
+    throw bad('service is required')
+  }
 
   const cluster = body.cluster
   const clusterNode = manifest.nodes.find((n) => n.id === cluster && n.origin === 'create-event-stream')
@@ -189,6 +213,20 @@ function validateInput(body) {
   if (!Number.isFinite(pollRate) || pollRate <= 0) pollRate = POLL_DEFAULT
   pollRate = Math.min(POLL_MAX, Math.max(POLL_MIN, Math.round(pollRate)))
 
+  // The Kafka consumer-group id — user-named, defaulting to the historical derived id.
+  // Unique per cluster across OTHER functions: two functions sharing a group would steal
+  // each other's messages (each message goes to one member of a group), which is never
+  // what defining two separately-described functions means.
+  let groupId = typeof body.groupId === 'string' ? body.groupId.trim() : ''
+  if (!groupId) groupId = groupIdFor(service, name)
+  if (!GROUP_RE.test(groupId) || groupId.length > MAX_GROUP) {
+    throw bad('consumer group must use only letters, digits, dot, underscore and hyphen (max 100)')
+  }
+  const taken = readConsumers(system).consumers.some(
+    (c) => c && c.cluster === cluster && c.groupId === groupId && !(c.service === service && c.name === name),
+  )
+  if (taken) throw bad(`consumer group "${groupId}" is already used by another consumer function on "${cluster}"`)
+
   let description = typeof body.description === 'string' ? body.description : ''
   if (description.length > MAX_DESC) throw bad('description is too long')
 
@@ -204,7 +242,7 @@ function validateInput(body) {
     ? body.downstream.filter((d) => nodeIds.has(d))
     : undefined
 
-  return { system, manifest, service, cluster, name, topic, pollRate, downstream, description, conversationId }
+  return { system, manifest, service, cluster, name, topic, pollRate, groupId, downstream, description, conversationId }
 }
 
 // --- operations -----------------------------------------------------------------
@@ -213,12 +251,24 @@ function listConsumers(system) {
   return { ok: true, consumers: readConsumers(system).consumers }
 }
 
+// The group-lag metric card a consumer-group service carries next to its HTTP cards —
+// kafka-exporter labels lag by consumergroup, so the query follows the group id.
+function groupLagMetric(cluster, groupId) {
+  return {
+    label: 'lag',
+    query: `sum(kafka_consumergroup_lag{job="${cluster}",consumergroup="${groupId}"}) or vector(0)`,
+    unit: '',
+  }
+}
+
 // Create or replace the consumer function identified by (service, name). createdAt + implemented
 // are preserved on update (Claude owns `implemented`, set true after it writes the loop + rebuilds);
 // topic/pollRate/description/conversationId change and updatedAt bumps. Every save appends a history
 // snapshot. The streams.json group + manifest edge are reconciled here (no docker rebuild).
-function upsertConsumer(input) {
-  const { system, manifest, service, cluster, name, topic, pollRate, downstream, conversationId } = input
+// Exported for customTypes/consumerGroup.js, whose onAdd registers the new service's function
+// through this same path (identical history/description/registry semantics).
+export function upsertConsumer(input) {
+  const { system, manifest, service, cluster, name, topic, pollRate, groupId, downstream, conversationId } = input
   const data = readConsumers(system)
   const now = new Date().toISOString()
   const i = data.consumers.findIndex((c) => c && c.service === service && c.name === name)
@@ -230,7 +280,7 @@ function upsertConsumer(input) {
   let description = input.description
   if (!prev && !description.trim()) description = autoDescription({ service, cluster, topic, pollRate })
 
-  const snapshot = { at: now, description, topic, pollRate }
+  const snapshot = { at: now, description, topic, pollRate, groupId }
   let fn
   if (prev) {
     const history = Array.isArray(prev.history) ? prev.history : []
@@ -241,6 +291,7 @@ function upsertConsumer(input) {
       cluster,
       topic,
       pollRate,
+      groupId,
       // Only an explicit downstream overrides; otherwise ...prev preserves the existing trace.
       ...(downstream !== undefined ? { downstream } : {}),
       description,
@@ -257,6 +308,7 @@ function upsertConsumer(input) {
       cluster,
       topic,
       pollRate,
+      groupId,
       ...(downstream !== undefined ? { downstream } : {}),
       description,
       implemented: false,
@@ -269,11 +321,42 @@ function upsertConsumer(input) {
   }
   writeConsumers(system, data)
 
-  // Mechanical scaffold (no rebuild): streams.json consumer group + manifest edge.
-  setConsumerGroup(system, cluster, topic, groupIdFor(service, name), service)
-  if (addConsumerEdge(system, manifest, cluster, service)) writeManifest(system, manifest)
+  // Mechanical scaffold (no rebuild): streams.json consumer group + manifest edge. An edit
+  // that changed the GROUP ID (or, defensively, the cluster) must strip the old group first —
+  // setConsumerGroup only reconciles occurrences of the NEW id. Members are every container
+  // running the service's code (a scaled service contributes all its replicas).
+  const svcNode = manifest.nodes.find((n) => n.id === service)
+  if (prev && (prev.groupId !== groupId || prev.cluster !== cluster)) {
+    removeConsumerGroup(system, prev.cluster, prev.groupId)
+  }
+  setConsumerGroup(system, cluster, topic, groupId, svcNode ? serviceCodeContainers(svcNode) : [service])
+  let manifestDirty = addConsumerEdge(system, manifest, cluster, service)
 
-  return { ok: true, consumer: fn }
+  // A consumer-group SERVICE (customTypes/consumerGroup.js) carries its group identity on
+  // the node and a live-mounted scaler config — keep both in sync with the registry so a
+  // group-id edit propagates to the diagram's lag card and the running scaler (mtime-read,
+  // no rebuild).
+  if (svcNode?.service_type === 'consumer_group' && !svcNode.instanceOf) {
+    if (svcNode.consumerGroup?.cluster !== cluster || svcNode.consumerGroup?.groupId !== groupId) {
+      svcNode.consumerGroup = { cluster, groupId }
+      svcNode.metrics = [...serviceMetrics(service), groupLagMetric(cluster, groupId)]
+      manifestDirty = true
+    }
+    const scalerFile = path.join(systemDir(system), service, 'scaler.json')
+    try {
+      const scaler = JSON.parse(fs.readFileSync(scalerFile, 'utf8'))
+      if (scaler.groupId !== groupId) {
+        scaler.groupId = groupId
+        // In place, never tmp+rename — single-file bind mounts pin their inode.
+        fs.writeFileSync(scalerFile, JSON.stringify(scaler, null, 2) + '\n')
+      }
+    } catch {
+      /* no scaler yet (or unreadable) — nothing to sync */
+    }
+  }
+  if (manifestDirty) writeManifest(system, manifest)
+
+  return { ok: true, consumer: fn, groupChanged: prev ? prev.groupId !== groupId : false }
 }
 
 // Rename the consumer function (service, oldName) -> (service, newName). The name is the
@@ -308,21 +391,45 @@ function renameConsumer(body) {
 
   const now = new Date().toISOString()
   const history = Array.isArray(prev.history) ? prev.history : []
+  // The group id follows the rename ONLY when it was the old derived default — a
+  // user-named group is the function's stable Kafka identity and survives the rename
+  // (its committed offsets stay live; nothing in code changes but the function name).
+  const wasDefaultGroup = prev.groupId === groupIdFor(service, oldName)
+  const groupId = wasDefaultGroup ? groupIdFor(service, newName) : prev.groupId
   const fn = {
     ...prev,
     name: newName,
+    groupId,
     updatedAt: now,
     // A rename snapshot keeps the changelog honest (same spec, recorded `renamedFrom`).
-    history: [...history, { at: now, description: prev.description, topic: prev.topic, pollRate: prev.pollRate, name: newName, renamedFrom: oldName }],
+    history: [...history, { at: now, description: prev.description, topic: prev.topic, pollRate: prev.pollRate, groupId, name: newName, renamedFrom: oldName }],
   }
   data.consumers[i] = fn
   writeConsumers(system, data)
 
-  // Move the consumer group in streams.json: drop the old id, register the new one on its topic.
-  removeConsumerGroup(system, prev.cluster, groupIdFor(service, oldName))
-  setConsumerGroup(system, prev.cluster, prev.topic, groupIdFor(service, newName), service)
+  // Move the consumer group in streams.json only when the id actually changed, keeping a
+  // consumer-group service's node block + live scaler config in step (mirrors upsert).
+  if (wasDefaultGroup) {
+    const manifest = readManifest(system)
+    const svcNode = manifest.nodes.find((n) => n.id === service)
+    removeConsumerGroup(system, prev.cluster, prev.groupId)
+    setConsumerGroup(system, prev.cluster, prev.topic, groupId, svcNode ? serviceCodeContainers(svcNode) : [service])
+    if (svcNode?.service_type === 'consumer_group' && !svcNode.instanceOf) {
+      svcNode.consumerGroup = { cluster: prev.cluster, groupId }
+      svcNode.metrics = [...serviceMetrics(service), groupLagMetric(prev.cluster, groupId)]
+      writeManifest(system, manifest)
+      const scalerFile = path.join(systemDir(system), service, 'scaler.json')
+      try {
+        const scaler = JSON.parse(fs.readFileSync(scalerFile, 'utf8'))
+        scaler.groupId = groupId
+        fs.writeFileSync(scalerFile, JSON.stringify(scaler, null, 2) + '\n')
+      } catch {
+        /* no scaler yet — nothing to sync */
+      }
+    }
+  }
 
-  return { ok: true, consumer: fn, wasImplemented: prev.implemented === true, renamed: true }
+  return { ok: true, consumer: fn, wasImplemented: prev.implemented === true, renamed: true, groupChanged: wasDefaultGroup, oldGroupId: prev.groupId }
 }
 
 function deleteConsumer(body) {
@@ -338,11 +445,11 @@ function deleteConsumer(body) {
   writeConsumers(system, { consumers: remaining })
 
   if (gone) {
-    removeConsumerGroup(system, gone.cluster, groupIdFor(service, name))
+    removeConsumerGroup(system, gone.cluster, gone.groupId)
     const manifest = readManifest(system)
     if (removeConsumerEdge(system, manifest, gone.cluster, service, remaining)) writeManifest(system, manifest)
   }
-  return { ok: true, removed, wasImplemented: gone?.implemented === true }
+  return { ok: true, removed, wasImplemented: gone?.implemented === true, groupId: gone?.groupId }
 }
 
 export default function consumers() {

@@ -26,9 +26,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { parseDocument } from 'yaml'
 import { repoRoot, systemsDir, systemDir, isValidSystem } from './systems.js'
-import { HttpError, bad, NAME_RE, readJsonBody, serviceMetrics, serviceHealth } from './scaffold.js'
+import {
+  HttpError, bad, NAME_RE, readJsonBody, serviceMetrics, serviceHealth,
+  composePath, loadCompose, saveCompose, composeServiceDef, setComposeService,
+  removeComposeService, loadPrometheus, savePrometheus, addScrapeJobDoc,
+  removeScrapeJobDoc, setScrapeJobTarget, withEtcdWorkerId, withSystemLock,
+} from './scaffold.js'
 
 const pexec = promisify(execFile)
 
@@ -63,8 +67,6 @@ function writeManifest(system, manifest) {
     JSON.stringify(manifest, null, 2) + '\n',
   )
 }
-const composePath = (system) => path.join(systemDir(system), 'docker-compose.yml')
-const prometheusPath = (system) => path.join(systemDir(system), 'prometheus', 'prometheus.yml')
 const lbCfgDir = (system, service) => path.join(systemDir(system), `${service}-lb`)
 
 // ---------------------------------------------------------------------------
@@ -141,23 +143,19 @@ function lbHealth(service) {
 }
 
 // ---------------------------------------------------------------------------
-// compose / prometheus splices (comment-preserving)
+// compose / prometheus splices
+//
+// The generic document helpers (loadCompose / setComposeService / addScrapeJobDoc / …)
+// now live in scaffold.js and are shared with the worker replica-group flow. Only the
+// two service-lb-specific pieces stay here.
 // ---------------------------------------------------------------------------
-
-function loadCompose(system) {
-  return parseDocument(fs.readFileSync(composePath(system), 'utf8'))
-}
-function saveCompose(system, doc) {
-  fs.writeFileSync(composePath(system), doc.toString())
-}
 
 // The plain-JS form of the `<name>` compose service (the app), captured so instances
 // can clone its build/env/volumes (preserving anything wired onto it — e.g. a
 // resilience wrapper's SERVICE_ID + manifest mount — so outbound behavior survives
-// the split, uniformly across every instance).
+// the split, uniformly across every instance). Falls back to a clean build.
 function appServiceDef(doc, service) {
-  const node = doc.getIn(['services', service])
-  return node ? node.toJSON() : { build: `./${service}` }
+  return composeServiceDef(doc, service) || { build: `./${service}` }
 }
 
 // haproxy sidecar def taking over the `<name>` compose service (same :8000 → it keeps
@@ -174,61 +172,15 @@ function sidecarDef(service, instances) {
   }
 }
 
-function setComposeService(doc, name, def, comment) {
-  const node = doc.createNode(def)
-  if (comment) node.commentBefore = comment
-  doc.setIn(['services', name], node)
-}
-
-function removeComposeService(doc, name) {
-  if (doc.hasIn(['services', name])) doc.deleteIn(['services', name])
-  // Scrub dangling depends_on references to the removed service.
-  const services = doc.get('services')
-  for (const pair of services?.items || []) {
-    const dep = pair.value?.get?.('depends_on')
-    if (!dep?.items) continue
-    for (let i = dep.items.length - 1; i >= 0; i--) {
-      const it = dep.items[i]
-      const n = it?.key !== undefined ? String(it.key.value ?? it.key) : String(it.value ?? it)
-      if (n === name) dep.items.splice(i, 1)
-    }
-    if (dep.items.length === 0) pair.value.delete('depends_on')
-  }
-}
-
-function loadPrometheus(system) {
-  return parseDocument(fs.readFileSync(prometheusPath(system), 'utf8'))
-}
-function savePrometheus(system, doc) {
-  fs.writeFileSync(prometheusPath(system), doc.toString())
-}
-function findScrapeJob(doc, jobName) {
-  const sc = doc.get('scrape_configs')
-  return sc?.items?.findIndex((it) => String(it.get('job_name')) === jobName) ?? -1
-}
-function removeScrapeJobDoc(doc, jobName) {
-  const sc = doc.get('scrape_configs')
-  const i = findScrapeJob(doc, jobName)
-  if (i >= 0) sc.delete(i)
-}
-function addScrapeJobDoc(doc, jobName, target, comment) {
-  const node = doc.createNode({ job_name: jobName, static_configs: [{ targets: [target] }] })
-  if (comment) node.commentBefore = comment
-  doc.addIn(['scrape_configs'], node)
-}
-// Repoint an existing job's single target (used to move `<name>` from its FastAPI
-// port to the haproxy exporter port and back).
-function setScrapeJobTarget(doc, jobName, target) {
-  const i = findScrapeJob(doc, jobName)
-  if (i < 0) return
-  doc.setIn(['scrape_configs', i, 'static_configs', 0, 'targets', 0], target)
-}
-
 // ---------------------------------------------------------------------------
 // Rebuild (frontend-safe — NEVER ./start.sh)
 // ---------------------------------------------------------------------------
 
-async function dockerRebuild(system, { buildNames = [], recreate = [], removeOrphans = false }) {
+async function dockerRebuild(system, opts) {
+  return withSystemLock(system, () => _dockerRebuildImpl(system, opts))
+}
+
+async function _dockerRebuildImpl(system, { buildNames = [], recreate = [], removeOrphans = false }) {
   if (process.env.SERVICE_LB_SKIP_REBUILD === '1') return '(rebuild skipped)'
   const compose = composePath(system)
   // 600s: the first instance build pulls python:3.12-slim + pip installs.
@@ -368,7 +320,7 @@ function enable(ctx) {
   const doc = loadCompose(system)
   const app = appServiceDef(doc, service)
   for (const id of ids) {
-    setComposeService(doc, id, { ...app, build: `./${service}` }, ` Instance of load-balanced service "${service}"`)
+    setComposeService(doc, id, withEtcdWorkerId({ ...app, build: `./${service}` }, id), ` Instance of load-balanced service "${service}"`)
   }
   setComposeService(doc, service, sidecarDef(service, ids), ` Load balancer sidecar for "${service}" (haproxy)`)
   saveCompose(system, doc)
@@ -434,7 +386,7 @@ function scale(ctx) {
     for (let o = maxOrd + 1; buildNames.length < target - current.length; o++) {
       const id = instanceId(service, o)
       assertFreeInstanceIds(system, manifest, service, [o])
-      setComposeService(doc, id, { ...app, build: `./${service}` }, ` Instance of load-balanced service "${service}"`)
+      setComposeService(doc, id, withEtcdWorkerId({ ...app, build: `./${service}` }, id), ` Instance of load-balanced service "${service}"`)
       addScrapeJobDoc(prom, id, `${id}:${SERVICE_PORT}`, ` Instance of load-balanced service "${service}"`)
       manifest.nodes.push(instanceNode(service, id, node))
       manifest.edges.push({ from: service, to: id, origin: 'service-lb' })
@@ -484,7 +436,9 @@ function disable(ctx) {
     removeComposeService(doc, n.id)
     removeScrapeJobDoc(prom, n.id)
   }
-  setComposeService(doc, service, restored, ` Service "${service}"`)
+  // A collapsed plain service registers as `<service>-1` by convention, so pin the
+  // restored def's worker id back (it was cloned from instance 1, but be explicit).
+  setComposeService(doc, service, withEtcdWorkerId(restored, `${service}-1`), ` Service "${service}"`)
   setScrapeJobTarget(prom, service, `${service}:${SERVICE_PORT}`)
   saveCompose(system, doc)
   savePrometheus(system, prom)

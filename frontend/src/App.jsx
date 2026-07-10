@@ -8,6 +8,7 @@ import CreateService from './CreateService.jsx'
 import CreateExternalService from './CreateExternalService.jsx'
 import CreateClient from './CreateClient.jsx'
 import CreateEventStream from './CreateEventStream.jsx'
+import CreateEtcd from './CreateEtcd.jsx'
 import CreateWebsockets from './CreateWebsockets.jsx'
 import GrpcContractsModal from './GrpcContractsModal.jsx'
 import ModelsModal from './ModelsModal.jsx'
@@ -15,10 +16,9 @@ import ConnectionResilienceModal from './ConnectionResilienceModal.jsx'
 import NodeEditModal from './NodeEditModal.jsx'
 import WsSharedMethodsModal from './WsSharedMethodsModal.jsx'
 import { CUSTOM_RUNTIMES } from './customTypes/index.js'
-import TestPanel from './TestPanel.jsx'
 import EndToEndModal from './EndToEndModal.jsx'
 import SkillsModal from './SkillsModal.jsx'
-import { queryInstant } from './prometheus.js'
+import { queryInstant, queryVector } from './prometheus.js'
 import { pickColor } from './health.js'
 import { deriveFunctionTrace } from './scenarioBank.js'
 
@@ -89,7 +89,30 @@ async function pollSystem(manifest) {
         }
       }
 
-      state[node.id] = { metrics, color }
+      // An etcd cluster node additionally reads PER-MEMBER series (all N `up` and
+      // `is_leader` series of its job) to drive the member-dot strip under the node.
+      let members = null
+      if (node.type === 'etcd') {
+        try {
+          const [ups, leaders] = await Promise.all([
+            queryVector(base, `up{job="${node.id}"}`),
+            queryVector(base, `etcd_server_is_leader{job="${node.id}"}`),
+          ])
+          members = {}
+          for (const s of ups) {
+            const m = (s.labels.instance || '').split(':')[0]
+            if (m) members[m] = { up: s.value === 1, leader: false }
+          }
+          for (const s of leaders) {
+            const m = (s.labels.instance || '').split(':')[0]
+            if (members[m]) members[m].leader = s.value === 1
+          }
+        } catch (err) {
+          console.warn(`etcd members on ${node.id} failed:`, err.message)
+        }
+      }
+
+      state[node.id] = members ? { metrics, color, members } : { metrics, color }
     }),
   )
 
@@ -109,6 +132,7 @@ export default function App() {
   const [showCreateExternal, setShowCreateExternal] = useState(false)
   const [showCreateClient, setShowCreateClient] = useState(false)
   const [showCreateEventStream, setShowCreateEventStream] = useState(false)
+  const [showCreateEtcd, setShowCreateEtcd] = useState(false)
   const [showCreateWebsockets, setShowCreateWebsockets] = useState(false)
   const [showGrpcContracts, setShowGrpcContracts] = useState(false)
   const [showModels, setShowModels] = useState(false)
@@ -119,7 +143,6 @@ export default function App() {
   // Set of event-stream cluster ids whose consumers are currently paused (drives a
   // diagram badge). Polled from /api/consumer-pause, mirroring the outage poll.
   const [pausedConsumers, setPausedConsumers] = useState(() => new Set())
-  const [showTest, setShowTest] = useState(false)
   const [showEndToEnd, setShowEndToEnd] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
   const [endpoints, setEndpoints] = useState([])
@@ -151,6 +174,18 @@ export default function App() {
   // A consumer function selected on the diagram, traced cluster → consuming service. Mutually
   // exclusive with the method/function/LB selections. Cleared on canvas click.
   const [consumerTrace, setConsumerTrace] = useState(null)
+  // The per-etcd keyspace registry (systems/<id>/etcd.json via GET /api/etcd?live=0), keyed by
+  // etcd node id. Rendered as clickable KEY rows on the etcd cluster node.
+  const [etcdKeyspaces, setEtcdKeyspaces] = useState({})
+  // A keyspace selected on the etcd node, traced registrant → etcd (the lease-put) and
+  // etcd → each listener (the watch push). Mutually exclusive with the other traces.
+  const [keyspaceTrace, setKeyspaceTrace] = useState(null)
+  // The gRPC contract registry (systems/<id>/grpc/_registry.json via GET /api/grpc-contracts),
+  // as [{ name, methods, … }]. A service that SERVES a contract lists its methods as RPC rows.
+  const [grpcContracts, setGrpcContracts] = useState([])
+  // A served RPC method selected on a server service, traced each caller → this server.
+  // Mutually exclusive with the other traces.
+  const [rpcTrace, setRpcTrace] = useState(null)
   // Live runtime state for custom service types (e.g. Download Coordinator worker
   // bitmaps / distribution progress), keyed by node id. Filled by the poll below.
   const [customState, setCustomState] = useState({})
@@ -303,6 +338,65 @@ export default function App() {
       clearInterval(id)
     }
   }, [])
+
+  // Poll each etcd cluster's keyspace registry (registry-only, ?live=0 — no docker
+  // probing) so the cluster node's KEY rows and their traces update as keyspaces /
+  // listeners are added. Gated on the manifest containing an etcd node.
+  const etcdIds = (manifest?.nodes || []).filter((n) => n.type === 'etcd').map((n) => n.id).join(',')
+  useEffect(() => {
+    if (!etcdIds) {
+      setEtcdKeyspaces({})
+      return
+    }
+    let cancelled = false
+    const tick = async () => {
+      const entries = await Promise.all(
+        etcdIds.split(',').map(async (id) => {
+          try {
+            const res = await fetch(`/api/etcd?system=${SYSTEM_ID}&id=${encodeURIComponent(id)}&live=0`)
+            const data = await res.json()
+            return data.ok ? [id, data.keyspaces || []] : null
+          } catch {
+            return null
+          }
+        }),
+      )
+      if (!cancelled) setEtcdKeyspaces(Object.fromEntries(entries.filter(Boolean)))
+    }
+    tick()
+    const id = setInterval(tick, 4000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [etcdIds])
+
+  // Poll the gRPC contract registry so a server service's RPC rows (contract name in its manifest
+  // `grpc.servers`) stay in sync as methods are added/removed. Gated on the manifest having any
+  // node that serves a contract, so systems with no gRPC servers never hit the route.
+  const hasGrpcServers = (manifest?.nodes || []).some((n) => (n.grpc?.servers || []).length > 0)
+  useEffect(() => {
+    if (!hasGrpcServers) {
+      setGrpcContracts([])
+      return
+    }
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/grpc-contracts?system=${SYSTEM_ID}`)
+        const data = await res.json()
+        if (!cancelled && data.ok) setGrpcContracts(data.contracts || [])
+      } catch {
+        /* keep the last good list */
+      }
+    }
+    tick()
+    const id = setInterval(tick, 4000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [hasGrpcServers])
 
   // Fast-poll the in-memory resilience state (breaker/retry) so the diagram can show
   // a breaker trip live, faster than Prometheus' scrape. The aggregator returns {}
@@ -591,6 +685,26 @@ export default function App() {
     if (n.type !== 'service') continue
     consumerFunctions[n.id] = consumers.filter((c) => c.service === n.id)
   }
+  // Persistence reader groups render the same PULL row — pulling announced runs from
+  // their stream redis instead of a Kafka topic. The consumerTrace shape is
+  // transport-agnostic (cluster = the stream node, topic = the announce stream), so
+  // the row is synthesized straight from the node's manifest persistence block.
+  for (const n of manifest.nodes || []) {
+    const p = n.persistence
+    if (n.service_type !== 'persistence_reader' || n.instanceOf || !p) continue
+    consumerFunctions[n.id] = [
+      ...(consumerFunctions[n.id] || []),
+      {
+        name: p.fn || 'readLlmStream',
+        cluster: p.stream,
+        topic: p.announce,
+        downstream: p.db ? [p.db] : [],
+        downstreamDescriptions: p.db
+          ? { [p.db]: `persists each finished run's output to ${p.table}.${p.field}` }
+          : {},
+      },
+    ]
+  }
 
   return (
     <div className="app">
@@ -602,10 +716,7 @@ export default function App() {
           onClick={() => setDragMode((v) => !v)}
           title="Drag mode — move nodes and the system boundary"
         >
-          <MoveIcon /> Drag
-        </button>
-        <button className="header-btn no-auto" onClick={() => setShowTest(true)}>
-          🧪 Test
+          <MoveIcon /> Edit
         </button>
         <button className="header-btn no-auto" onClick={() => setShowEndToEnd(true)}>
           🔁 End-to-End
@@ -623,6 +734,11 @@ export default function App() {
                 { label: 'Client', onClick: () => setShowCreateClient(true) },
                 { label: 'Database', onClick: () => setShowCreateDb(true) },
                 { label: 'Event stream', onClick: () => setShowCreateEventStream(true) },
+                // Only one etcd cluster may exist — hide the option while one is on the
+                // diagram (the backend also 409s a second add), like Prometheus below.
+                ...(manifest.nodes.some((n) => n.type === 'etcd')
+                  ? []
+                  : [{ label: 'etcd', onClick: () => setShowCreateEtcd(true) }]),
                 { label: 'WebSockets', onClick: () => setShowCreateWebsockets(true) },
                 // Only one Prometheus node may exist — hide the option while one is on the
                 // diagram (the backend also 409s a second add).
@@ -675,7 +791,7 @@ export default function App() {
         pausedConsumers={pausedConsumers}
         customState={customState}
         methodTrace={methodTrace}
-        onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setMethodTrace(ep) }}
+        onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setKeyspaceTrace(null); setRpcTrace(null); setMethodTrace(ep) }}
         onClearMethodTrace={() => setMethodTrace(null)}
         clientFunctions={clientFunctions}
         wsStats={wsStats}
@@ -686,6 +802,8 @@ export default function App() {
         onSelectFunction={(fn, clientId) => {
           setMethodTrace(null)
           setConsumerTrace(null)
+          setKeyspaceTrace(null)
+          setRpcTrace(null)
           // A ws builtin has no authored steps — the diagram traces the tier path itself.
           setFunctionTrace(fn.wsBuiltin
             ? { client: clientId, name: fn.name, wsBuiltin: true, methods: [] }
@@ -694,8 +812,54 @@ export default function App() {
         onClearFunctionTrace={() => setFunctionTrace(null)}
         consumerFunctions={consumerFunctions}
         consumerTrace={consumerTrace}
-        onSelectConsumer={(c, serviceId) => { setMethodTrace(null); setFunctionTrace(null); setConsumerTrace({ cluster: c.cluster, service: serviceId, topic: c.topic, name: c.name, downstream: c.downstream || [], downstreamDescriptions: c.downstreamDescriptions || {} }) }}
+        onSelectConsumer={(c, serviceId) => { setMethodTrace(null); setFunctionTrace(null); setKeyspaceTrace(null); setRpcTrace(null); setConsumerTrace({ cluster: c.cluster, service: serviceId, topic: c.topic, name: c.name, downstream: c.downstream || [], downstreamDescriptions: c.downstreamDescriptions || {} }) }}
         onClearConsumerTrace={() => setConsumerTrace(null)}
+        etcdKeyspaces={etcdKeyspaces}
+        keyspaceTrace={keyspaceTrace}
+        onSelectKeyspace={(ks, etcdId) => {
+          setMethodTrace(null)
+          setFunctionTrace(null)
+          setConsumerTrace(null)
+          setRpcTrace(null)
+          setKeyspaceTrace({
+            etcd: etcdId,
+            type: ks.type || 'discovery',
+            service: ks.service,
+            name: ks.name,
+            prefix: ks.prefix,
+            listeners: (ks.listeners || []).map((l) => l.service),
+          })
+        }}
+        onClearKeyspaceTrace={() => setKeyspaceTrace(null)}
+        onSelectSubscription={(ks, etcdId, listenerId) => {
+          setMethodTrace(null)
+          setFunctionTrace(null)
+          setConsumerTrace(null)
+          setRpcTrace(null)
+          // Same keyspaceTrace shape as onSelectKeyspace, but focused on ONE listener: the
+          // `kt` branch draws registrant → etcd → this listener only (config: etcd → listener).
+          // `focus` lets the diagram mark the service's SUB row active without lighting the
+          // etcd node's whole KEY row.
+          setKeyspaceTrace({
+            etcd: etcdId,
+            type: ks.type || 'discovery',
+            service: ks.service,
+            name: ks.name,
+            prefix: ks.prefix,
+            listeners: [listenerId],
+            focus: listenerId,
+          })
+        }}
+        grpcContracts={grpcContracts}
+        rpcTrace={rpcTrace}
+        onSelectRpc={(r, serviceId) => {
+          setMethodTrace(null)
+          setFunctionTrace(null)
+          setConsumerTrace(null)
+          setKeyspaceTrace(null)
+          setRpcTrace({ service: serviceId, contract: r.contract, method: r.method })
+        }}
+        onClearRpcTrace={() => setRpcTrace(null)}
       />
       </div>
       {showTerminal && (
@@ -727,11 +891,11 @@ export default function App() {
       {showCreateEventStream && (
         <CreateEventStream systemId={SYSTEM_ID} onClose={() => setShowCreateEventStream(false)} />
       )}
+      {showCreateEtcd && (
+        <CreateEtcd systemId={SYSTEM_ID} onClose={() => setShowCreateEtcd(false)} />
+      )}
       {showCreateWebsockets && (
         <CreateWebsockets systemId={SYSTEM_ID} onClose={() => setShowCreateWebsockets(false)} />
-      )}
-      {showTest && (
-        <TestPanel systemId={SYSTEM_ID} onClose={() => setShowTest(false)} />
       )}
       {showEndToEnd && (
         <EndToEndModal
@@ -804,6 +968,7 @@ export default function App() {
             // visible behind the (now-dismissed) overlay.
             setFunctionTrace(null)
             setConsumerTrace(null)
+            setKeyspaceTrace(null)
             setMethodTrace(ep)
             setEditTarget(null)
           }}

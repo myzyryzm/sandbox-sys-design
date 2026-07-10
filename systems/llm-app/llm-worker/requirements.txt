@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+prometheus_client==0.21.1
+grpcio==1.68.1
+protobuf==5.28.3
+numpy==2.2.1
+redis==5.2.1
+psycopg[binary]==3.2.3
+# etcd registration (sandbox-etcd skill): the etcd3 client pins protobuf<4, which
+# conflicts with this worker's protobuf 5.x gRPC (Worker_pb2), so we register via
+# etcd's stock v3 JSON gRPC-gateway over httpx (the skill's documented fallback).
+httpx==0.28.1

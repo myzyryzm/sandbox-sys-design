@@ -16,7 +16,6 @@ import endpoints from './server/endpoints.js'
 import models from './server/models.js'
 import dbSchema from './server/dbschema.js'
 import dbSeed from './server/dbseed.js'
-import simulate from './server/simulate.js'
 import skills from './server/skills.js'
 import eventStreams from './server/eventstreams.js'
 import grpc from './server/grpc.js'
@@ -30,6 +29,7 @@ import endtoend from './server/endtoend.js'
 import websockets from './server/websockets.js'
 import serviceLb from './server/serviceLb.js'
 import prometheusNodePlugin from './server/prometheus.js'
+import etcdPlugin from './server/etcd.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -69,7 +69,7 @@ function serveSystems() {
 }
 
 export default defineConfig({
-  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), simulate(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin()],
+  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin()],
   server: {
     proxy: {
       // Browser -> /api/prometheus/api/v1/query?...  proxied to Prometheus.

@@ -1,0 +1,11 @@
+{
+  "groupId": "processUserMessage-group",
+  "enabled": true,
+  "min": 1,
+  "max": 8,
+  "scale_up_lag": 1000,
+  "scale_down_lag": 100,
+  "up_stable_seconds": 15,
+  "down_stable_seconds": 60,
+  "cooldown_seconds": 90
+}

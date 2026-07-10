@@ -1,0 +1,18 @@
+{
+  "topics": [
+    {
+      "id": "user-message",
+      "producers": [
+        "chat-db-cdc"
+      ],
+      "consumers": [
+        {
+          "groupId": "processUserMessage-group",
+          "members": [
+            "usr-msg-consumer"
+          ]
+        }
+      ]
+    }
+  ]
+}

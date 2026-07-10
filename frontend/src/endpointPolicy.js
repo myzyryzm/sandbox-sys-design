@@ -40,6 +40,18 @@ export function endpointPolicy(endpoint, ownerNode) {
   // scraped and doesn't drive any color — so hide it entirely (an in-system service
   // keeps /health listed below as a documented, locked internal route).
   if (ownerNode?.external && p === '/health') return { visibility: 'hidden', locked: true }
+  // `/discovery/*` and `/config/*` are the etcd listener's introspection views (the
+  // sandbox-etcd skill authors them into the listener's app.py — a discovery watcher's
+  // live worker map and a config watcher's live key/value map). They're managed from the
+  // etcd node's Keyspaces tab / the service's Subscribers tab (and traced by its SUB rows),
+  // not the endpoint surfaces, so they're hidden everywhere — diagram rows and the load
+  // balancer included.
+  if (p.startsWith('/discovery/') || p.startsWith('/config/')) return { visibility: 'hidden', locked: true }
+  // The coordinator's `/assignments` is a read-only introspection view of its last-pushed
+  // llm-worker -> usr-msg-consumer rebalance map — control-plane plumbing, not part of any
+  // service's client surface — so hide it everywhere (diagram rows + the load balancer), the
+  // same as the discovery/config views above.
+  if (p === '/assignments') return { visibility: 'hidden', locked: true }
   if (genericInternal(p)) return { visibility: 'internal', locked: true }
   // User-marked internal: a normally-public route the user has taken off the load
   // balancer's surface. Unlike the built-in operational routes above it stays editable

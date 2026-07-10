@@ -131,6 +131,30 @@ export function addNginxRoute(system, name, port = 8000) {
   fs.writeFileSync(file, conf)
 }
 
+// Strip a `/<name>/` route (upstream + location) back out of nginx.conf.
+export function removeNginxRoute(system, id) {
+  const file = path.join(systemDir(system), 'nginx', 'nginx.conf')
+  let conf = fs.readFileSync(file, 'utf8')
+  conf = conf.replace(new RegExp(` *upstream ${id} \\{[^}]*\\}\\n`), '')
+  conf = conf.replace(new RegExp(` *location /${id}/ \\{[\\s\\S]*?\\n *\\}\\n`), '')
+  fs.writeFileSync(file, conf)
+}
+
+// Whether nginx.conf already routes `/<name>/` (addNginxRoute is a blind splice —
+// calling it twice would duplicate the upstream and break the config).
+export function hasNginxRoute(system, name) {
+  const file = path.join(systemDir(system), 'nginx', 'nginx.conf')
+  return fs.readFileSync(file, 'utf8').includes(`upstream ${name} {`)
+}
+
+// Idempotent addNginxRoute: returns true only when the route was actually added
+// (so callers know a reload is needed).
+export function ensureNginxRoute(system, name, port = 8000) {
+  if (hasNginxRoute(system, name)) return false
+  addNginxRoute(system, name, port)
+  return true
+}
+
 // Internal-route blocking: deny EXTERNAL calls (those arrive through the lb) to endpoints
 // the user marked internal, while leaving service-to-service calls untouched — those talk
 // container-to-container (http://<service>:8000) and never traverse the lb. It's an nginx
@@ -239,17 +263,135 @@ export function addManifestNode(system, manifest, node) {
   return node
 }
 
+// ---------------------------------------------------------------------------
+// compose / prometheus DOCUMENT splices (comment-preserving)
+//
+// Lower-level than addComposeService/addScrapeJob: these operate on a parsed `yaml`
+// Document so a caller making SEVERAL edits at once (add N instances, drop one, repoint
+// a target) parses + writes the file a single time. addComposeService/addScrapeJob stay
+// the single-edit convenience wrappers. Shared by serviceLb.js (haproxy clusters) and
+// customTypes/llmWorker.js (worker replica groups) — don't fork these; compose them.
+// ---------------------------------------------------------------------------
+
+export const composePath = (system) => path.join(systemDir(system), 'docker-compose.yml')
+export const prometheusPath = (system) => path.join(systemDir(system), 'prometheus', 'prometheus.yml')
+
+export function loadCompose(system) {
+  return parseDocument(fs.readFileSync(composePath(system), 'utf8'))
+}
+export function saveCompose(system, doc) {
+  fs.writeFileSync(composePath(system), doc.toString())
+}
+
+// The plain-JS form of an existing compose service (so a caller can clone its
+// build/env/volumes onto sibling services), or null if it isn't defined.
+export function composeServiceDef(doc, name) {
+  const node = doc.getIn(['services', name])
+  return node ? node.toJSON() : null
+}
+
+export function setComposeService(doc, name, def, comment) {
+  const node = doc.createNode(def)
+  if (comment) node.commentBefore = comment
+  doc.setIn(['services', name], node)
+}
+
+export function removeComposeService(doc, name) {
+  if (doc.hasIn(['services', name])) doc.deleteIn(['services', name])
+  // Scrub dangling depends_on references to the removed service (list or map form).
+  const services = doc.get('services')
+  for (const pair of services?.items || []) {
+    const dep = pair.value?.get?.('depends_on')
+    if (!dep?.items) continue
+    for (let i = dep.items.length - 1; i >= 0; i--) {
+      const it = dep.items[i]
+      const n = it?.key !== undefined ? String(it.key.value ?? it.key) : String(it.value ?? it)
+      if (n === name) dep.items.splice(i, 1)
+    }
+    if (dep.items.length === 0) pair.value.delete('depends_on')
+  }
+}
+
+export function loadPrometheus(system) {
+  return parseDocument(fs.readFileSync(prometheusPath(system), 'utf8'))
+}
+export function savePrometheus(system, doc) {
+  fs.writeFileSync(prometheusPath(system), doc.toString())
+}
+export function findScrapeJob(doc, jobName) {
+  const sc = doc.get('scrape_configs')
+  return sc?.items?.findIndex((it) => String(it.get('job_name')) === jobName) ?? -1
+}
+export function removeScrapeJobDoc(doc, jobName) {
+  const sc = doc.get('scrape_configs')
+  const i = findScrapeJob(doc, jobName)
+  if (i >= 0) sc.delete(i)
+}
+export function addScrapeJobDoc(doc, jobName, target, comment) {
+  const node = doc.createNode({ job_name: jobName, static_configs: [{ targets: [target] }] })
+  if (comment) node.commentBefore = comment
+  doc.addIn(['scrape_configs'], node)
+}
+// Repoint an existing job's single target (e.g. move `<name>` between its FastAPI port
+// and an exporter port).
+export function setScrapeJobTarget(doc, jobName, target) {
+  const i = findScrapeJob(doc, jobName)
+  if (i < 0) return
+  doc.setIn(['scrape_configs', i, 'static_configs', 0, 'targets', 0], target)
+}
+
 // A load-balanced service's code lives in its instances (<name>-1..N), not in <name>
 // itself — which is now an haproxy sidecar with no build context. So `rebuild(system,
 // '<name>')` (called by every per-service flow: endpoint, grpc, …) must build the
 // INSTANCES and recreate the sidecar, not try to `docker compose build <name>` (which
 // would fail on the image-only haproxy service). A plain service resolves to itself.
+//
+// The containers that actually run a service's code — the single source of truth shared by
+// the rebuild path (below), etcd registration (etcd.js), and per-service load balancing
+// (serviceLb.js). Two scaling shapes carry instances: a per-service load balancer keeps them
+// under `svcLb.instances` (the `<name>` entry is the sidecar, NOT a code container), while a
+// worker replica group (customTypes/llmWorker.js) keeps them under `replicas.instances` (the
+// `<name>` base IS a real code container). Anything else is a plain single-container service.
+export function serviceCodeContainers(node) {
+  if (node?.svcLb?.instances?.length) return [...node.svcLb.instances]
+  if (node?.replicas?.instances?.length) return [node.id, ...node.replicas.instances]
+  return [node?.id].filter(Boolean)
+}
+
+// A cloned instance def must carry its OWN etcd worker identity: the def being cloned may
+// belong to an etcd-registered service (env ETCD_WORKER_ID, written by etcd.js), and copying
+// it verbatim would make every instance register under the SAME key — one worker on the
+// diagram instead of N. No-op for services with no etcd role. Handles both compose
+// environment forms (map and KEY=VAL list). Used by serviceLb.js (scale/enable/disable) and
+// customTypes/llmWorker.js (replica scale-up).
+export function withEtcdWorkerId(def, id) {
+  const env = def?.environment
+  if (Array.isArray(env)) {
+    if (!env.some((e) => String(e).startsWith('ETCD_WORKER_ID='))) return def
+    return {
+      ...def,
+      environment: env.map((e) => (String(e).startsWith('ETCD_WORKER_ID=') ? `ETCD_WORKER_ID=${id}` : e)),
+    }
+  }
+  if (!env || env.ETCD_WORKER_ID === undefined) return def
+  return { ...def, environment: { ...env, ETCD_WORKER_ID: id } }
+}
+
+// A worker replica group (customTypes/llmWorker.js — N instances sharing one id with NO
+// load balancer) is the mirror image of a per-service LB: `<name>` IS a real serving
+// container, and its instances `<name>-2..N` all `build: ./<name>`, so a per-service edit
+// must rebuild the base AND every instance (no sidecar to recreate). Both shapes (and the
+// plain single service) resolve through `serviceCodeContainers`; only a load-balanced
+// service also needs its `<name>` sidecar force-recreated.
 function resolveBuildTargets(system, name) {
   try {
     const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
     const node = manifest.nodes.find((n) => n.id === name)
-    if (node?.svcLb?.instances?.length) {
-      return { buildNames: [...node.svcLb.instances], recreate: [name] }
+    if (node) {
+      return {
+        buildNames: serviceCodeContainers(node),
+        recreate: node.svcLb?.instances?.length ? [name] : [],
+      }
     }
   } catch {
     /* fall back to the plain single-service path */
@@ -257,11 +399,36 @@ function resolveBuildTargets(system, name) {
   return { buildNames: [name], recreate: [] }
 }
 
+// Per-system serialization for docker-compose invocations. Node already runs each handler's
+// compose/manifest/registry FILE edits synchronously (no `await` between load and save), so
+// those can't interleave; what CAN overlap is the `docker compose build/up/...` SHELL commands
+// of two concurrent mutations (e.g. scaling a worker while creating an etcd keyspace) hitting
+// the same project. This mutex chains those invocations per system so at most one runs at a
+// time. It guards ONLY the docker calls — file edits stay lock-free. Wraps the three rebuild
+// paths: `rebuild` (below), serviceLb.js `dockerRebuild`, customTypes/llmWorker.js `scaleRebuild`.
+// (Bounded, one Map entry per system id; not cleaned up, which is fine for the few systems a
+// dev server ever touches.) Callers must NOT nest lock-wrapped rebuilds for the same system.
+const _systemLocks = new Map()
+
+export function withSystemLock(system, fn) {
+  const prev = _systemLocks.get(system) || Promise.resolve()
+  const run = () => fn()
+  const next = prev.then(run, run)
+  // Tail the chain on a rejection-swallowed copy so the next caller waits for this one to
+  // settle (success OR failure) without a failed rebuild leaving an unhandled rejection.
+  _systemLocks.set(system, next.then(() => {}, () => {}))
+  return next
+}
+
 // Frontend-safe rebuild: build just <name> (or, for a load-balanced service, its
 // instances), bring the stack up (creating the new container, leaving the rest
 // running), recreate the lb so it picks up the new /<name>/ route, and restart
 // prometheus so the appended scrape job is picked up. NEVER ./start.sh.
 export async function rebuild(system, name) {
+  return withSystemLock(system, () => _rebuildImpl(system, name))
+}
+
+async function _rebuildImpl(system, name) {
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
   const opts = { cwd: repoRoot, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 }
   const { buildNames, recreate } = resolveBuildTargets(system, name)

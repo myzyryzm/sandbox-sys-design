@@ -1,17 +1,23 @@
 // Vite dev-server plugin: per-system "end-to-end processes" — named test processes the user
-// defines and then RUNS. A process names a set of client methods to call on a schedule, optional
-// websocket client pools to keep connected (with a configurable client count), a list of
-// freeform "failure" conditions (a bug occurred if any happens) and "constraint" invariants (must
-// never be violated). Defining a process is pure data entry; RUNNING it hands off to a launched
-// Claude session (the sandbox-end-to-end-process skill), which does all the real work — calling
-// the methods at their rates for a duration, spawning the ws pools, synthesizing arguments,
-// evaluating the conditions, and writing a run report.
+// defines and then RUNS. A process names a set of client methods to drive — a row for a stateless
+// client carries `requestsPerSecond` (a fractional call rate: 0.1 = one call every 10s); a row
+// for a STATEFUL client (manifest node stateful:true) instead carries `instances`, how many
+// concurrent session-loop instances of the function to keep alive — optional websocket client
+// pools to keep connected (with a configurable client count), a list of freeform "failure"
+// conditions (a bug occurred if any happens) and "constraint" invariants (must never be
+// violated). Defining a process is pure data entry; RUNNING it hands off to a launched Claude
+// session (the sandbox-end-to-end-process skill), which does all the real work — driving the
+// methods for a duration, spawning the ws pools, synthesizing arguments, evaluating the
+// conditions, and writing a run report.
 //
 //   GET    /api/endtoend?system=<id>
 //     -> { ok, processes: [{ id, name, client_list, websocket_list, failure_list, constraint_list,
 //                            createdAt, updatedAt, lastRun? }], run }
 //        `run` is { running:false } or { running:true, id, name, startedAt, durationSeconds,
 //        remaining_seconds }. `lastRun` is the newest persisted run report for that process.
+//        client_list rows are normalized to each client's CURRENT stateful mode on read (a legacy
+//        intervalSeconds row surfaces as requestsPerSecond = 1/interval; a row saved before a
+//        stateful flip surfaces in the flag's shape) — the file itself is only rewritten on upsert.
 //   POST   /api/endtoend  { system, id?, name, client_list, websocket_list?, failure_list,
 //                           constraint_list }
 //     -> upsert a process definition. No/unknown id creates (uuid + createdAt); a known id updates
@@ -25,9 +31,9 @@
 //        is given, only clears when it matches the running id, so a stale session can't stop a
 //        newer run).
 //
-// Mirrors scenarios.js (registry read/write + validators) and outage.js/simulate.js (in-memory
-// tracked state + a timer + cleanup when the dev server closes). Same-origin, same dev-server port,
-// no CORS. Unlike outage/simulate there is NO process/container to kill — `stop` is just map.delete.
+// Mirrors scenarios.js (registry read/write + validators) and outage.js (in-memory tracked
+// state + a timer + cleanup when the dev server closes). Same-origin, same dev-server port,
+// no CORS. Unlike outage there is NO process/container to kill — `stop` is just map.delete.
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -42,7 +48,12 @@ const METHOD_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const MAX_NAME = 120
 const MAX_ROWS = 20
 const MAX_COND = 500
-const MAX_INTERVAL = 60
+// client_list bounds — a stateless row is a call rate in req/s (fractional; the floor covers a
+// legacy intervalSeconds of 60 → 1/60 ≈ 0.02); a stateful client's row is instead how many
+// concurrent session-loop instances to keep alive (each instance is one python subprocess).
+const MIN_RPS = 0.01
+const MAX_RPS = 20
+const MAX_INSTANCES = 20
 // websocket_list bounds — mirror websockets.js' pool-run route (each pool client
 // is one host fd; the macOS default soft ulimit is often 256).
 const MAX_WS_CLIENTS = 200
@@ -171,6 +182,9 @@ function validateProcessInput(system, body) {
   const functions = readScenarioFunctions(system)
   const manifest = readManifest(system)
   const clientIds = new Set(manifest.nodes.filter((n) => n.type === 'client').map((n) => n.id))
+  const statefulIds = new Set(
+    manifest.nodes.filter((n) => n.type === 'client' && n.stateful).map((n) => n.id),
+  )
   const pairExists = (client, method) =>
     functions.some((f) => f && f.client === client && f.name === method)
 
@@ -181,11 +195,29 @@ function validateProcessInput(system, body) {
     if (!METHOD_RE.test(method)) throw bad(`method "${method}" is not a valid function name`)
     if (!clientIds.has(client)) throw bad(`"${client}" is not a client in this system`)
     if (!pairExists(client, method)) throw bad(`client "${client}" has no method "${method}"`)
-    const intervalSeconds = Number(r?.intervalSeconds)
-    if (!Number.isInteger(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > MAX_INTERVAL) {
-      throw bad(`intervalSeconds for "${client}.${method}" must be a whole number between 1 and ${MAX_INTERVAL}`)
+    if (statefulIds.has(client)) {
+      // Stateful row: how many concurrent instances of the function to keep running.
+      const instances = Number(r?.instances)
+      if (!Number.isInteger(instances) || instances < 1 || instances > MAX_INSTANCES) {
+        throw bad(
+          `instances for "${client}.${method}" must be a whole number between 1 and ${MAX_INSTANCES} ` +
+            '(this client is stateful — the row sets how many concurrent instances to keep running)',
+        )
+      }
+      return { client, method, instances }
     }
-    return { client, method, intervalSeconds }
+    // Stateless row: a call rate. Accept a legacy intervalSeconds from raw API callers as its
+    // reciprocal (call every N seconds ≡ 1/N req/s).
+    const rps =
+      r?.requestsPerSecond != null
+        ? Number(r.requestsPerSecond)
+        : r?.intervalSeconds != null
+          ? 1 / Number(r.intervalSeconds)
+          : NaN
+    if (!Number.isFinite(rps) || rps < MIN_RPS || rps > MAX_RPS) {
+      throw bad(`requestsPerSecond for "${client}.${method}" must be a number between ${MIN_RPS} and ${MAX_RPS}`)
+    }
+    return { client, method, requestsPerSecond: Math.round(rps * 100) / 100 }
   })
 
   // WebSocket client pools: how many pool clients to spawn (the run session drives
@@ -226,10 +258,50 @@ function validateProcessInput(system, body) {
 
 // --- operations -----------------------------------------------------------------
 
+// Normalize a stored client_list row to the shape matching its client's CURRENT stateful mode —
+// legacy intervalSeconds rows and rows saved before a stateful flip both surface in the new shape
+// (the GET feeds the modal's edit form). Read-only: the file is only rewritten by an upsert.
+function normalizeClientRow(row, statefulIds) {
+  const { client, method } = row
+  if (statefulIds.has(client)) {
+    const instances = Number(row.instances)
+    return {
+      client,
+      method,
+      instances: Number.isInteger(instances) && instances >= 1 ? Math.min(instances, MAX_INSTANCES) : 1,
+    }
+  }
+  const raw =
+    row.requestsPerSecond != null
+      ? Number(row.requestsPerSecond)
+      : Number(row.intervalSeconds) > 0
+        ? 1 / Number(row.intervalSeconds)
+        : 1
+  const rps = Number.isFinite(raw) ? Math.min(Math.max(raw, MIN_RPS), MAX_RPS) : 1
+  return { client, method, requestsPerSecond: Math.round(rps * 100) / 100 }
+}
+// The manifest read can race a system teardown — degrade to "no stateful clients" rather than 500.
+function statefulClientIds(system) {
+  try {
+    return new Set(
+      readManifest(system)
+        .nodes.filter((n) => n.type === 'client' && n.stateful)
+        .map((n) => n.id),
+    )
+  } catch {
+    return new Set()
+  }
+}
+
 function listProcesses(system) {
   const { processes } = readProcesses(system)
+  const statefulIds = statefulClientIds(system)
   const runsByProcess = latestRuns(system, processes.map((p) => p.id))
-  const withRuns = processes.map((p) => ({ ...p, lastRun: runsByProcess[p.id] || null }))
+  const withRuns = processes.map((p) => ({
+    ...p,
+    client_list: (p.client_list || []).map((r) => normalizeClientRow(r, statefulIds)),
+    lastRun: runsByProcess[p.id] || null,
+  }))
   return { ok: true, processes: withRuns, run: runStatus(system) }
 }
 

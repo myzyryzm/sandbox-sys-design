@@ -9,8 +9,14 @@
 // Adding the next custom service type = add one module here + one module in the
 // frontend registry (src/customTypes/). Nothing in the modal, diagram, edit-tab, or
 // manifest core changes.
+import consumerGroup from './consumerGroup.js'
 import downloadCoordinator from './downloadCoordinator.js'
+import llmWorker from './llmWorker.js'
+import persistenceReader from './persistenceReader.js'
 
 export const CUSTOM_TYPES = {
+  [consumerGroup.serviceType]: consumerGroup,
   [downloadCoordinator.serviceType]: downloadCoordinator,
+  [llmWorker.serviceType]: llmWorker,
+  [persistenceReader.serviceType]: persistenceReader,
 }

@@ -32,11 +32,17 @@ work by hand from a terminal session, reproduce the same shape. Related: the
    ```json
    { "topics": [
      { "id": "orders",
+       "partitions": 6,
        "producers": ["service-1"],
        "consumers": [ { "groupId": "fulfillment", "members": ["service-2"] } ],
        "schemaModel": "OrderEvent",
        "enforceSchema": false } ] }
    ```
+   `partitions` is the topic's declared partition count (absent = 1, the pre-partitioning
+   default) — keep it in step with the live broker; it's the fan-out ceiling for consumer-group
+   scaling (a group never usefully runs more members than the topic has partitions). A group's
+   `members` lists **every container** consuming under that group id — a scaled consumer-group
+   service contributes its whole replica set (`[<base>, <base>-2, …]`, maintained by the app).
    `schemaModel` (optional) names a model in the bank (`systems/<id>/models.json`) that is the
    topic's **message contract** — what a consumer should expect when reading the topic. It's the
    same reusable TypeScript a `requestModel`/`responseModel` endpoint uses; resolve referenced
@@ -74,8 +80,14 @@ docker compose -f systems/<id>/docker-compose.yml exec -T <cluster> \
   /opt/kafka/bin/kafka-topics.sh --bootstrap-server <cluster>:9092 --list
 docker compose -f systems/<id>/docker-compose.yml exec -T <cluster> \
   /opt/kafka/bin/kafka-topics.sh --bootstrap-server <cluster>:9092 \
-  --create --if-not-exists --topic <topic> --partitions 1 --replication-factor 1
-# inspect live consumer groups:
+  --create --if-not-exists --topic <topic> --partitions <n> --replication-factor 1
+# grow a topic's partitions (INCREASE-ONLY — Kafka cannot shrink a topic; also persist
+# the new count as the topic's "partitions" in streams.json). The Topics tab's partition
+# editor does this mechanically via POST /api/event-stream {system, id, topic, partitions}:
+docker compose -f systems/<id>/docker-compose.yml exec -T <cluster> \
+  /opt/kafka/bin/kafka-topics.sh --bootstrap-server <cluster>:9092 \
+  --alter --topic <topic> --partitions <n>
+# inspect live consumer groups (members + their assigned partitions + per-partition lag):
 docker compose -f systems/<id>/docker-compose.yml exec -T <cluster> \
   /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server <cluster>:9092 --describe --all-groups
 ```
@@ -105,10 +117,11 @@ docker compose -f systems/<id>/docker-compose.yml exec -T <cluster> \
 ## Update an event stream
 
 - **Add/remove a topic**: create it on the live broker (`kafka-topics.sh --create`, or
-  `--delete`), and add/remove its entry in `streams.json`. When the task supplies a message
-  schema, write `"schemaModel": "<Model>"` (and `"enforceSchema": true` if it's to be enforced)
-  into the new entry. No rebuild — the read-only modal re-reads the registry and re-checks the
-  broker live.
+  `--delete`), and add/remove its entry in `streams.json` — **always persist the partition
+  count** in the entry (`"partitions": <n>`, matching what `--create --partitions <n>` made).
+  When the task supplies a message schema, write `"schemaModel": "<Model>"` (and
+  `"enforceSchema": true` if it's to be enforced) into the new entry. No rebuild — the
+  read-only modal re-reads the registry and re-checks the broker live.
 - **Set / change a topic's message schema**: set/clear `schemaModel` (and `enforceSchema`) on
   the topic's entry in `streams.json` — `schemaModel` must be a model that exists in
   `models.json`. This alone is a registry edit, **no rebuild**; the topic view resolves and shows
@@ -137,25 +150,31 @@ docker compose -f systems/<id>/docker-compose.yml exec -T <cluster> \
 ## Consumer function (a service consuming a topic via a named poll loop)
 
 A **consumer function** is a first-class "service X consumes topic T of cluster C" object created from
-the event stream's **Consumers** tab (`POST /api/consumers`). It is owned by one internal service
-(identity `(service, name)`, like an endpoint alias) and registered in `systems/<id>/consumers.json`:
+the event stream's **Consumers** tab. It is owned by one internal service (identity `(service, name)`,
+like an endpoint alias) and registered in `systems/<id>/consumers.json`:
 ```json
 { "consumers": [
-  { "service": "service-1", "name": "processRefunds", "cluster": "refund-stream",
-    "topic": "refunds", "pollRate": 1000, "downstream": ["ledger-db"],
+  { "service": "service-1", "name": "processRefunds", "groupId": "refund-workers",
+    "cluster": "refund-stream", "topic": "refunds", "pollRate": 1000, "downstream": ["ledger-db"],
     "downstreamDescriptions": { "ledger-db": "Writes a refund row per consumed message." },
     "description": "…", "implemented": false,
     "conversationId": "…", "createdAt": "…", "updatedAt": "…", "history": [ … ] } ] }
 ```
-(`downstream` + `downstreamDescriptions` are Claude-managed — the node ids the loop calls/reads/writes
-and a one-line blurb per id; absent until you fill them in. See the implement step below; they're what
-make the diagram draw the consumer's outbound lines and print each connection's description on the trace.)
+**`groupId` is the function's Kafka consumer-group id and the entry's value is AUTHORITATIVE —
+always read it from the record, never derive it.** It is user-named (defaulting to
+`<service>-<name>` when the user leaves it alone; a legacy entry without the field means that
+default). (`downstream` + `downstreamDescriptions` are Claude-managed — the node ids the loop
+calls/reads/writes and a one-line blurb per id; absent until you fill them in. See the implement
+step below; they're what make the diagram draw the consumer's outbound lines and print each
+connection's description on the trace.)
 The app has **already** done the mechanical scaffold before launching you (do NOT redo these):
-the consumers.json entry exists; the consumer group `{groupId:"<service>-<name>", members:["<service>"]}`
+the consumers.json entry exists; the consumer group `{groupId:"<groupId>", members:[…]}`
 is registered under the topic in `<cluster>/streams.json`; and the manifest edge
 `{from:<service>, to:<cluster>, origin:"consumer-fn"}` is added (this is what draws the
-`<service> → <cluster>` line + lets the diagram trace it). **Your job is the CODE half:** implement
-(or update) the real poll loop in the service and rebuild that one service.
+`<service> → <cluster>` line + lets the diagram trace it). **Defining a NEW consumer also creates
+its owning service** — a `consumer_group` custom-type service (see the subsection below) whose
+container, pause-flag mount and `SERVICE_ID` env are already provisioned. **Your job is the CODE
+half:** implement (or update) the real poll loop in the service and rebuild that one service.
 
 - **Implement** a background Kafka consumer in `systems/<id>/<service>/app.py` (the service is a
   FastAPI app, so run the loop in a **daemon thread** started at import/startup — never block the
@@ -166,7 +185,9 @@ is registered under the topic in `<cluster>/streams.json`; and the manifest edge
   that flips a top-level `consumersPaused` flag in `<cluster>/streams.json`, and consumers honor it
   *live* (no rebuild). So two things are required:
   1. **Mount the registry read-only** on the service in `docker-compose.yml` (same idiom as the CDC
-     worker's `cdc.json`), so the loop can read the flag:
+     worker's `cdc.json`), so the loop can read the flag — **skip this if the mount already exists**:
+     a consumer-group service is created with it (and with `SERVICE_ID`) pre-wired, so for those you
+     never touch docker-compose.yml:
      ```yaml
      <service>:
        volumes:
@@ -196,7 +217,8 @@ is registered under the topic in `<cluster>/streams.json`; and the manifest edge
   def _consume_<name>():
       consumer = KafkaConsumer(
           bootstrap_servers="<cluster>:9092",
-          group_id="<service>-<name>",
+          group_id="<groupId>",                              # from the consumers.json entry
+          client_id=os.environ.get("SERVICE_ID", "<service>"),  # = this CONTAINER's id — see below
           auto_offset_reset="earliest",
           value_deserializer=lambda b: b,
       )
@@ -216,6 +238,11 @@ is registered under the topic in `<cluster>/streams.json`; and the manifest edge
   ```
   Keep the existing metrics middleware and every other route/loop untouched. If the topic has a
   `schemaModel`, shape/parse the message to that model; if `enforceSchema` is true, validate it.
+  **Always set `client_id` from `SERVICE_ID` as above** — a consumer-group service scales to N
+  member containers that ALL run this same loop under the same `group_id` (Kafka rebalances the
+  topic's partitions across them natively, because `subscribe()` uses group-managed assignment);
+  each clone gets its own `SERVICE_ID` env, and the diagram + the group's scaler map live members
+  to their assigned partitions by that client id. `subscribe()`, not manual `assign()`, always.
 - **Record the loop's `downstream` + `downstreamDescriptions`** in this consumer's `consumers.json`
   entry. `downstream` is the array of node ids the loop CALLS / reads / writes — every in-system
   service whose endpoint it hits (e.g. an `<api>` it POSTs to), every database it queries, every
@@ -238,17 +265,19 @@ is registered under the topic in `<cluster>/streams.json`; and the manifest edge
   (new `subscribe([...])` topic / `poll(timeout_ms=...)` cadence), keep the same group id and the
   pause-aware `while True` structure, rebuild that service, leave `implemented` true.
 - **Rename** (`PUT /api/consumers {service, oldName, newName}` from the Consumers tab's per-row
-  Rename action): the consumers.json entry and its streams.json consumer group are renamed by the app
-  first (`<service>-<oldName>` → `<service>-<newName>`). For an **implemented** consumer you only do
-  the CODE half: in `app.py` rename the loop function `_consume_<oldName>` → `_consume_<newName>` (and
-  its `threading.Thread(...).start()`) and change that consumer's `group_id` from `<service>-<oldName>`
-  to `<service>-<newName>` — leave the topic, poll cadence, pause-awareness and every other loop intact
-  — then rebuild only that service. The new group id is a fresh Kafka consumer group, so it starts from
-  `auto_offset_reset` (earliest). A **pending** (not-yet-implemented) consumer is registry-only — nothing
-  to do in code.
+  Rename action): the consumers.json entry is renamed by the app first. The **group id only moves
+  when it was the old derived default** (`<service>-<oldName>` → `<service>-<newName>`); a
+  user-named group is the function's stable Kafka identity and survives the rename untouched — the
+  task prompt states which case applies. For an **implemented** consumer you only do the CODE half:
+  in `app.py` rename the loop function `_consume_<oldName>` → `_consume_<newName>` (and its
+  `threading.Thread(...).start()`) and, only when the prompt says the group moved, change that
+  consumer's `group_id` to match — leave the topic, poll cadence, pause-awareness and every other
+  loop intact — then rebuild only that service. A moved group id is a fresh Kafka consumer group, so
+  it starts from `auto_offset_reset` (earliest). A **pending** (not-yet-implemented) consumer is
+  registry-only — nothing to do in code.
 - **Delete**: the consumers.json entry, the streams.json group, and the manifest edge are removed by
-  the app first; you only strip the matching loop (group id `<service>-<name>`) from `app.py` and
-  rebuild that service.
+  the app first; you only strip the matching loop (the group id named in the task prompt) from
+  `app.py` and rebuild that service.
 - **Update connection descriptions only** (the Consumers tab's "Update descriptions" button): if the
   task is to (re)generate just this consumer's connection metadata, read the loop in `app.py` and edit
   **only** its `downstream` list and `downstreamDescriptions` map on its `consumers.json` entry (match
@@ -259,6 +288,41 @@ is registered under the topic in `<cluster>/streams.json`; and the manifest edge
   cluster's `lag` metric reflects consumption; the service's `CONS <name>` row traces on the diagram
   (service → cluster + service → each `downstream`, each downstream line labelled with its `downstreamDescriptions`
   blurb), and a persistent line runs from the service to every `downstream` node it calls/reads/writes.
+
+### Consumer-group services & autoscaling (the scaled shape behind new consumers)
+
+Defining a NEW consumer from the Consumers tab creates a **consumer-group service** — a
+`service_type:"consumer_group"` custom-type service (node carries
+`consumerGroup:{cluster, groupId}` + a group-lag metric card) plus a real **scaler**
+container `<base>-scaler` (`service_type:"consumer_scaler"`, `scalerOf:"<base>"`). How the
+group works — all APP-MANAGED; a session's job on these services is ONLY the poll-loop code:
+
+- **Replica group, no load balancer**: the base `<base>` is member #1; scaling adds clones
+  `<base>-2..N` (`instanceOf:"<base>"`, `build: ./<base>`, own `SERVICE_ID`) — the shared
+  reconciler (`frontend/server/replicaGroup.js`) keeps compose/prometheus/nginx/manifest AND
+  the group's `members` list in streams.json in step. All members run the base's `app.py`,
+  so `docker compose ... up -d --build <base>` rebuilds code for every member (compose builds
+  each `build: ./<base>` service). Kafka splits the topic's partitions across members —
+  scale beyond the partition count and the extras idle.
+- **The scaler** (`templates/consumer-scaler/`) watches the group on the broker (total lag,
+  live members, per-member assignments — matched by `client_id`) and computes a desired
+  member count from `systems/<id>/<base>/scaler.json`:
+  `{ groupId, enabled, min, max, scale_up_lag, scale_down_lag, up_stable_seconds,
+  down_stable_seconds, cooldown_seconds }` — live-mounted and mtime-polled, so policy edits
+  apply with NO rebuild (edit IN PLACE, never tmp+rename). The app's dev server polls the
+  scaler's `/state` (via `localhost:8080/<base>-scaler/state`) every ~10s and applies
+  `desired` through the same idempotent scale reconciler the Scaling tab uses. Scale-up is
+  suppressed while `consumersPaused` (lag grows by design then).
+- **Sessions never scale the group or edit the scaler**: don't touch `<base>-scaler/`,
+  `scaler.json`, replica compose entries, or `members` lists — author the base's loop,
+  rebuild with `up -d --build <base>`, done. The loop's `group_id` + `client_id` contract
+  above is what makes scaling/rebalancing work; breaking it orphans the diagram's
+  member↔partition mapping.
+- **Verify scaling end-to-end**: flood the topic (`kafka-console-producer.sh`), watch
+  `curl localhost:8080/<base>-scaler/state` — lag climbs → `desired` steps up → new
+  member containers appear (`docker compose ps`) → `kafka-consumer-groups.sh --describe`
+  shows partitions rebalanced → lag drains → after `down_stable_seconds` + cooldown the
+  group shrinks back to `min`.
 
 ### Pause consumers (cluster-level kill switch)
 

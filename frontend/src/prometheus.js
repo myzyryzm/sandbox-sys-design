@@ -22,3 +22,26 @@ export async function queryInstant(base, query) {
   const raw = Number(result[0].value?.[1])
   return Number.isNaN(raw) ? null : raw
 }
+
+/**
+ * Like queryInstant, but returns EVERY series of the instant vector:
+ *   [{ labels: { instance, job, … }, value }]
+ * Needed when the per-series identity matters — e.g. the etcd node's member
+ * strip reads all N `up{job="etcd"}` series (one per member) where
+ * queryInstant would collapse them to the first.
+ */
+export async function queryVector(base, query) {
+  const url = `${base}/api/v1/query?query=${encodeURIComponent(query)}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Prometheus HTTP ${res.status}`)
+
+  const body = await res.json()
+  if (body.status !== 'success') {
+    throw new Error(`Prometheus error: ${body.error || 'unknown'}`)
+  }
+
+  return (body.data?.result || []).map((r) => ({
+    labels: r.metric || {},
+    value: Number(r.value?.[1]),
+  }))
+}

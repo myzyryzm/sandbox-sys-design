@@ -4,9 +4,10 @@ import { buildEndToEndRunPrompt } from './endToEndBank.js'
 /**
  * Top-level "End-to-End" modal. Define whole test PROCESSES and run them.
  *
- * A process is: a name, a client_list (client methods to call + how often, in seconds), a
- * failure_list (freeform "a bug occurred if this happens") and a constraint_list (freeform
- * invariants that must never be violated). Defining one is pure data entry (persisted to
+ * A process is: a name, a client_list (client methods to drive — a stateless client's row is a
+ * call rate in req/s; a stateful client's row is how many concurrent instances of the function to
+ * keep alive), a failure_list (freeform "a bug occurred if this happens") and a constraint_list
+ * (freeform invariants that must never be violated). Defining one is pure data entry (persisted to
  * systems/<id>/endtoend.json via /api/endtoend). RUNNING one hands off to a launched Claude
  * session (the sandbox-end-to-end-process skill via onLaunch/enqueueSession) that coordinates the
  * entire run — calling the methods at their rates for a chosen duration, synthesizing the
@@ -22,10 +23,12 @@ function sig(fn) {
   return `${fn.name}(${(fn.args || []).map((a) => `${a.name}: ${a.type}`).join(', ')})`
 }
 
+// Rows carry BOTH mode fields; the row renders (and submit keeps) only the one matching the
+// client's current stateful flag, so a mode flip mid-edit just re-renders the other input.
 function blankForm() {
   return {
     name: '',
-    client_list: [{ client: '', method: '', intervalSeconds: 5 }],
+    client_list: [{ client: '', method: '', requestsPerSecond: 1, instances: 1 }],
     websocket_list: [],
     failure_list: [],
     constraint_list: [],
@@ -64,6 +67,11 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
     .map((n) => n.id)
   const noWsClients = wsClientOptions.length === 0
 
+  // Stateful clients get an instance count instead of a call rate on their rows.
+  const statefulClients = new Set(
+    (manifest?.nodes || []).filter((n) => n.type === 'client' && n.stateful).map((n) => n.id),
+  )
+
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/endtoend?system=${encodeURIComponent(systemId)}`)
@@ -74,7 +82,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
     }
   }, [systemId])
 
-  // Own poll (like TestPanel), so App needs no new state. ~1.5s keeps the Start/Stop toggle live.
+  // Own poll, so App needs no new state. ~1.5s keeps the Start/Stop toggle live.
   useEffect(() => {
     load()
     const id = setInterval(load, 1500)
@@ -83,7 +91,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
 
   // --- form helpers ---
   const addMethod = () =>
-    setForm((f) => ({ ...f, client_list: [...f.client_list, { client: '', method: '', intervalSeconds: 5 }] }))
+    setForm((f) => ({ ...f, client_list: [...f.client_list, { client: '', method: '', requestsPerSecond: 1, instances: 1 }] }))
   const updateMethod = (i, patch) =>
     setForm((f) => ({ ...f, client_list: f.client_list.map((r, j) => (j === i ? { ...r, ...patch } : r)) }))
   const removeMethod = (i) =>
@@ -110,7 +118,14 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
   function startEdit(p) {
     setForm({
       name: p.name || '',
-      client_list: (p.client_list || []).map((r) => ({ ...r })),
+      // The GET normalizes rows to the new shape; the fallbacks only guard a stale poll.
+      client_list: (p.client_list || []).map((r) => ({
+        client: r.client,
+        method: r.method,
+        requestsPerSecond:
+          r.requestsPerSecond ?? (r.intervalSeconds > 0 ? Math.round(100 / r.intervalSeconds) / 100 : 1),
+        instances: r.instances ?? 1,
+      })),
       websocket_list: (p.websocket_list || []).map((r) => ({ ...r })),
       failure_list: [...(p.failure_list || [])],
       constraint_list: [...(p.constraint_list || [])],
@@ -133,7 +148,11 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
 
     const client_list = form.client_list
       .filter((r) => r.client && r.method)
-      .map((r) => ({ client: r.client, method: r.method, intervalSeconds: Number(r.intervalSeconds) }))
+      .map((r) =>
+        statefulClients.has(r.client)
+          ? { client: r.client, method: r.method, instances: Number(r.instances) }
+          : { client: r.client, method: r.method, requestsPerSecond: Number(r.requestsPerSecond) },
+      )
     const websocket_list = form.websocket_list
       .filter((r) => r.client)
       .map((r) => ({
@@ -145,8 +164,12 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
       return setError('Add at least one client method or websocket client pool')
     }
     for (const r of client_list) {
-      if (!Number.isInteger(r.intervalSeconds) || r.intervalSeconds < 1 || r.intervalSeconds > 60) {
-        return setError(`Rate for ${r.client}.${r.method} must be a whole number of seconds between 1 and 60`)
+      if (r.instances != null) {
+        if (!Number.isInteger(r.instances) || r.instances < 1 || r.instances > 20) {
+          return setError(`Instances for ${r.client}.${r.method} must be a whole number between 1 and 20`)
+        }
+      } else if (!Number.isFinite(r.requestsPerSecond) || r.requestsPerSecond < 0.01 || r.requestsPerSecond > 20) {
+        return setError(`Rate for ${r.client}.${r.method} must be between 0.01 and 20 requests per second`)
       }
     }
     for (const r of websocket_list) {
@@ -379,7 +402,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
             {/* client_list */}
             <div className="form-section">
               <div className="form-section-head">
-                <span>Client methods <em className="grpc-optional">(method + how often to call it, in seconds)</em></span>
+                <span>Client methods <em className="grpc-optional">(stateless: call rate in req/s · stateful: instances to keep running)</em></span>
                 <button type="button" onClick={addMethod} disabled={busy || noMethods}>+ method</button>
               </div>
               {noMethods && (
@@ -388,6 +411,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
               {form.client_list.map((r, i) => {
                 const val = r.client && r.method ? `${r.client}::${r.method}` : ''
                 const stale = val && !validValues.has(val)
+                const isStateful = statefulClients.has(r.client)
                 return (
                   <div className="field-row" key={i}>
                     <select
@@ -404,17 +428,32 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
                         <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
-                    <input
-                      type="number"
-                      min={1}
-                      max={60}
-                      value={r.intervalSeconds}
-                      disabled={busy}
-                      onChange={(e) => updateMethod(i, { intervalSeconds: e.target.value })}
-                      title="call every N seconds"
-                      style={{ width: 70 }}
-                    />
-                    <span className="grpc-optional">s</span>
+                    {isStateful ? (
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        step={1}
+                        value={r.instances}
+                        disabled={busy}
+                        onChange={(e) => updateMethod(i, { instances: e.target.value })}
+                        title="how many concurrent instances of this function to keep running"
+                        style={{ width: 70 }}
+                      />
+                    ) : (
+                      <input
+                        type="number"
+                        min={0.01}
+                        max={20}
+                        step="any"
+                        value={r.requestsPerSecond}
+                        disabled={busy}
+                        onChange={(e) => updateMethod(i, { requestsPerSecond: e.target.value })}
+                        title="requests per second (0.1 = one call every 10s)"
+                        style={{ width: 70 }}
+                      />
+                    )}
+                    <span className="grpc-optional">{isStateful ? 'instances' : 'req/s'}</span>
                     <button type="button" className="link-danger" onClick={() => removeMethod(i)} disabled={busy}>×</button>
                   </div>
                 )

@@ -19,6 +19,14 @@ import { repoRoot, systemsDir, isValidSystem } from './systems.js'
 // tell the browser, which auto-advances the edit queue. Interactive `claude` never
 // exits when a task finishes, so this is the only reliable "task done" signal.
 const DONE_TOKEN = '<<<SANDBOX_QUEUE_DONE>>>'
+
+// Model + reasoning effort for every editing session we launch. These sessions do
+// real judgment work (authoring FastAPI routes, DB schemas, .proto servicers) with
+// the full manifest inlined, so we pin the strongest model at max thinking. Set
+// explicitly (not left to the host's global settings) so the sandbox behaves the
+// same for anyone running it. `opus[1m]` keeps the 1M-token context so a large
+// manifest + skill files don't crowd out the actual task.
+const MODEL_ARGS = ['--model', 'opus[1m]', '--effort', 'xhigh']
 const DONE_INSTRUCTION = `
 
 --- EDIT QUEUE PROTOCOL ---
@@ -112,7 +120,6 @@ Other key files in systems/${id}/:
   Reload after route changes: docker compose -f systems/${id}/docker-compose.yml exec -T lb nginx -s reload
 - prometheus/prometheus.yml   Scrape targets (scrapes services/exporters directly, not
   through the lb). Restart after changes: docker compose -f systems/${id}/docker-compose.yml restart prometheus
-- load.sh   Load generator for smoke tests.
 Keep new metrics consistent between a service's app.py and manifest.json's PromQL. Reach
 a service through the lb at http://localhost:8080/<service><path>.
 
@@ -171,6 +178,8 @@ export default function claudeTerminal() {
         } else {
           args = ['--append-system-prompt', buildSystemPrompt(id)]
         }
+        // Pin model + effort ahead of the mode-specific flags for every session.
+        args = [...MODEL_ARGS, ...args]
 
         const pty = nodePty.spawn('claude', args, {
           name: 'xterm-256color',

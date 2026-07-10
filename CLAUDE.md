@@ -65,16 +65,22 @@ generic renderer of it — **to change what the user sees, edit the manifest, no
   health?:{ query, rules:[{color, when}] } }`. `when` is a tiny safe `value <op> number` expression
   (e.g. `value < 1`); first matching rule wins; no value yet → gray. `type` is the node's kind —
   `load_balancer | service | service-lb | external_service | client | postgres | mongodb | redis |
-  object-store | kafka | cdc` (or a custom service type like `download-coordinator`). `service-lb` is
-  a per-service load-balancer cluster ENTRY: an haproxy sidecar that keeps the service's `<name>` and
-  fronts N instances (each a `type:"service"` node carrying `instanceOf:"<name>"`), while still
-  owning the service's endpoints/gRPC under `<name>` — see the `sandbox-service-lb` skill. Nodes also
-  carry provenance/relationship keys the scaffolding writes and the diagram reads: `origin`
-  (`create-service` / `create-database` / `create-event-stream` / `create-cdc` /
-  `create-external-service` / `create-client` / …), `external:true` (clients + external services,
-  drawn outside the boundary), `schemaModels:[]` (model-bank names backing a database's schema), the
-  ownership links `replicaOf` / `cdcOf` / `instanceOf` (+ the entry's `svcLb:{algorithm,instances}`),
-  and the `grpc` / `resilience` blocks.
+  object-store | kafka | etcd | cdc` (or a custom service type like `download-coordinator`).
+  `service-lb` is a per-service load-balancer cluster ENTRY: an haproxy sidecar that keeps the
+  service's `<name>` and fronts N instances (each a `type:"service"` node carrying
+  `instanceOf:"<name>"`), while still owning the service's endpoints/gRPC under `<name>` — see the
+  `sandbox-service-lb` skill. `etcd` is a SINGLETON (one per system, Prometheus-style Add-menu gate
+  + backend 409): one node representing a real N-member Raft cluster (`<name>-1..N` containers,
+  N odd), carrying `etcd:{ size, quorum, heartbeatMs, electionMs, leaseTtlSeconds, members }` and a
+  quorum-aware health (red below quorum / yellow degraded / green full); the diagram adds per-member
+  dots (leader ringed), the derived quorum caption, and clickable KEY rows per keyspace whose trace
+  draws registrant → etcd → listeners. Nodes also carry provenance/relationship keys the scaffolding
+  writes and the diagram reads: `origin` (`create-service` / `create-database` /
+  `create-event-stream` / `create-etcd` / `create-cdc` / `create-external-service` /
+  `create-client` / …), `external:true` (clients + external services, drawn outside the boundary),
+  `schemaModels:[]` (model-bank names backing a database's schema), the ownership links `replicaOf`
+  / `cdcOf` / `instanceOf` (+ the entry's `svcLb:{algorithm,instances}`), and the `grpc` /
+  `resilience` blocks.
 - `edges[]`: `{ from, to }` node ids, plus an optional `origin` (e.g. `consumer-fn` for a Kafka
   consumer-function edge).
 - `boundary:{x,y,w,h}` is the dotted system-boundary rectangle; drag mode persists it (and node
@@ -129,6 +135,22 @@ rebuild** (the frontend re-reads them on a timer):
   consumer functions** (identity `(service, name)`). The registry entry + consumer-group + manifest edge
   are written live; the actual background poll loop is authored into that service's `app.py` by a
   launched session, which sets `implemented:true` (`frontend/server/consumers.js`).
+- `etcd.json` — `{ cluster:{ id, size, heartbeatMs, electionMs, leaseTtlSeconds }, keyspaces:[…] }`,
+  the etcd cluster config + **keyspace** registry (`frontend/server/etcd.js`). Two keyspace types
+  (entries without `type` are discovery). **Discovery** (`type:"discovery"`, identity = `service`,
+  prefix `/services/<service>/`): `{ service, prefix, description, implemented, conversationId,
+  history, listeners:[{ service, description, implemented, conversationId, history }] }` — each of
+  the service's workers keeps a **leased key** alive there (value `host:port`). **Config**
+  (`type:"config"`, identity = `name`, prefix `/config/<name>/`): `{ name, prefix, description,
+  values:[{ key, value }], listeners:[…] }` — generic **persistent key/values** (env vars, configs)
+  edited in the Keyspaces tab; the backend puts them via etcdctl (no lease, no session) and replays
+  the `values` copy into a recreated cluster. Either type's listeners run a real etcd **watch**
+  (pushed updates, no polling). Registry entry + compose env/mount (`ETCD_WORKER_ID`,
+  `ETCD_ENDPOINTS`, `etcd.json:ro`) are written live; the lease-keepalive / watch loops are authored
+  by launched sessions (the `sandbox-etcd` skill) which set `implemented:true`. The file is mounted
+  read-only into registrants so a **lease-TTL change applies live** (mtime re-read, no rebuild);
+  size/Raft-knob changes recreate the member containers (leased keys are ephemeral — the loops
+  re-register on reconnect; config values are replayed by the backend).
 - `<db>/seeds.json` — `{ tables:[{ table, rows:[…] }] }`, durable fixture rows for a postgres/mongo DB.
   Applied **live** to the running container and regenerated into an idempotent `<db>/seed.sql|seed.js`
   that's mounted after the schema init script, so a from-scratch rebuild replays them
@@ -137,10 +159,14 @@ rebuild** (the frontend re-reads them on a timer):
   rules, mounted read-only into the `<db>-cdc` worker container (`type:"cdc"`, `cdcOf:"<db>"`). Rule
   edits rewrite this file + `restart` the worker; the first rule builds the worker via a launched
   session (`frontend/server/cdc.js`).
-- `endtoend.json` — `{ processes:[{ id, name, client_list:[{client,method,intervalSeconds}],
-  failure_list:[…], constraint_list:[…] }] }`, named **end-to-end test processes**. Defining is pure
+- `endtoend.json` — `{ processes:[{ id, name, client_list:[{client,method, requestsPerSecond |
+  instances}], failure_list:[…], constraint_list:[…] }] }`, named **end-to-end test processes**. A
+  stateless client's row carries `requestsPerSecond` (0.01–20 req/s, fractional); a **stateful**
+  client's row instead carries `instances` (1–20 concurrent session-loop instances to keep alive);
+  legacy `intervalSeconds` rows are normalized on read (rps = 1/interval). Defining is pure
   data; **running** launches a session (the `sandbox-end-to-end-process` skill) that seeds preconditions,
-  drives the listed client methods on their intervals, probes for the `failure_list` states, and writes a
+  drives the listed client methods (stateless at their req/s, stateful as respawned instance pools),
+  probes for the `failure_list` states, and writes a
   PASS/FAIL report to `systems/<id>/endtoend-runs/`. The `run` flag is an in-memory coordination marker
   the session polls for early-stop (`frontend/server/endtoend.js`).
 - `streams.json` (per Kafka cluster) — `{ topics:[{ id, producers:[svc], consumers:[{groupId,members}],
@@ -166,6 +192,7 @@ skill in `.claude/skills/` — it has the canonical procedure and `Verify` steps
 | Add/update/delete a datastore (postgres/mongo/redis/MinIO) **or a read replica** | `sandbox-database` |
 | Build a database's CDC worker (capture changes → Kafka) | `sandbox-database-cdc` |
 | Add/update a Kafka cluster, topics, and per-service **consumer functions** | `sandbox-event-stream` |
+| Wire **etcd service discovery** (leased-key registration + watch listeners) | `sandbox-etcd` |
 | Author a **client function** (a multi-step call sequence run through the lb) | `sandbox-client-scenario` |
 | Define a gRPC contract (`.proto` + protoc + shared servicer) | `sandbox-grpc-contract` |
 | Attach a contract to a service (server/client roles, targets) | `sandbox-grpc-attach` |
@@ -194,13 +221,14 @@ button + `EditQueuePanel.jsx`) that runs pending sessions sequentially in the on
   it); `templates/client/` and `templates/download-coordinator/` back the client + coordinator flows.
 - `frontend/server/<feature>.js` — one plugin per `/api/<feature>` route, all wired in `vite.config.js`:
   `services`, `databases` (+ `dbschema`, `dbseed`, `cdc`, `replicas`), `endpoints`, `models`,
-  `eventstreams` + `consumers`, `grpc` (+ `grpcInstall`), `resilience`, `serviceLb`, `outage`, `externalServices`,
+  `eventstreams` + `consumers`, `etcd`, `grpc` (+ `grpcInstall`), `resilience`, `serviceLb`, `outage`, `externalServices`,
   `clients` + `scenarios` (+ `clientScript` helper), `customServices` (+ `customTypes/` recipes),
-  `endtoend`, `layout`, `simulate`, `skills`, `remove`, `terminal`. Shared primitives live in
+  `endtoend`, `layout`, `skills`, `remove`, `terminal`. Shared primitives live in
   `scaffold.js` + `systems.js`. `remove.js` **blocks deleting a node another still depends on**
   (`findDependents` reverse-scans endpoints `downstream`/gRPC targets/Kafka producers-consumers/consumer
-  functions/scenario steps; replicas + CDC workers are excluded as they cascade) — `GET /api/dependents`
-  powers the Delete tab's proactive warning and `POST /api/delete` enforces the same guard.
+  functions/scenario steps/etcd registrants-listeners; replicas + CDC workers are excluded as they
+  cascade) — `GET /api/dependents` powers the Delete tab's proactive warning and `POST /api/delete`
+  enforces the same guard.
 - `frontend/src/*.jsx` — the generic diagram (`SystemDiagram.jsx`) + modals; it renders whatever the
   selected manifest describes.
 - `instructions/` — original design briefs (background, not operational).

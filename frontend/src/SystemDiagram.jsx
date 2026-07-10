@@ -57,12 +57,17 @@ const COLOR_HEX = {
 const TRACE_COLOR = '#6ea8fe'
 const GRPC_COLOR = '#b18cf2'
 const REPLICA_COLOR = '#3fb6a8'
-// Kafka "consume" edge (a consumer service → the cluster it reads from). Amber + dashed so it
+// Kafka "consume" edge (a consumer service → the cluster it reads from). Solid amber so it
 // reads as distinct from a solid-gray producer/dep edge that points the same way (into the cluster).
 const CONSUME_COLOR = '#e0a44f'
 // Base dependency-edge color (matches `.edge` in styles.css) — reused for the arrowhead
 // on the collapsed websocket-fleet in/out edges.
 const EDGE_COLOR = '#5b6270'
+// etcd discovery-wiring edge (registrant → etcd lease-put, etcd → listener watch). A muted
+// cyan, distinct from the brighter trace blue / gRPC purple / replica teal; drawn faint +
+// dashed (see `.etcd-edge`) so the always-on discovery topology stays subordinate to the
+// bright click-trace that lights the same relationship.
+const ETCD_COLOR = '#5aa0c0'
 // When A→B and B→A both exist, each line is nudged this many px perpendicular to its
 // axis so the two opposing arrows render as separate parallel lines instead of overlapping.
 const EDGE_PARALLEL_OFFSET = 7
@@ -70,6 +75,16 @@ const EDGE_PARALLEL_OFFSET = 7
 // A synthetic trace endpoint standing for a websocket tier's whole server fleet (its dotted
 // box), so a lifecycle trace collapses the relay fan-out into one hop into the box and one hop
 // out per downstream — matching the collapsed base edges. Not a real manifest node id.
+// An etcd node's KEY row labels its keyspace by the registrant service's name,
+// camelCased (`llm-worker` → `llmWorker`) — friendlier than the /services/<name>/ prefix.
+const camelName = (id) => id.replace(/-+([a-z0-9])/g, (_, c) => c.toUpperCase())
+// A listening service's SUB row names its subscription after the etcd KEY it watches,
+// `on`-prefixed like an event handler (`llm-worker` → `onLlmWorker`, `app-settings` → `onAppSettings`).
+const onName = (id) => {
+  const c = camelName(id)
+  return 'on' + c.charAt(0).toUpperCase() + c.slice(1)
+}
+
 const WS_FLEET_PREFIX = 'ws-fleet:'
 const wsFleetId = (tier) => `${WS_FLEET_PREFIX}${tier}`
 const isFleetId = (id) => typeof id === 'string' && id.startsWith(WS_FLEET_PREFIX)
@@ -153,6 +168,7 @@ function isDeletable(node) {
     node.type === 'prometheus' ||
     node.origin === 'create-database' ||
     node.origin === 'create-event-stream' ||
+    node.origin === 'create-etcd' ||
     node.origin === 'create-websockets'
   )
 }
@@ -193,10 +209,34 @@ function svcOrdinal(id) {
 }
 
 // Controllable nodes carry a bottom "Edit" button (which opens the tabbed edit modal);
-// the LB, other infra, websocket servers, and load-balanced instances do not.
+// the LB, other infra, websocket servers, and load-balanced instances do not. A scaler
+// sidecar DOES carry one: it sits at the top of its group's stack and hosts the GROUP's
+// Edit button (the click opens its base's modal — see the Edit onClick).
 function hasEditButton(node) {
   return isDeletable(node) && !isWsServer(node) && !isSvcInstance(node)
 }
+
+// The BASE node of a WORKER GROUP — any custom type whose frontend module declares a
+// `workerGroup` predicate (LLM workers, Kafka consumer groups). The group's name lives
+// on the dotted box's enlarged top-left label instead of a header strip; the group's
+// scaler card (scalerOf) renders at the base's position as the stack header, carrying
+// the group's Edit button — a scaler-less group falls back to a bare Edit button. The
+// base container's live data is shown on a render-only virtual `<name>-1` card stacked
+// below, alongside the real `<name>-2..N` instances.
+function isGroupBase(node) {
+  return node.type === 'service' && !node.instanceOf && !!customTypeOf(node)?.workerGroup?.(node)
+}
+
+// Where a node's live data (nodeData / customState / outages) lives: a virtual group
+// member card reads the base container's id via stateKey; every real node reads its own.
+const dataKeyOf = (node) => node.stateKey || node.id
+
+// Height of a worker group's entry (the bare Edit button).
+const GROUP_ENTRY_H = EDIT_H
+// Member cards stack in columns of at most this many; overflow wraps to a new column
+// to the right, so a big group grows sideways instead of into the nodes below it.
+const GROUP_COL_SIZE = 3
+const GROUP_COL_GAP_X = 16
 
 // y where the metric/endpoint rows end.
 function metricsBottom(node, bodyRows) {
@@ -357,6 +397,29 @@ export default function SystemDiagram({
   consumerTrace = null,
   onSelectConsumer,
   onClearConsumerTrace,
+  // Each etcd cluster's keyspaces (systems/<id>/etcd.json), keyed by etcd node id. Rendered
+  // as clickable KEY rows on the cluster node; clicking one traces registrant → etcd →
+  // each listener.
+  etcdKeyspaces = {},
+  // A selected keyspace, traced registrant service → etcd (the lease-put keepalive) and
+  // etcd → each listener (the watch push). Mutually exclusive with the other traces.
+  keyspaceTrace = null,
+  onSelectKeyspace,
+  onClearKeyspaceTrace,
+  // Trace ONE subscription (a service's SUB row): registrant → etcd → that one listener.
+  // Reuses keyspaceTrace with a single-listener `listeners` + a `focus` marker.
+  onSelectSubscription,
+  // The gRPC contract registry (systems/<id>/grpc/_registry.json via /api/grpc-contracts) as
+  // [{ name, methods:[{ name, … }] }]. A service that SERVES a contract (its manifest
+  // `grpc.servers` lists the name) draws one clickable RPC row per method of that contract —
+  // the method names live here, not on the node. Empty when nothing in the system serves gRPC.
+  grpcContracts = [],
+  // A selected served RPC method, traced each caller (a service dialing this contract with this
+  // server in its `grpc.clients[].targets`) → this server. Mutually exclusive with the other
+  // traces. Set via onSelectRpc, cleared via onClearRpcTrace.
+  rpcTrace = null,
+  onSelectRpc,
+  onClearRpcTrace,
 }) {
   const [selectedKey, setSelectedKey] = useState(null)
   // Index of the trace hop whose description popup is open (or null). Reset whenever the active
@@ -394,6 +457,22 @@ export default function SystemDiagram({
 
   const nodes = manifest.nodes
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
+
+  // Render-only ordinal-1 cards for worker groups: the base node draws as the compact
+  // group entry, and this virtual card shows the base CONTAINER's data (stateKey) as
+  // `<name>-1` in the member column. `::` is outside NAME_RE, so the synthetic id can
+  // never collide with a real node. instanceOf gives it the instance behaviors for free
+  // (no Edit button, no method rows, group drag via the base). NOT added to byId — edges,
+  // traces and drag-entry lookups must only ever see manifest nodes.
+  const groupVirtuals = nodes.filter(isGroupBase).map((b) => ({
+    ...b,
+    id: `${b.id}::1`,
+    label: `${b.id}-1`,
+    instanceOf: b.id,
+    stateKey: b.id,
+    groupVirtual: true,
+  }))
+  const renderNodes = [...nodes, ...groupVirtuals]
 
   // Effective on-screen position of a node: a live drag override wins over the manifest.
   const posOf = (n) => drag[n.id] || n.position
@@ -496,12 +575,48 @@ export default function SystemDiagram({
       { label: 'last run', value: wsStats[id].ts ? new Date(wsStats[id].ts).toLocaleTimeString() : '—' },
     ].map((r) => ({ kind: 'wsstat', ...r }))
   }
+  // An etcd cluster's keyspaces, dropping any DISCOVERY keyspace whose registrant service no
+  // longer exists (so a deleted service can't leave a dangling KEY row that traces to nothing).
+  // Config keyspaces have no registrant and always render.
+  const keyspacesOf = (id) => (etcdKeyspaces[id] || []).filter((k) => k.type === 'config' || byId[k.service])
+  // A SERVICE's etcd subscriptions: every keyspace (across all etcd clusters) whose
+  // `listeners` include this service. Each becomes a clickable SUB row on the service node
+  // (the mirror image of the etcd node's KEY rows) that traces registrant → etcd → this
+  // service. Returns { etcdId, ks } so the row's click knows which cluster owns the keyspace.
+  const subscriptionsOf = (id) =>
+    Object.entries(etcdKeyspaces).flatMap(([etcdId, kss]) =>
+      (kss || [])
+        .filter((ks) => (ks.listeners || []).some((l) => l.service === id))
+        .map((ks) => ({ etcdId, ks })),
+    )
+  // A service's SERVED gRPC methods: for each contract its manifest `grpc.servers` lists, one
+  // row per method of that contract (method names come from the registry, not the node). Only a
+  // server-role attachment produces rows — a pure client (`grpc.clients` only) serves nothing,
+  // and group instances (`instanceOf`) never carry the block, so both list nothing here.
+  const grpcMethodsByContract = new Map((grpcContracts || []).map((c) => [c.name, c.methods || []]))
+  const rpcsOf = (id) => {
+    const servers = byId[id]?.grpc?.servers || []
+    if (!servers.length) return []
+    return servers.flatMap((contract) =>
+      (grpcMethodsByContract.get(contract) || []).map((m) => ({ contract, method: m.name })),
+    )
+  }
   const rowsOf = (node) => {
     if (!node) return []
     return [
       ...methodsOf(node.id).map((e) => ({ kind: 'method', e })),
+      // Served RPC rows sit with the HTTP endpoints — both are callable surfaces this service
+      // exposes. Like CONS/SUB, a worker group serves from its base container, so the virtual
+      // `<name>-1` member card renders them (stateKey = the base id that carries the grpc block).
+      ...rpcsOf(node.groupVirtual ? node.stateKey : node.id).map((r) => ({ kind: 'rpc', ...r })),
       ...functionsOf(node.id).map((fn) => ({ kind: 'fn', fn })),
-      ...consumersOf(node.id).map((c) => ({ kind: 'cons', c })),
+      // A worker group's base renders as a bare Edit button, so its CONS rows live on
+      // the virtual `<name>-1` member card instead (stateKey = the base id). Real
+      // instances stay row-less — one row per group, not per member.
+      ...consumersOf(node.groupVirtual ? node.stateKey : node.id).map((c) => ({ kind: 'cons', c })),
+      ...keyspacesOf(node.id).map((ks) => ({ kind: 'ks', ks })),
+      // A service's etcd subscriptions (SUB rows), anchored on the real node like CONS rows.
+      ...subscriptionsOf(node.groupVirtual ? node.stateKey : node.id).map((s) => ({ kind: 'sub', ...s })),
       ...wsStatRowsOf(node.id),
     ]
   }
@@ -512,9 +627,36 @@ export default function SystemDiagram({
   const customModules = [...new Set(Object.values(CUSTOM_TYPES))]
   const customEdges = customModules.flatMap((m) => m.diagramEdges?.({ manifest, customState }) || [])
 
+  // etcd discovery wiring as ALWAYS-ON faint arrows, derived live from etcd.json (etcdKeyspaces)
+  // — the persistent mirror of the click-trace: each discovery keyspace's registrant service →
+  // its etcd cluster (the leased-key keepalive in), and etcd → each listener service (the watch
+  // push out). Config keyspaces have no registrant, so they contribute only the listener edges.
+  // Deduped per (from,to): a service listening on many keyspaces draws ONE arrow, and a worker
+  // registering draws ONE arrow regardless of instance count. Nodes that no longer exist are
+  // skipped (a deleted registrant/listener can't leave a dangling arrow). These are pure render
+  // state — there are no matching manifest edges (see the keyspace-trace block below).
+  const etcdEdgeMap = new Map() // "from->to" -> { from, to, kind }
+  for (const [etcdId, kss] of Object.entries(etcdKeyspaces)) {
+    if (!byId[etcdId]) continue
+    for (const ks of kss || []) {
+      if (ks.type !== 'config' && ks.service && byId[ks.service]) {
+        etcdEdgeMap.set(`${ks.service}->${etcdId}`, { from: ks.service, to: etcdId, kind: 'register' })
+      }
+      for (const l of ks.listeners || []) {
+        if (l.service && byId[l.service]) {
+          etcdEdgeMap.set(`${etcdId}->${l.service}`, { from: etcdId, to: l.service, kind: 'watch' })
+        }
+      }
+    }
+  }
+  const etcdEdges = [...etcdEdgeMap.values()]
+
   // Layout helpers that fold in a node's live custom-type runtime (so a custom body band
-  // reserves the right vertical space and edges hit the recomputed center).
-  const heightOf = (n) => nodeHeight(n, bodyRowsOf(n), customState[n.id], rowsOf(n))
+  // reserves the right vertical space and edges hit the recomputed center). A group base
+  // renders as the fixed-height entry button; a virtual `<name>-1` card reads the base
+  // container's runtime via dataKeyOf so its live-body band is reserved too.
+  const heightOf = (n) =>
+    isGroupBase(n) ? GROUP_ENTRY_H : nodeHeight(n, bodyRowsOf(n), customState[dataKeyOf(n)], rowsOf(n))
 
   // Websocket relay servers render as ONE combined body: a rigid vertical stack (one shared
   // column x, cascaded top-to-bottom by height + STACK_GAP) instead of each server floating at
@@ -548,10 +690,10 @@ export default function SystemDiagram({
     svcInstancesByEntry.get(n.instanceOf).push(n)
   }
   const svcStackPos = new Map()
-  const SVC_STACK_GAP_X = 120 // horizontal gap between the entry sidecar and its instance column
+  const SVC_STACK_GAP_X = 28 // horizontal gap between the entry sidecar and its instance column — kept tight so the instances read as sitting right next to their load balancer
   for (const [entryId, instances] of svcInstancesByEntry) {
     const entry = byId[entryId]
-    if (!entry) continue
+    if (!entry || isGroupBase(entry)) continue // worker groups stack BELOW their entry instead
     instances.sort((a, b) => svcOrdinal(a.id) - svcOrdinal(b.id))
     const ep = posOf(entry)
     const anchorX = ep.x + NODE_W + SVC_STACK_GAP_X
@@ -565,7 +707,46 @@ export default function SystemDiagram({
     }
   }
 
-  const effPos = (n) => stackPosByServerId.get(n.id) || svcStackPos.get(n.id) || posOf(n)
+  // Worker groups (LLM workers, consumer groups): the group's scaler card (scalerOf)
+  // sits at the base's position — the TOP of the stack — as the group header carrying
+  // the group's Edit button; the member cards hang below it in columns of at most
+  // GROUP_COL_SIZE — the virtual `<name>-1` first (explicitly; its `::1` id doesn't
+  // parse as an ordinal), then the real instances in ordinal order, wrapping to a new
+  // column to the right when one fills. A scaler-less group (mid-migration system)
+  // falls back to the bare Edit button at the base's position.
+  const groupStackPos = new Map()
+  const groupMembersByBase = new Map() // base id -> [virtual, ...instances] in render order
+  const scalerByBase = new Map() // base id -> its scaler sidecar node (scalerOf)
+  const scalerPos = new Map()
+  for (const b of nodes.filter(isGroupBase)) {
+    const virtual = groupVirtuals.find((v) => v.stateKey === b.id)
+    const instances = (svcInstancesByEntry.get(b.id) || [])
+      .slice()
+      .sort((a, x) => svcOrdinal(a.id) - svcOrdinal(x.id))
+    const members = [virtual, ...instances]
+    groupMembersByBase.set(b.id, members)
+    const bp = posOf(b)
+    const scaler = nodes.find((s) => s.scalerOf === b.id)
+    if (scaler) {
+      scalerByBase.set(b.id, scaler)
+      scalerPos.set(scaler.id, { x: bp.x, y: bp.y })
+    }
+    const topY = bp.y + (scaler ? heightOf(scaler) : GROUP_ENTRY_H) + STACK_GAP
+    const colYs = [] // per-column running y (cards differ in height when live bodies show)
+    members.forEach((m, i) => {
+      const col = Math.floor(i / GROUP_COL_SIZE)
+      if (colYs[col] == null) colYs[col] = topY
+      groupStackPos.set(m.id, { x: bp.x + col * (NODE_W + GROUP_COL_GAP_X), y: colYs[col] })
+      colYs[col] += heightOf(m) + STACK_GAP
+    })
+  }
+
+  const effPos = (n) =>
+    stackPosByServerId.get(n.id) ||
+    groupStackPos.get(n.id) ||
+    scalerPos.get(n.id) ||
+    svcStackPos.get(n.id) ||
+    posOf(n)
   // Drag payload for a whole tier: captures every server's CURRENT stacked position so a group
   // drag shifts them all by the same delta (the stack then re-derives identically, shifted).
   const fleetDragArg = (tier) => ({
@@ -604,18 +785,27 @@ export default function SystemDiagram({
   // source's BORDER (not its center) matters for short hops: with a center start the midpoint —
   // where the sequence badge + info button sit — lands inside the source box, and the nodes
   // (drawn after the edges) cover it. Border-to-border keeps the midpoint in the visible gap.
-  // A trace endpoint is a real node OR a synthetic ws-fleet:<tier> box (used to collapse the
-  // relay fan-out into one hop in / one hop out per downstream). Resolve either to its center
-  // and to the border point facing the other end. (rectCenter/rectBorderToward/fleetBoxByTier
-  // are declared below but only read at render time, so the forward reference is fine.)
+  // A trace endpoint is a real node, a synthetic ws-fleet:<tier> box (used to collapse the
+  // relay fan-out into one hop in / one hop out per downstream), OR a worker-group base
+  // (LLM workers, consumer groups, persistence readers) whose whole scaled stack is one
+  // dotted box — its edges anchor on that box border, not the entry card inside it. Resolve
+  // any of these to its center and to the border point facing the other end.
+  // (rectCenter/rectBorderToward/fleetBoxByTier/workerGroupBoxByBase are declared below but
+  // only read at render time, so the forward reference is fine.)
   const traceCenter = (id) =>
-    isFleetId(id) ? rectCenter(fleetBoxByTier.get(fleetTierOf(id))) : centerOf(id)
+    isFleetId(id)
+      ? rectCenter(fleetBoxByTier.get(fleetTierOf(id)))
+      : workerGroupBoxByBase.has(id)
+        ? rectCenter(workerGroupBoxByBase.get(id))
+        : centerOf(id)
   const traceBorder = (id, toward) =>
     isFleetId(id)
       ? rectBorderToward(fleetBoxByTier.get(fleetTierOf(id)), toward)
-      : byId[id]
-        ? borderPointToward(toward, byId[id])
-        : centerOf(id)
+      : workerGroupBoxByBase.has(id)
+        ? rectBorderToward(workerGroupBoxByBase.get(id), toward)
+        : byId[id]
+          ? borderPointToward(toward, byId[id])
+          : centerOf(id)
   const traceLine = (fromId, toId) => {
     const ac = traceCenter(fromId)
     const bc = traceCenter(toId)
@@ -730,25 +920,41 @@ export default function SystemDiagram({
 
   // Dotted box around each per-service load-balancer group: its entry sidecar + every
   // instance. Uses effPos (the derived stacked positions), and labels the box with the
-  // service name — the group's "full service" outline.
+  // service name — the group's "full service" outline. LLM groups are boxed separately
+  // below (header + worker column, drawn even for a single-worker group).
+  const groupBox = (entryId, members, labelBand = 16) => {
+    const minX = Math.min(...members.map((m) => effPos(m).x))
+    const minY = Math.min(...members.map((m) => effPos(m).y))
+    const maxX = Math.max(...members.map((m) => effPos(m).x + NODE_W))
+    const maxY = Math.max(...members.map((m) => effPos(m).y + heightOf(m)))
+    return {
+      entryId,
+      label: entryId,
+      x: minX - CLUSTER_PAD,
+      y: minY - CLUSTER_PAD - labelBand, // extra top band for the label
+      w: maxX - minX + 2 * CLUSTER_PAD,
+      h: maxY - minY + 2 * CLUSTER_PAD + labelBand,
+    }
+  }
   const svcLbBoxes = [...svcInstancesByEntry.entries()]
     .map(([entryId, instances]) => {
+      if (isGroupBase(byId[entryId] || {})) return null
       const members = [byId[entryId], ...instances].filter(Boolean)
       if (members.length < 2) return null
-      const minX = Math.min(...members.map((m) => effPos(m).x))
-      const minY = Math.min(...members.map((m) => effPos(m).y))
-      const maxX = Math.max(...members.map((m) => effPos(m).x + NODE_W))
-      const maxY = Math.max(...members.map((m) => effPos(m).y + heightOf(m)))
-      return {
-        entryId,
-        label: entryId,
-        x: minX - CLUSTER_PAD,
-        y: minY - CLUSTER_PAD - 16, // extra top band for the label
-        w: maxX - minX + 2 * CLUSTER_PAD,
-        h: maxY - minY + 2 * CLUSTER_PAD + 16,
-      }
+      return groupBox(entryId, members)
     })
     .filter(Boolean)
+  // A worker-group box's label doubles as the group's TITLE (the entry is the scaler
+  // header card, or a bare Edit button on a scaler-less group), so it gets a taller
+  // band and the larger .llm-group-label style. The scaler sits INSIDE the box, at
+  // the top of the stack.
+  const workerGroupBoxes = [...groupMembersByBase.entries()].map(([baseId, members]) => ({
+    ...groupBox(baseId, [byId[baseId], scalerByBase.get(baseId), ...members].filter(Boolean), 26),
+    group: true,
+  }))
+  // Edges address a worker group by its base id; anchor them on the group's dotted box
+  // (like a ws fleet) instead of the entry card inside it — see traceCenter/traceBorder.
+  const workerGroupBoxByBase = new Map(workerGroupBoxes.map((b) => [b.entryId, b]))
 
   // The system boundary: the dotted box the user owns. It's a PERSISTED, freely
   // movable/resizable rectangle (manifest.boundary). Until the user customizes it, it
@@ -756,7 +962,7 @@ export default function SystemDiagram({
   // sensibly. Once persisted it's decoupled from node positions — a node may sit inside
   // or outside it, the user's call. A live override (mid-drag / just-dropped) wins.
   const BOUNDARY_PAD = 26
-  const internalNodes = nodes.filter((n) => !n.external)
+  const internalNodes = renderNodes.filter((n) => !n.external)
   let defaultBoundary = null
   if (internalNodes.length) {
     const minX = Math.min(...internalNodes.map((n) => effPos(n).x))
@@ -795,6 +1001,13 @@ export default function SystemDiagram({
   // A consumer trace highlights one consume edge: consuming service → cluster. Both nodes must
   // still exist. Mutually exclusive with the other traces (App nulls the others when one is set).
   const ct = consumerTrace && byId[consumerTrace.cluster] && byId[consumerTrace.service] ? consumerTrace : null
+  // A keyspace trace highlights the discovery flow around the etcd cluster: registrant → etcd
+  // (the lease-put keepalive in) and etcd → each listener (the watch push out).
+  const kt = keyspaceTrace && byId[keyspaceTrace.etcd] &&
+    (keyspaceTrace.type === 'config' || byId[keyspaceTrace.service]) ? keyspaceTrace : null
+  // A served-RPC trace lights the server and every caller → server gRPC edge. The server node
+  // it points at must still exist. Mutually exclusive with the other traces (App nulls the rest).
+  const rpct = rpcTrace && byId[rpcTrace.service] ? rpcTrace : null
   if (ft && ft.wsBuiltin) {
     // A ws pool client's builtin method has no authored steps — trace the TIER path
     // instead: client → its L4 lb → each relay server → the bus + presence redis.
@@ -914,6 +1127,38 @@ export default function SystemDiagram({
     traceNodes = new Set([ct.cluster, ct.service, ...cds])
     traceEdges.push([ct.service, ct.cluster, ct.topic])
     for (const d of cds) traceEdges.push([ct.service, d, cdd[d] || ''])
+  } else if (kt) {
+    // Registrant service → etcd (each worker keeps a leased key alive under the prefix), then
+    // etcd → each listener (updates are PUSHED over the watch stream — no polling). The arrows
+    // exist only while the keyspace row is selected; there are no permanent manifest edges.
+    // A config keyspace has no registrant (the app writes its persistent values), so only the
+    // etcd → listener watch edges are drawn.
+    const listeners = (kt.listeners || []).filter((l) => byId[l])
+    if (kt.type === 'config') {
+      traceNodes = new Set([kt.etcd, ...listeners])
+    } else {
+      traceNodes = new Set([kt.service, kt.etcd, ...listeners])
+      traceEdges.push([kt.service, kt.etcd, `lease-put ${kt.prefix}<worker> · TTL keepalive`])
+    }
+    for (const l of listeners) traceEdges.push([kt.etcd, l, `watch ${kt.prefix} (pushed)`])
+  } else if (rpct) {
+    // A served gRPC method: light the server and draw each caller → server edge — every service
+    // whose manifest `grpc.clients` dials this contract with this server in its `targets`. gRPC
+    // is server-driven (the caller opens the channel), so the arrows point caller → server, the
+    // same direction as the permanent gRPC edges. No callers yet → the server alone is lit,
+    // still showing it's the RPC endpoint.
+    const ids = new Set([rpct.service])
+    for (const n of nodes) {
+      if (n.id === rpct.service) continue
+      const dials = (n.grpc?.clients || []).some(
+        (c) => c.contract === rpct.contract && (c.targets || []).includes(rpct.service),
+      )
+      if (dials) {
+        ids.add(n.id)
+        traceEdges.push([n.id, rpct.service, `gRPC ${rpct.contract}.${rpct.method}`])
+      }
+    }
+    traceNodes = ids
   } else if (selected && lbNode) {
     const ids = new Set([lbNode.id, selected.service, ...(selected.downstream || [])])
     // Extend the trace back to the clients that actually call this endpoint:
@@ -1020,10 +1265,10 @@ export default function SystemDiagram({
   // boundary ⊕ the ws shared-methods panels), plus a margin. Clients sit LEFT of the
   // system, so x can be negative — the viewBox origin moves with it instead of being
   // pinned at 0,0.
-  const xStarts = nodes.map((n) => effPos(n).x)
-  const xEnds = nodes.map((n) => effPos(n).x + NODE_W)
-  const yStarts = nodes.map((n) => effPos(n).y)
-  const yEnds = nodes.map((n) => effPos(n).y + heightOf(n))
+  const xStarts = renderNodes.map((n) => effPos(n).x)
+  const xEnds = renderNodes.map((n) => effPos(n).x + NODE_W)
+  const yStarts = renderNodes.map((n) => effPos(n).y)
+  const yEnds = renderNodes.map((n) => effPos(n).y + heightOf(n))
   if (boundary) {
     xStarts.push(boundary.x)
     xEnds.push(boundary.x + boundary.w)
@@ -1068,6 +1313,20 @@ export default function SystemDiagram({
   const worldH = height * PAN_FACTOR
 
   const dimmed = (id) => traceNodes && !traceNodes.has(id)
+
+  // Node-aware dim test. A trace set only ever carries BASE ids (a service name, a cluster
+  // entry) — never the member cards the group is actually drawn as: the `<base>-scaler`
+  // sidecar (scalerOf), the render-only virtual `<base>::1` (instanceOf/stateKey), and any
+  // real `<base>-N` instances (instanceOf). Keying dim purely on `node.id` therefore fades
+  // every visible card of a worker group / LB cluster whenever a method that touches its
+  // base is selected. Resolve a member card up to its base so selecting such a method lights
+  // up the WHOLE group. See groupVirtuals, isSvcInstance, and the scaler's scalerOf.
+  const dimmedNode = (node) => {
+    if (!traceNodes) return false
+    return ![node.id, node.instanceOf, node.scalerOf, node.stateKey]
+      .filter(Boolean)
+      .some((id) => traceNodes.has(id))
+  }
 
   // Every (service, method) a traced function calls — used to light up each called method
   // row across multiple services at once (as if the user clicked each one).
@@ -1275,7 +1534,7 @@ export default function SystemDiagram({
   // endpoint / function / consumer), so a leftover popup index can't render against a new trace.
   useEffect(() => {
     setOpenInfo(null)
-  }, [methodTrace, functionTrace, consumerTrace, selectedKey])
+  }, [methodTrace, functionTrace, consumerTrace, rpcTrace, selectedKey])
 
   // ctrl/cmd + wheel (and trackpad pinch, which browsers deliver as wheel+ctrlKey) zooms toward the
   // cursor; plain wheel falls through to native scroll (pan). React's onWheel is passive so its
@@ -1326,6 +1585,7 @@ export default function SystemDiagram({
               onClearMethodTrace?.()
               onClearFunctionTrace?.()
               onClearConsumerTrace?.()
+              onClearKeyspaceTrace?.()
             }
       }
       onPointerMove={dragMode ? onPointerMove : undefined}
@@ -1377,6 +1637,18 @@ export default function SystemDiagram({
         >
           <path d="M 0 0 L 10 5 L 0 10 z" fill={CONSUME_COLOR} />
         </marker>
+        {/* Arrowhead for the always-on etcd discovery edges (registrant → etcd → listeners). */}
+        <marker
+          id="etcd-arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0 0 L 10 5 L 0 10 z" fill={ETCD_COLOR} />
+        </marker>
         {/* Arrowhead for the collapsed websocket-fleet in/out edges (same color as `.edge`). */}
         <marker
           id="edge-arrow"
@@ -1422,12 +1694,14 @@ export default function SystemDiagram({
         />
       ))}
 
-      {/* Dotted box around each per-service load-balancer group (entry sidecar + instances),
-          labelled with the service name; sits behind the nodes it groups. Non-interactive. */}
-      {svcLbBoxes.map((b) => (
+      {/* Dotted box around each per-service load-balancer group (entry sidecar + instances)
+          and each worker group (entry button + member columns — LLM workers, consumer
+          groups), labelled with the service name; sits behind the nodes it groups.
+          Non-interactive. */}
+      {[...svcLbBoxes, ...workerGroupBoxes].map((b) => (
         <g key={`svclb-${b.entryId}`} style={{ pointerEvents: 'none' }}>
           <rect x={b.x} y={b.y} width={b.w} height={b.h} rx="14" className="ws-fleet-box" />
-          <text x={b.x + 12} y={b.y + 16} className="ws-fleet-label">
+          <text x={b.x + 12} y={b.y + (b.group ? 20 : 16)} className={b.group ? 'llm-group-label' : 'ws-fleet-label'}>
             {b.label}
           </text>
         </g>
@@ -1615,6 +1889,33 @@ export default function SystemDiagram({
         )
       })}
 
+      {/* etcd discovery wiring: always-on faint dashed arrows for the registrant → etcd (lease
+          keepalive) and etcd → listener (watch) relationships, so the discovery topology reads
+          off the static diagram instead of only appearing while a KEY row is selected. Border-to-
+          border like the trace edges; dim during any active trace so the bright click-trace (which
+          lights the same relationship) stands out over the faint underlay. */}
+      {etcdEdges.map(({ from, to, kind }) => {
+        if (!byId[from] || !byId[to]) return null
+        const { a, b } = traceLine(from, to)
+        return (
+          <line
+            key={`etcd-edge-${from}-${to}`}
+            x1={a.x}
+            y1={a.y}
+            x2={b.x}
+            y2={b.y}
+            className={`etcd-edge${traceNodes ? ' dim' : ''}`}
+            markerEnd="url(#etcd-arrow)"
+          >
+            <title>
+              {kind === 'register'
+                ? `etcd discovery · ${from} registers → ${to} (lease keepalive)`
+                : `etcd discovery · ${from} → ${to} watches`}
+            </title>
+          </line>
+        )
+      })}
+
       {/* Highlighted trace edges (only while a trace is selected). Each line runs border-to-border
           (see traceLine) so the arrowhead is visible at the target and the midpoint stays in the
           gap between the boxes. The sequence badges + info buttons that sit at each midpoint are
@@ -1635,23 +1936,64 @@ export default function SystemDiagram({
         )
       })}
 
-      {nodes.map((node) => {
-        const data = nodeData[node.id] || { metrics: {}, color: 'gray' }
-        const rt = customState[node.id]
+      {renderNodes.map((node) => {
+        // Virtual llm `<name>-1` cards read the base container's live data via dataKeyOf.
+        const data = nodeData[dataKeyOf(node)] || { metrics: {}, color: 'gray' }
+        const rt = customState[dataKeyOf(node)]
         // On-node clickable rows: a service's callable methods, or a client's attached
         // functions, listed below the metrics.
         const rows = rowsOf(node)
         const h = nodeHeight(node, bodyRowsOf(node), rt, rows)
         // A user-initiated temporary outage paints the node orange and wins over the
         // health-derived color (a deliberate shutdown looks down — but intentionally).
-        const inOutage = outages[node.id]
+        // A base outage paints both the llm header and its `<name>-1` card — same container.
+        const inOutage = outages[dataKeyOf(node)]
         const color = inOutage ? COLOR_HEX.orange : COLOR_HEX[data.color] || COLOR_HEX.gray
         // Event-stream cluster with its consumers paused — badge it (amber, like an outage).
         const consumersPaused = pausedConsumers.has(node.id)
         // All per-node actions (schema/topics/endpoints/gRPC/shutdown/delete) now live
         // behind the bottom "Edit" button, so the node body itself is no longer clickable.
         const p = effPos(node)
-        const gClass = [dimmed(node.id) ? 'dim' : '', dragMode ? 'draggable' : ''].filter(Boolean).join(' ') || undefined
+        const gClass = [dimmedNode(node) ? 'dim' : '', dragMode ? 'draggable' : ''].filter(Boolean).join(' ') || undefined
+
+        // A worker group's base node renders NOTHING when the group has a scaler — the
+        // scaler card occupies the base's position as the stack header and carries the
+        // group's Edit button. The base stays the drag/edge anchor (posOf is untouched)
+        // and its container's metrics/live body/health render on the virtual `<name>-1`
+        // card stacked below (see groupVirtuals). A scaler-less group (mid-migration
+        // system) falls back to the bare Edit button, sitting under the dotted box's
+        // enlarged `<name>` label (which doubles as the title). No outage caption
+        // either — the `<name>-1` card shows the countdown.
+        if (isGroupBase(node)) {
+          if (scalerByBase.has(node.id)) return null
+          return (
+            <g
+              key={node.id}
+              transform={`translate(${p.x}, ${p.y})`}
+              className={gClass}
+              onPointerDown={
+                dragMode
+                  ? (e) => beginDrag(e, { kind: 'node', nodeId: node.id, startPos: p })
+                  : undefined
+              }
+            >
+              {onRequestEdit && (
+                <g
+                  className="node-edit"
+                  onClick={dragMode ? undefined : (e) => {
+                    e.stopPropagation()
+                    onRequestEdit(node)
+                  }}
+                >
+                  <rect x={PAD} y={0} width={NODE_W - 2 * PAD} height={EDIT_H} rx="6" className="node-edit-btn" />
+                  <text x={NODE_W / 2} y={EDIT_H / 2} className="node-edit-label">
+                    Edit
+                  </text>
+                </g>
+              )}
+            </g>
+          )
+        }
         return (
           <g
             key={node.id}
@@ -1665,12 +2007,16 @@ export default function SystemDiagram({
                       // A ws-server is part of a combined body: dragging it moves the whole
                       // tier stack (servers + panel) together, not just this one card. A
                       // load-balanced instance likewise moves its whole group — its position is
-                      // derived from the entry, so we drag the entry.
+                      // derived from the entry, so we drag the entry. A scaler sidecar is the
+                      // group's stack header (its position derives from the base), so dragging
+                      // it drags the base — the whole group moves together.
                       isWsServer(node)
                         ? fleetDragArg(node.wsTier)
                         : isSvcInstance(node)
                           ? { kind: 'node', nodeId: node.instanceOf, startPos: posOf(byId[node.instanceOf]) }
-                          : { kind: 'node', nodeId: node.id, startPos: p },
+                          : node.scalerOf && byId[node.scalerOf]
+                            ? { kind: 'node', nodeId: node.scalerOf, startPos: posOf(byId[node.scalerOf]) }
+                            : { kind: 'node', nodeId: node.id, startPos: p },
                     )
                 : undefined
             }
@@ -1689,7 +2035,9 @@ export default function SystemDiagram({
                     ? 'node-box external'
                     : isWsServer(node)
                       ? 'node-box ws-server'
-                      : 'node-box'
+                      : node.scalerOf
+                        ? 'node-box scaler'
+                        : 'node-box'
               }
               style={{ stroke: isWsServer(node) && !inOutage ? COLOR_HEX.green : color }}
             />
@@ -1697,10 +2045,19 @@ export default function SystemDiagram({
             <rect width={NODE_W} height={HEADER_H} rx="8" fill={color} />
             <rect width={NODE_W} height={HEADER_H / 2} fill={color} />
             <text x={PAD} y={HEADER_H / 2 + 5} className="node-label">
-              {node.label}
+              {/* The load-balancer cluster ENTRY keeps its bare id (`<name>`) as the node id so it
+                  still owns endpoints/gRPC, but reads as the service's load balancer — display it as
+                  `<name>-lb` to distinguish it from its `<name>-N` instances. */}
+              {node.type === 'service-lb' ? `${node.label}-lb` : node.label}
             </text>
             <text x={NODE_W - PAD} y={HEADER_H / 2 + 5} className="node-type">
-              {node.type === 'client' ? 'client' : node.external ? 'external' : node.type}
+              {node.type === 'client'
+                ? (node.stateful ? 'client · stateful' : 'client')
+                : node.external
+                  ? 'external'
+                  : node.scalerOf
+                    ? 'scaler'
+                    : node.type}
             </text>
 
             {isLB(node) ? (
@@ -1754,10 +2111,11 @@ export default function SystemDiagram({
                           className={isSel ? 'endpoint-hit selected' : 'endpoint-hit'}
                           onClick={dragMode ? undefined : (ev) => {
                             ev.stopPropagation()
-                            // An LB selection and a method/function/consumer trace never coexist.
+                            // An LB selection and a method/function/consumer/keyspace trace never coexist.
                             onClearMethodTrace?.()
                             onClearFunctionTrace?.()
                             onClearConsumerTrace?.()
+                            onClearKeyspaceTrace?.()
                             setSelectedKey(isSel ? null : key)
                           }}
                         >
@@ -1842,17 +2200,18 @@ export default function SystemDiagram({
                     className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
                     onClick={dragMode ? undefined : (ev) => {
                       ev.stopPropagation()
-                      // A function trace is exclusive with the LB / method / consumer selections.
+                      // A function trace is exclusive with the LB / method / consumer / keyspace selections.
                       setSelectedKey(null)
                       onClearMethodTrace?.()
                       onClearConsumerTrace?.()
+                      onClearKeyspaceTrace?.()
                       if (active) onClearFunctionTrace?.()
                       else onSelectFunction?.(fn, node.id)
                     }}
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
-                      <tspan className="endpoint-method">ƒ</tspan> {fn.name}
+                      <tspan className="endpoint-method endpoint-method-fn">ƒ</tspan> {fn.name}
                     </text>
                   </g>
                 )
@@ -1873,27 +2232,134 @@ export default function SystemDiagram({
               }
               if (row.kind === 'cons') {
                 // A Kafka consumer function: clicking it traces the consume edge service → cluster.
-                // "CONS" stands in for the GET/POST method badge an HTTP row would show.
+                // "PULL" stands in for the GET/POST method badge an HTTP row would show, tinted to
+                // match the consume edge (CONSUME_COLOR) it traces. On a
+                // virtual group-member card the OWNER is the base node (stateKey) — the trace
+                // must anchor on a real manifest node.
                 const c = row.c
+                const owner = node.stateKey || node.id
                 const active =
-                  !!consumerTrace && consumerTrace.service === node.id && consumerTrace.name === c.name
+                  !!consumerTrace && consumerTrace.service === owner && consumerTrace.name === c.name
                 return (
                   <g
                     key={`cons-${c.name}`}
                     className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
                     onClick={dragMode ? undefined : (ev) => {
                       ev.stopPropagation()
-                      // A consumer trace is exclusive with the LB / method / function selections.
+                      // A consumer trace is exclusive with the LB / method / function / keyspace selections.
                       setSelectedKey(null)
                       onClearMethodTrace?.()
                       onClearFunctionTrace?.()
+                      onClearKeyspaceTrace?.()
                       if (active) onClearConsumerTrace?.()
-                      else onSelectConsumer?.(c, node.id)
+                      else onSelectConsumer?.(c, owner)
                     }}
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
-                      <tspan className="endpoint-method">CONS</tspan> {c.name}
+                      <tspan className="endpoint-method endpoint-method-consume">PULL</tspan> {c.name}
+                    </text>
+                  </g>
+                )
+              }
+              if (row.kind === 'ks') {
+                // An etcd keyspace: clicking it traces registrant → etcd (lease-put) and
+                // etcd → each listener (watch push); a config keyspace has no registrant, so
+                // its trace is etcd → listeners only. "KEY" stands in for the method badge.
+                const ks = row.ks
+                const ident = ks.type === 'config' ? ks.name : ks.service
+                // Active for BOTH a full KEY-row trace and a focused subscription (SUB row)
+                // trace of the same keyspace — clicking a service's SUB row also lights the
+                // matching KEY on etcd.
+                const active =
+                  !!keyspaceTrace && keyspaceTrace.etcd === node.id &&
+                  (ks.type === 'config' ? keyspaceTrace.name === ks.name : keyspaceTrace.service === ks.service)
+                return (
+                  <g
+                    key={`ks-${ident}`}
+                    className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      // A keyspace trace is exclusive with the LB / method / function / consumer selections.
+                      setSelectedKey(null)
+                      onClearMethodTrace?.()
+                      onClearFunctionTrace?.()
+                      onClearConsumerTrace?.()
+                      if (active) onClearKeyspaceTrace?.()
+                      else onSelectKeyspace?.(ks, node.id)
+                    }}
+                  >
+                    <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={y + 12} className="endpoint-row">
+                      <tspan className="endpoint-method endpoint-method-etcd">KEY</tspan> {camelName(ident)}
+                    </text>
+                  </g>
+                )
+              }
+              if (row.kind === 'sub') {
+                // A service's etcd subscription: clicking it traces just this one watch —
+                // registrant → etcd → this service (a config keyspace has no registrant, so
+                // etcd → this service only). "SUB" stands in for the method badge; the name is
+                // the KEY it watches, `on`-prefixed. On a virtual group-member card the OWNER is
+                // the base node (stateKey), matching the CONS rows.
+                const ks = row.ks
+                const etcdId = row.etcdId
+                const owner = node.stateKey || node.id
+                const ident = ks.type === 'config' ? ks.name : ks.service
+                const active =
+                  !!keyspaceTrace && keyspaceTrace.etcd === etcdId && keyspaceTrace.focus === owner &&
+                  (ks.type === 'config' ? keyspaceTrace.name === ks.name : keyspaceTrace.service === ks.service)
+                return (
+                  <g
+                    key={`sub-${etcdId}-${ident}`}
+                    className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      // A subscription trace is exclusive with the LB / method / function / consumer selections.
+                      setSelectedKey(null)
+                      onClearMethodTrace?.()
+                      onClearFunctionTrace?.()
+                      onClearConsumerTrace?.()
+                      if (active) onClearKeyspaceTrace?.()
+                      else onSelectSubscription?.(ks, etcdId, owner)
+                    }}
+                  >
+                    <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={y + 12} className="endpoint-row">
+                      <tspan className="endpoint-method endpoint-method-etcd">SUB</tspan> {onName(ident)}
+                    </text>
+                  </g>
+                )
+              }
+              if (row.kind === 'rpc') {
+                // A SERVED gRPC method (this service is in the contract's server set). Clicking it
+                // traces each caller → this server. "RPC" stands in for the HTTP method badge,
+                // tinted purple to match the gRPC edges it lights; the name is the RPC method. On a
+                // virtual group-member card the OWNER is the base node (stateKey), which carries the
+                // grpc block and is the real manifest node the trace must anchor on — like CONS/SUB.
+                const owner = node.stateKey || node.id
+                const active =
+                  !!rpcTrace && rpcTrace.service === owner &&
+                  rpcTrace.contract === row.contract && rpcTrace.method === row.method
+                return (
+                  <g
+                    key={`rpc-${row.contract}-${row.method}`}
+                    className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      // An RPC trace is exclusive with the LB / method / function / consumer / keyspace selections.
+                      setSelectedKey(null)
+                      onClearMethodTrace?.()
+                      onClearFunctionTrace?.()
+                      onClearConsumerTrace?.()
+                      onClearKeyspaceTrace?.()
+                      if (active) onClearRpcTrace?.()
+                      else onSelectRpc?.(row, owner)
+                    }}
+                  >
+                    <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={y + 12} className="endpoint-row">
+                      <tspan className="endpoint-method endpoint-method-rpc">RPC</tspan> {row.method}
                     </text>
                   </g>
                 )
@@ -1911,10 +2377,11 @@ export default function SystemDiagram({
                   className={isSel ? 'endpoint-hit selected' : 'endpoint-hit'}
                   onClick={dragMode ? undefined : (ev) => {
                     ev.stopPropagation()
-                    // Method trace and LB / function / consumer selection never coexist.
+                    // Method trace and LB / function / consumer / keyspace selection never coexist.
                     setSelectedKey(null)
                     onClearFunctionTrace?.()
                     onClearConsumerTrace?.()
+                    onClearKeyspaceTrace?.()
                     if (isSel) onClearMethodTrace?.()
                     else onSelectMethod?.(e)
                   }}
@@ -1929,13 +2396,15 @@ export default function SystemDiagram({
 
             {/* Bottom "Edit" button on controllable nodes — opens the tabbed edit modal
                 (endpoints / gRPC / schema / topics / shutdown / delete). Sits below the
-                metrics: id on top, metrics in the middle, Edit at the bottom. */}
+                metrics: id on top, metrics in the middle, Edit at the bottom. A scaler
+                card hosts its GROUP's Edit button — the click opens the BASE's modal
+                (where the Scaling tab lives; Delete there cascades the scaler). */}
             {hasEditButton(node) && onRequestEdit && (
               <g
                 className="node-edit"
                 onClick={dragMode ? undefined : (e) => {
                   e.stopPropagation()
-                  onRequestEdit(node)
+                  onRequestEdit(node.scalerOf ? (byId[node.scalerOf] || node) : node)
                 }}
               >
                 <rect
@@ -1990,6 +2459,38 @@ export default function SystemDiagram({
                 ⏸ consumers paused
               </text>
             )}
+            {/* etcd cluster caption: per-member health dots (leader ringed) + the quorum
+                math derived from N, below the node like the outage/pause captions. Member
+                up/leader state comes from the per-member Prometheus series (nodeData). */}
+            {node.type === 'etcd' && node.etcd && (() => {
+              const members = node.etcd.members || []
+              const live = data?.members || {}
+              const size = node.etcd.size || members.length
+              const quorum = node.etcd.quorum || Math.floor(size / 2) + 1
+              const yDots = h + (inOutage ? 26 : 12)
+              const dotGap = 16
+              const x0 = NODE_W / 2 - ((members.length - 1) * dotGap) / 2
+              return (
+                <g style={{ pointerEvents: 'none' }}>
+                  {members.map((m, mi) => {
+                    const st = live[m]
+                    const fill = st ? (st.up ? COLOR_HEX.green : COLOR_HEX.red) : COLOR_HEX.gray
+                    return (
+                      <g key={m}>
+                        <circle cx={x0 + mi * dotGap} cy={yDots} r={4.5} fill={fill} />
+                        {st?.leader && (
+                          <circle cx={x0 + mi * dotGap} cy={yDots} r={7} fill="none"
+                            stroke={fill} strokeWidth="1.5" />
+                        )}
+                      </g>
+                    )
+                  })}
+                  <text x={NODE_W / 2} y={yDots + 18} className="node-pause-label">
+                    {size} nodes · quorum {quorum} · tolerates {size - quorum}
+                  </text>
+                </g>
+              )
+            })()}
           </g>
         )
       })}
@@ -2017,7 +2518,7 @@ export default function SystemDiagram({
             return (
               <g key={name}>
                 <text x={PAD} y={y + 12} className="endpoint-row">
-                  <tspan className="endpoint-method">ƒ</tspan> {name}
+                  <tspan className="endpoint-method endpoint-method-fn">ƒ</tspan> {name}
                 </text>
                 {pending && (
                   <text x={pl.w - PAD} y={y + 12} className="ws-shared-pending">

@@ -75,6 +75,44 @@ The shared `lbclient.py` (do **not** edit it) gives you `lb`:
   inside `service-1` as `/orders` is called here as `/service-1/orders`).
 - Every call is recorded and shown in the client's Run panel; you don't print anything special.
 
+## Stateful clients: the `state` helper
+
+A client is **stateless** by default — each run is a fresh subprocess that remembers nothing (the
+old behavior; nothing to do). A client can also be marked **stateful** (its manifest node has
+`stateful: true`, shown as `client · stateful` on the diagram and toggled on its **State** tab). A
+stateful client persists data across runs in a durable per-client store
+(`systems/<id>/clients/<module>.state.json`), so a later run reads what an earlier one saved — like
+a websocket session that accumulates state. Import it alongside `lb`:
+
+```python
+from lbclient import lb, state
+```
+
+- `state.get(key, default=None)` — read a value an earlier run saved.
+- `state.set(key, value)` — persist a value for later runs.
+- `state.all()` — the whole values dict.
+
+Every `lb.*` call's outcome is **also auto-recorded** in the store's `history` (no code needed), so
+a stateful client accumulates its API results automatically; `state.get/set` is for the values you
+want to reuse by name (a token, an id, a cursor). Use it when the description implies memory across
+runs — e.g. log in once and reuse the token:
+
+```python
+def ensure_login(username, password):
+    token = state.get("token")
+    if not token:
+        r = lb.post("/auth-service/login", {"username": username, "password": password})
+        token = r.get("token")
+        state.set("token", token)   # the next run skips the login
+    return token
+```
+
+Persistence only happens when the client is stateful; in a stateless client `state.set(...)` works
+in-memory for that one run and is discarded at exit — so **write functions to work in both modes**
+(never assume `state.get` returns a prior value). If a function needs a value that isn't there yet,
+fetch it and `state.set` it. Whether a client is stateful is a property of the client node, not the
+function — check your task prompt / the inlined manifest's node.
+
 ## What to write
 
 1. A top-level **`def <name>(<args…>)`** between the `# === functions ===` markers, with the

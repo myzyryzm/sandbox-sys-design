@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { parseDocument } from 'yaml'
 import { repoRoot, systemsDir, systemDir, isValidSystem } from './systems.js'
+import { removeNginxRoute } from './scaffold.js'
 import { removeWsClientScript } from './websockets.js'
 import { removeClientScript } from './clientScript.js'
 
@@ -52,19 +53,37 @@ function validate(body) {
   const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
   const node = manifest.nodes.find((n) => n.id === id)
   if (!node) throw bad(`no node "${id}" in this system`)
+  // A linked token stream (e.g. an LLM worker's redis) is owned by its service and
+  // cascades with it — it is never individually deletable. Checked before the generic
+  // deletable test so the error points at the owner.
+  if (node.streamOf) {
+    throw bad(`"${id}" is the token stream of "${node.streamOf}" — delete "${node.streamOf}" instead (the stream cascades with it)`)
+  }
+  // Same ownership rule for a consumer group's scaler sidecar.
+  if (node.scalerOf) {
+    throw bad(`"${id}" is the scaler of "${node.scalerOf}" — delete "${node.scalerOf}" instead (the scaler cascades with it)`)
+  }
   const deletable =
     node.type === 'service' ||
     node.type === 'service-lb' ||
     node.type === 'external_service' ||
     node.origin === 'create-database' ||
     node.origin === 'create-event-stream' ||
+    node.origin === 'create-etcd' ||
     node.origin === 'create-websockets'
   if (!deletable) throw bad(`"${id}" (${node.type}) cannot be deleted`)
-  // A load-balanced service's instance can't be deleted on its own — the cluster is one
-  // unit, managed from the service's Load Balancing tab (change the instance count, or
-  // delete the service `<name>` itself, which cascades every instance).
+  // A replica-group instance can't be deleted on its own — the group is one unit, managed
+  // from its base node (change the count, or delete the base `<name>`, which cascades every
+  // instance). A load-balanced service points at its Load Balancing tab; a no-LB worker
+  // replica group points at the worker's Replicas section.
   if (node.instanceOf) {
-    throw bad(`"${id}" is an instance of the "${node.instanceOf}" load-balanced service — change the instance count in its Load Balancing tab, or delete "${node.instanceOf}"`)
+    const entry = manifest.nodes.find((n) => n.id === node.instanceOf)
+    const where = entry?.service_type === 'llm_worker'
+      ? `change the worker count in the "${node.instanceOf}" worker's Replicas section`
+      : entry?.service_type === 'consumer_group'
+        ? `change the member count in the "${node.instanceOf}" group's Scaling tab`
+        : `change the instance count in its Load Balancing tab`
+    throw bad(`"${id}" is an instance of "${node.instanceOf}" — ${where}, or delete "${node.instanceOf}"`)
   }
   const kind =
     node.origin === 'create-websockets'
@@ -73,7 +92,9 @@ function validate(body) {
         ? 'database'
         : node.origin === 'create-event-stream'
           ? 'event-stream'
-          : 'service'
+          : node.origin === 'create-etcd'
+            ? 'etcd'
+            : 'service'
   // A websocket tier is one unit: servers, bus, presence and the client pool all
   // cascade from the lb (see cascadeChildIds). Only the lb is individually
   // deletable — nothing else can validate, so the cascade loop below never has
@@ -93,6 +114,11 @@ function ownedServices(id, kind, node) {
   if (kind === 'websocket') {
     return node?.wsRole === 'bus' || node?.wsRole === 'presence' ? [id, `${id}-exporter`] : [id]
   }
+  // A linked token stream (streamOf) is a redis with an exporter, no init sidecar.
+  if (node?.streamOf) return [id, `${id}-exporter`]
+  // An etcd cluster is one node owning N member containers (<id>-1..N, no exporter —
+  // etcd serves /metrics natively).
+  if (kind === 'etcd') return node?.etcd?.members?.length ? [...node.etcd.members] : [id]
   return kind === 'database' || kind === 'event-stream'
     ? [id, `${id}-exporter`, `${id}-init`]
     : [id]
@@ -123,14 +149,6 @@ function removeComposeServices(system, names) {
   }
 
   fs.writeFileSync(file, doc.toString())
-}
-
-function removeNginxRoute(system, id) {
-  const file = path.join(systemDir(system), 'nginx', 'nginx.conf')
-  let conf = fs.readFileSync(file, 'utf8')
-  conf = conf.replace(new RegExp(` *upstream ${id} \\{[^}]*\\}\\n`), '')
-  conf = conf.replace(new RegExp(` *location /${id}/ \\{[\\s\\S]*?\\n *\\}\\n`), '')
-  fs.writeFileSync(file, conf)
 }
 
 function removeScrapeJob(system, id) {
@@ -177,7 +195,9 @@ const kindOf = (node) =>
         ? 'event-stream'
         : node?.origin === 'create-cdc'
           ? 'cdc'
-          : 'service'
+          : node?.origin === 'create-etcd'
+            ? 'etcd'
+            : 'service'
 
 // A removed CDC worker was registered as a producer in its target streams'
 // streams.json — scrub it so no stream lists a producer that no longer exists.
@@ -248,6 +268,38 @@ function readJson(file) {
   }
 }
 
+// Drop persistence-reader entries whose owning service was removed. Entries whose
+// TARGETS (worker / stream / db) are being removed cannot reach here — findDependents
+// blocks those deletes while a reader still references them.
+function pruneReaders(system, removedIds) {
+  const file = path.join(systemDir(system), 'persistence.json')
+  const data = readJson(file)
+  if (!data || !Array.isArray(data.readers)) return
+  const before = data.readers.length
+  data.readers = data.readers.filter((r) => r && !removedIds.has(r.service))
+  if (data.readers.length !== before) fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n')
+}
+
+// Drop etcd keyspaces owned by a removed service and listener entries naming one, so
+// the discovery registry never references nodes that no longer exist. (Deleting a
+// keyspace owner with LISTENERS is blocked by findDependents; this prunes the
+// unwatched leftovers + the removed service's own listener entries.) Config keyspaces
+// have no `service` (removedIds.has(undefined) is false) so they always survive —
+// only their listener entries get pruned.
+function pruneEtcd(system, removedIds) {
+  const file = path.join(systemDir(system), 'etcd.json')
+  const data = readJson(file)
+  if (!data || !Array.isArray(data.keyspaces)) return
+  const before = JSON.stringify(data.keyspaces)
+  data.keyspaces = data.keyspaces
+    .filter((ks) => ks && !removedIds.has(ks.service))
+    .map((ks) => ({
+      ...ks,
+      listeners: (Array.isArray(ks.listeners) ? ks.listeners : []).filter((l) => l && !removedIds.has(l.service)),
+    }))
+  if (JSON.stringify(data.keyspaces) !== before) fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n')
+}
+
 // The owned children a delete cascades to — read replicas (replicaOf) and the CDC
 // worker (cdcOf) of a database. They are torn down alongside the target, so they are
 // never themselves "dependents" that should block the delete.
@@ -264,13 +316,19 @@ function cascadeChildIds(manifest, id, kind, node) {
   const wsChildIds = kind === 'websocket' && node?.wsRole === 'lb'
     ? manifest.nodes.filter((n) => n.wsTier === id).map((n) => n.id)
     : []
-  // Deleting a load-balanced service's cluster entry (`service-lb`) takes its whole
-  // group: every instance carrying `instanceOf: <id>`. They cascade, so an instance is
-  // never a "dependent" that blocks the delete.
-  const svcLbInstanceIds = node?.type === 'service-lb'
-    ? manifest.nodes.filter((n) => n.instanceOf === id).map((n) => n.id)
-    : []
-  return { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds }
+  // Deleting a service that owns a replica group takes its whole group: every instance
+  // carrying `instanceOf: <id>` — a load-balanced `service-lb` entry OR a no-load-balancer
+  // worker replica group (customTypes/llmWorker.js). They cascade, so an instance is never
+  // a "dependent" that blocks the delete.
+  const instanceIds = manifest.nodes.filter((n) => n.instanceOf === id).map((n) => n.id)
+  // A service's linked token stream (e.g. an LLM worker's redis) carries
+  // `streamOf: <id>` and is torn down alongside it.
+  const streamIds = manifest.nodes.filter((n) => n.streamOf === id).map((n) => n.id)
+  // A consumer group's scaler sidecar carries `scalerOf: <id>` and is torn down
+  // alongside it (its folder is its node id, so the generic loop removes it; the
+  // group's scaler.json lives in the base's folder and goes with the base).
+  const scalerIds = manifest.nodes.filter((n) => n.scalerOf === id).map((n) => n.id)
+  return { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, scalerIds }
 }
 
 // Reverse-dependency lookup: which OTHER nodes still call/use `id`, so deleting it
@@ -353,6 +411,48 @@ function findDependents(system, manifest, id, kind, cascadeIds = new Set()) {
     deps.push({ node: c.service, label: labelOf(c.service), via: 'consumer', detail: `function ${c.name}`, calls: [] })
   }
 
+  // Persistence readers — persistence.json: each reader group XREADGROUPs the worker's
+  // runs:started announcements on its stream redis and writes finished runs into its
+  // target db, so deleting the worker, the stream, or the db would strand the group's
+  // authored loop. (Deleting the READER group itself is the supported teardown.)
+  const persistence = readJson(path.join(dir, 'persistence.json'))
+  for (const r of persistence && Array.isArray(persistence.readers) ? persistence.readers : []) {
+    if (skip(r?.service)) continue
+    const refs = [
+      [r.worker, `persists runs announced by ${r.worker}`],
+      [r.stream, `consumes ${r.announce || 'runs:started'} + token streams`],
+      [r.db, r.table ? `writes run output to ${r.table}.${r.field}` : 'writes run output to this database'],
+    ]
+    for (const [ref, detail] of refs) {
+      if (ref === id) deps.push({ node: r.service, label: labelOf(r.service), via: 'persistence', detail, calls: [] })
+    }
+  }
+
+  // etcd — deleting the CLUSTER is blocked while any keyspace still has a registered
+  // owner or listeners (their app.py loops point at it); deleting a SERVICE that owns
+  // a keyspace is blocked while other services still watch that keyspace. Config
+  // keyspaces have no owner (ks.service undefined → skip() is true) — they never
+  // block by themselves, but their listeners still do.
+  const etcdReg = readJson(path.join(dir, 'etcd.json'))
+  const etcdKeyspaces = etcdReg && Array.isArray(etcdReg.keyspaces) ? etcdReg.keyspaces : []
+  if (kind === 'etcd') {
+    for (const ks of etcdKeyspaces) {
+      if (!skip(ks?.service)) {
+        deps.push({ node: ks.service, label: labelOf(ks.service), via: 'etcd', detail: `registers ${ks.prefix}`, calls: [] })
+      }
+      for (const l of Array.isArray(ks?.listeners) ? ks.listeners : []) {
+        if (skip(l?.service)) continue
+        deps.push({ node: l.service, label: labelOf(l.service), via: 'etcd', detail: `watches ${ks.prefix}`, calls: [] })
+      }
+    }
+  } else {
+    const owned = etcdKeyspaces.find((ks) => ks?.service === id)
+    for (const l of owned && Array.isArray(owned.listeners) ? owned.listeners : []) {
+      if (skip(l?.service)) continue
+      deps.push({ node: l.service, label: labelOf(l.service), via: 'etcd', detail: `watches ${owned.prefix}`, calls: [] })
+    }
+  }
+
   // WebSocket tier — every relay server publishes through the tier's bus and reads/
   // writes its presence cache, so deleting either redis strands the tier's servers.
   // (Deleting the tier's own lb passes: the servers are in its cascade set.)
@@ -424,13 +524,14 @@ export async function handleDelete(body) {
 
   // The owned children removed in the same cascade (read replicas that stream from a
   // primary, a database's CDC worker, a websocket lb's whole tier, a load-balanced
-  // service's instances) — excluded from the dependency guard below.
-  const { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds } = cascadeChildIds(manifest, id, kind, node)
+  // service's instances, a consumer group's scaler) — excluded from the dependency
+  // guard below.
+  const { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, scalerIds } = cascadeChildIds(manifest, id, kind, node)
 
   // Block the delete while another node still depends on `id` — an endpoint's HTTP
   // downstream, a gRPC client target, a Kafka producer/consumer, or a client function
   // step. The user must remove those calls first; cascaded children don't count.
-  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...svcLbInstanceIds]))
+  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds]))
   if (dependents.length) {
     const err = bad(`Cannot delete "${id}" — ${dependents.length} node(s) still depend on it; remove those calls first.`)
     err.dependents = dependents
@@ -445,9 +546,9 @@ export async function handleDelete(body) {
   const kafkaIds = manifest.nodes.filter((n) => n.origin === 'create-event-stream').map((n) => n.id)
 
   // Remove the children first (workers, secondaries, a ws lb's tier, a load-balanced
-  // service's instances), then the target, in one manifest write.
-  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, id])
-  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds, id]) {
+  // service's instances, a consumer group's scaler), then the target, in one manifest write.
+  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds, id])
+  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds, id]) {
     const rnode = manifest.nodes.find((n) => n.id === rid)
     const rkind = kindOf(rnode)
     removeComposeServices(system, ownedServices(rid, rkind, rnode))
@@ -477,19 +578,28 @@ export async function handleDelete(body) {
   if (node?.type === 'service-lb') {
     fs.rmSync(path.join(systemDir(system), `${id}-lb`), { recursive: true, force: true })
   }
+  // A deleted etcd cluster also owns the top-level discovery registry (etcd.json —
+  // fixed name, one cluster per system; the node has no folder of its own).
+  if (kind === 'etcd') {
+    fs.rmSync(path.join(systemDir(system), 'etcd.json'), { force: true })
+  }
   // Drop consumer functions that referenced any removed node (as owner service or as cluster).
   pruneConsumers(system, removedIds)
+  // Drop persistence-reader entries owned by any removed service.
+  pruneReaders(system, removedIds)
+  // Drop etcd keyspaces/listeners that referenced any removed service.
+  pruneEtcd(system, removedIds)
   writeManifest(system, manifest)
 
   const log = await rebuild(system, kind)
-  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...svcLbInstanceIds], log }
+  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds], log }
 }
 
 // What still depends on `id`, for the GET probe and a fresh-manifest computation.
 function dependentsFor(system, manifest, node) {
   const kind = kindOf(node)
-  const { secondaryIds, cdcWorkerIds, wsChildIds, svcLbInstanceIds } = cascadeChildIds(manifest, node.id, kind, node)
-  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...svcLbInstanceIds]))
+  const { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, scalerIds } = cascadeChildIds(manifest, node.id, kind, node)
+  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds]))
 }
 
 export default function removeComponent() {

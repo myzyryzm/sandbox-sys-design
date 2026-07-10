@@ -19,11 +19,15 @@ import { isValidSystem, systemDir } from './systems.js'
 function listTypes() {
   return {
     ok: true,
-    types: Object.values(CUSTOM_TYPES).map((t) => ({
-      serviceType: t.serviceType,
-      displayName: t.displayName,
-      description: t.description,
-    })),
+    // `hidden` types are created by a dedicated flow (e.g. consumer groups from the
+    // Consumers tab), not from the generic add-service modal — don't offer them there.
+    types: Object.values(CUSTOM_TYPES)
+      .filter((t) => t.hidden !== true)
+      .map((t) => ({
+        serviceType: t.serviceType,
+        displayName: t.displayName,
+        description: t.description,
+      })),
   }
 }
 
@@ -41,7 +45,10 @@ function validateCreate(body) {
     throw bad(`a node named "${name}" already exists in this system`)
   }
   if (fs.existsSync(path.join(dir, name))) throw bad(`systems/${system}/${name}/ already exists`)
-  return { system, serviceType, name, manifest, type }
+  // Type-specific creation params ride in `options`, validated by the type's onAdd —
+  // the dispatcher stays type-agnostic.
+  const options = body.options && typeof body.options === 'object' ? body.options : {}
+  return { system, serviceType, name, manifest, type, options }
 }
 
 export default function customServices() {
@@ -66,8 +73,8 @@ export default function customServices() {
       server.middlewares.use('/api/custom-services', async (req, res, next) => {
         if (req.method !== 'POST') return next()
         try {
-          const { system, name, manifest, serviceType, type } = validateCreate(await readJsonBody(req))
-          return json(res, 200, await type.onAdd({ system, name, manifest, serviceType }))
+          const { system, name, manifest, serviceType, type, options } = validateCreate(await readJsonBody(req))
+          return json(res, 200, await type.onAdd({ system, name, manifest, serviceType, options }))
         } catch (err) {
           return json(res, err.statusCode || 500, { ok: false, error: err.message })
         }
@@ -75,12 +82,15 @@ export default function customServices() {
 
       // Mount each type's namespaced control routes. A route is { path, handler },
       // where handler(req, res, next, ctx) gets a small ctx { json, readJsonBody }.
+      // A type may also contribute an onServerStart hook (e.g. the consumer-group
+      // autoscale apply loop) — called once per dev-server instance.
       for (const type of Object.values(CUSTOM_TYPES)) {
         for (const route of type.routes || []) {
           server.middlewares.use(route.path, (req, res, next) =>
             route.handler(req, res, next, { json, readJsonBody }),
           )
         }
+        type.onServerStart?.(server)
       }
     },
   }

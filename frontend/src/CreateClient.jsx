@@ -11,6 +11,7 @@ import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
  */
 export default function CreateClient({ systemId, onClose }) {
   const [name, setName] = useState('mobile-app')
+  const [stateful, setStateful] = useState(false) // false = stateless (fire-and-forget, default)
   const [status, setStatus] = useState('idle') // idle | submitting | error
   const [error, setError] = useState(null)
 
@@ -25,7 +26,7 @@ export default function CreateClient({ systemId, onClose }) {
       const res = await fetch('/api/clients', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ system: systemId, name: name.trim() }),
+        body: JSON.stringify({ system: systemId, name: name.trim(), stateful }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
@@ -66,6 +67,35 @@ export default function CreateClient({ systemId, onClose }) {
           {name.trim() && nameErr
             ? <small className="field-error">{nameErr}</small>
             : <small className="form-hint">{NODE_NAME_HINT}</small>}
+
+          <label className="form-row">
+            <span>Mode</span>
+            <span>
+              <label className="dc-radio">
+                <input
+                  type="radio"
+                  name="client-mode"
+                  checked={!stateful}
+                  onChange={() => setStateful(false)}
+                  disabled={busy}
+                /> Stateless
+              </label>
+              <label className="dc-radio">
+                <input
+                  type="radio"
+                  name="client-mode"
+                  checked={stateful}
+                  onChange={() => setStateful(true)}
+                  disabled={busy}
+                /> Stateful
+              </label>
+            </span>
+          </label>
+          <small className="form-hint">
+            {stateful
+              ? 'Stateful: outcomes of API calls persist across runs in clients/<module>.state.json (a state.get/set store + auto call history) — like a websocket session. Set it later on the client’s State tab.'
+              : 'Stateless: fire-and-forget — each run is independent and remembers nothing (today’s behavior). You can switch to Stateful later on the client’s State tab.'}
+          </small>
 
           {error && <p className="modal-error">{error}</p>}
 

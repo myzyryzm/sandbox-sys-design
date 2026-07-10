@@ -10,11 +10,13 @@ __pycache__/
 # Runtime state from start.sh / stop.sh
 .run/
 
+# Per-client durable runtime stores (stateful clients / websocket "localStorage") — accumulating
+# run data, not committed config. The client scripts + registries stay tracked.
+systems/*/clients/*.state.json
+systems/*/clients/*.storage.json
+
 # Env / editor
 .DS_Store
 
 schemas/
 instructions/
-llm-app
-toy_llm.py
-scheduler.py

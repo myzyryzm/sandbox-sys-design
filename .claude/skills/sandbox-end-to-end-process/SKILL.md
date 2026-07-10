@@ -3,8 +3,9 @@ name: sandbox-end-to-end-process
 description: >-
   RUN an end-to-end test PROCESS in a "Distributed Systems Sandbox" system (systems/<id>/). Use
   whenever the task is to execute a process defined in systems/<id>/endtoend.json — seed the
-  out-of-scope preconditions its constraints imply, call its client methods at their configured
-  rates for a duration (synthesizing legal arguments), then probe for its failure states (design
+  out-of-scope preconditions its constraints imply, drive its client methods for a duration
+  (stateless methods at their configured req/s; stateful clients as N concurrent session-loop
+  instances kept alive; synthesizing legal arguments), then probe for its failure states (design
   defects) and report a PASS/FAIL verdict with a persisted run report. You do ALL the
   coordination; the backend only holds a run flag you poll for early-stop.
 ---
@@ -37,7 +38,8 @@ Read `systems/<id>/endtoend.json` and find the entry whose `id` matches your tas
 
 ```json
 { "id": "…", "name": "Checkout under load",
-  "client_list": [ { "client": "mobile-app", "method": "checkout", "intervalSeconds": 5 } ],
+  "client_list": [ { "client": "mobile-app", "method": "checkout", "requestsPerSecond": 2 },
+                   { "client": "frontend", "method": "endToEnd", "instances": 3 } ],
   "websocket_list": [ { "client": "ws-client", "clientCount": 50, "messagesPerSecond": 2 } ],
   "constraint_list": [ "every seller has an Account", "checkout is only called on an Order that exists" ],
   "failure_list": [ "two OrderPayments for the same order both have status=success (double charge)" ] }
@@ -45,8 +47,20 @@ Read `systems/<id>/endtoend.json` and find the entry whose `id` matches your tas
 
 - **`client_list`** — the client methods to drive. Each `(client, method)` names a client function
   in `systems/<id>/scenarios.json`, implemented as `def <method>(…)` in
-  `systems/<id>/clients/<module>.py` (`<module>` = client id with hyphens → underscores). Call it
-  every `intervalSeconds` seconds.
+  `systems/<id>/clients/<module>.py` (`<module>` = client id with hyphens → underscores). The
+  row's third field depends on the client node's `stateful` flag — **the manifest is the source
+  of truth at run time**:
+  - **stateless** client → `requestsPerSecond`: how many calls to make per second (fractional;
+    `0.1` = one call every 10s).
+  - **stateful** client → `instances`: how many concurrent instances of the function to keep
+    alive for the whole run. A stateful function is a session-style loop that self-bounds under
+    the 30s subprocess kill (~25s), so you respawn each instance when it exits (same identity,
+    same store — see step 4).
+
+  If a row doesn't match its client's current mode, derive the effective setting from the
+  manifest: stateful → `instances = row.instances or 1` (ignore any rate field); stateless →
+  `requestsPerSecond = row.requestsPerSecond or 1/row.intervalSeconds or 1` (legacy
+  `intervalSeconds` rows read as their reciprocal). Never crash on a mismatched row.
 - **`websocket_list`** (optional; absent on most processes) — websocket client **pools** to keep
   connected for the whole run. Each row names a websocket client node (`origin:
   "create-websockets"`) whose behavior is a host-run pool script
@@ -119,15 +133,33 @@ It prints one `__LB_RESULTS__ [ {method,path,sentBody,status,ok,response}, … ]
 **last** such line (a 4xx/5xx is still a recorded call; a network failure raises and still emits the
 calls made so far). **Wrap every invocation in try/except** so one bad call never kills the loop.
 
+Partition `client_list` by the client's `stateful` flag (manifest = source of truth). **Stateless
+rows** are a req/s scheduler: blocking `subprocess.run` can't sustain more than ~1 req/s serially,
+so dispatch each due invocation to a small `ThreadPoolExecutor` and advance each row's next fire
+from its *scheduled* time (clamped forward if it falls behind) so the average rate holds.
+**Stateful rows** are instance pools: spawn `instances` concurrent `Popen` children per row at run
+start and keep N alive — instance `n` gets its own durable store (`n=1` keeps the canonical
+`clients/<module>.state.json`, the one the client's State tab shows; `n>1` →
+`clients/<module>.i<n>.state.json`, same gitignored `*.state.json` family, cleared by the client's
+Clear-state action) plus a **stable synthesized identity argv** (same across respawns *and* runs,
+e.g. `user_id = "e2e-<client>-u<n>"`) so the store keeps meaning. When an instance exits (the
+functions self-bound ~25s), parse its `__LB_RESULTS__`, log it, and respawn with the same store +
+argv; `Popen` has no timeout, so enforce the Run panel's 30s kill yourself.
+
 Skeleton (adapt it — don't run verbatim):
 
 ```python
-import json, subprocess, time, urllib.request
+import json, os, subprocess, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 SYSTEM, PID, APIBASE, DURATION = "<id>", "<processId>", "<apiBase>", <durationSeconds>
 deadline = time.time() + DURATION
-next_call = {i: 0.0 for i in range(len(client_list))}
 log = []
+
+STATEFUL = {n["id"] for n in json.load(open(f"systems/{SYSTEM}/manifest.json"))["nodes"]
+            if n.get("type") == "client" and n.get("stateful")}
+stateless_rows = [r for r in client_list if r["client"] not in STATEFUL]
+stateful_rows  = [r for r in client_list if r["client"] in STATEFUL]
 
 def still_running():
     try:
@@ -137,28 +169,79 @@ def still_running():
     except Exception:
         return True   # control plane unreachable → fall back to the local deadline only
 
+def invoke(row, argv):                  # stateless one-shot (no env override — today's behavior)
+    try:
+        out = subprocess.run(["python3", f"systems/{SYSTEM}/clients/{module(row)}.py",
+                              "--" + row["method"], *argv],
+                             capture_output=True, text=True, timeout=30).stdout
+        return parse_lb_results(out)
+    except Exception as e:
+        return [{"ok": False, "status": 0, "error": str(e)}]
+
+pool = ThreadPoolExecutor(max_workers=8)
+period = {i: 1.0 / rps(r) for i, r in enumerate(stateless_rows)}   # rps() applies the mismatch rule
+next_call = {i: time.time() for i in range(len(stateless_rows))}
+
+def instance_env(row, n):               # per-instance durable store (n=1 = the canonical file)
+    suffix = ".state.json" if n == 1 else f".i{n}.state.json"
+    return {**os.environ,
+            "LB_CLIENT_STATE": os.path.abspath(f"systems/{SYSTEM}/clients/{module(row)}{suffix}")}
+
+live = {}                               # (row_idx, n) -> {"proc", "argv", "started"}
+def spawn(ri, n):
+    row = stateful_rows[ri]
+    argv = live.get((ri, n), {}).get("argv") or identity_args(row, n)   # stable per instance
+    p = subprocess.Popen(["python3", f"systems/{SYSTEM}/clients/{module(row)}.py",
+                          "--" + row["method"], *argv],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                         env=instance_env(row, n))
+    live[(ri, n)] = {"proc": p, "argv": argv, "started": time.time()}
+
+for ri, row in enumerate(stateful_rows):
+    for n in range(1, instances(row) + 1):    # instances() applies the mismatch rule
+        spawn(ri, n)
+
 while time.time() < deadline and still_running():
     now = time.time()
-    for i, row in enumerate(client_list):
+    for i, row in enumerate(stateless_rows):
         if now < next_call[i]:
             continue
-        next_call[i] = now + row["intervalSeconds"]
+        next_call[i] = max(next_call[i] + period[i], now)   # scheduled-time advance, clamped
         argv = legal_args(row)          # step 3 — reference seeded ids; record what you used
-        try:
-            out = subprocess.run(["python3", f"systems/{SYSTEM}/clients/{module(row)}.py",
-                                  "--" + row["method"], *argv],
-                                 capture_output=True, text=True, timeout=30).stdout
-            calls = parse_lb_results(out)
-        except Exception as e:
-            calls = [{"ok": False, "status": 0, "error": str(e)}]
-        log.append({"row": i, "argv": argv, "calls": calls, "at": now})
-    time.sleep(0.3)
+        pool.submit(lambda r=row, a=argv, t=now:
+                    log.append({"row": r, "argv": a, "calls": invoke(r, a), "at": t}))
+    for key, inst in list(live.items()):
+        p = inst["proc"]
+        if p.poll() is None and now - inst["started"] > 30:
+            p.kill()                    # mirror the Run panel's 30s hard kill
+        if p.poll() is None:
+            continue
+        out = p.communicate()[0] or ""
+        log.append({"instance": key, "argv": inst["argv"], "calls": parse_lb_results(out),
+                    "loop_seconds": round(now - inst["started"], 1)})
+        if time.time() < deadline:
+            if now - inst["started"] < 1.0:
+                time.sleep(1.0)         # spawn-storm guard for quick-exit functions
+            spawn(*key)                 # same store + identity args
+        else:
+            del live[key]
+    time.sleep(0.05)
+
+pool.shutdown(wait=True)
+for key, inst in live.items():          # deadline: collect stragglers (they self-bound ≤30s)
+    try:
+        out = inst["proc"].communicate(timeout=30)[0]
+    except subprocess.TimeoutExpired:
+        inst["proc"].kill()
+        out = inst["proc"].communicate()[0]
+    log.append({"instance": key, "argv": inst["argv"], "calls": parse_lb_results(out or "")})
 ```
 
 Why this shape (tradeoffs): a Bash+curl loop is fine only for the trivial single-row case;
 `POST <apiBase>/api/scenarios/run` is a valid fallback but can't pre-synthesize / chain args as
 flexibly; importing the client modules in-process is wrong — they share `lbclient._calls` and an
-`atexit` emit, so multiple calls in one process tangle the output.
+`atexit` emit, and a process has only one `LB_CLIENT_STATE`, so multiple calls (let alone
+concurrent stateful instances) in one process tangle the output.
 
 **WebSocket pools (`websocket_list`)** ride alongside the loop, not inside it: spawn each row's
 pool ONCE at run start as a **background subprocess of the orchestrator** (still a child of the
@@ -217,8 +300,12 @@ or `run.id` changed), stop invoking and:
    { "processId": "…", "processName": "…", "verdict": "PASS",
      "startedAt": "…Z", "endedAt": "…Z", "durationSeconds": 60, "stoppedEarly": false,
      "seeded":      [ { "store": "order-db", "entity": "orders", "count": 20, "ids": ["…"] } ],
-     "clientCalls": [ { "client": "mobile-app", "method": "checkout", "calls": 12, "ok": 12,
-                        "failed": 0, "argsUsed": ["…"], "samples": ["…"] } ],
+     "clientCalls": [ { "client": "mobile-app", "method": "checkout", "mode": "stateless",
+                        "requestsPerSecond": 2, "calls": 118, "ok": 118, "failed": 0,
+                        "argsUsed": ["…"], "samples": ["…"] },
+                      { "client": "frontend", "method": "endToEnd", "mode": "stateful",
+                        "instances": 3, "loops": 7, "calls": 96, "ok": 95, "failed": 1,
+                        "identities": ["e2e-frontend-u1", "…"], "samples": ["…"] } ],
      "websocketPools": [ { "client": "ws-client", "count": 50, "connected": 50, "sent": 6000,
                            "delivered": 5991, "duplicates": 0,
                            "latencyMs": { "p50": 4, "p95": 12, "max": 40 } } ],
@@ -243,9 +330,12 @@ or `run.id` changed), stop invoking and:
   skipped (never a silent crash).
 - The out-of-scope preconditions the constraints imply were **seeded** with referential integrity,
   and the methods' arguments referenced the seeded ids (legal inputs) — both captured in the report.
-- The orchestrator ran ~`duration` seconds (or until an early Stop) and made **≥1 call per
-  implemented method at roughly its `intervalSeconds`** — confirm via the `log` and/or moving
-  Prometheus metrics.
+- The orchestrator ran ~`duration` seconds (or until an early Stop); every implemented
+  **stateless** method was called **at roughly its `requestsPerSecond`** — confirm via the `log`
+  and/or moving Prometheus metrics.
+- Every **stateful** row kept ~`instances` subprocesses alive for the whole run (respawned on
+  exit, killed at 30s), every exit's `__LB_RESULTS__` was folded into the `log`, and the
+  per-instance stores landed at `clients/<module>.state.json` / `clients/<module>.i<n>.state.json`.
 - Every `websocket_list` row's pool was spawned with its `clientCount`, its `__WS_RESULTS__`
   report was parsed into the run report's `websocketPools`, and its delivered/duplicates numbers
   were checked against the failure conditions.

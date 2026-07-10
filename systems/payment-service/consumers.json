@@ -26,7 +26,8 @@
           "topic": "payout",
           "pollRate": 10000
         }
-      ]
+      ],
+      "groupId": "payout-consumer-consumePayout"
     },
     {
       "service": "refund-service",
@@ -54,7 +55,8 @@
           "topic": "refunds",
           "pollRate": 1000
         }
-      ]
+      ],
+      "groupId": "refund-service-processRefund"
     }
   ]
 }

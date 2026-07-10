@@ -1,0 +1,255 @@
+# Self-contained compose file for the `llm-app` system.
+# Run from inside systems/llm-app/:  docker compose up --build
+#
+# Topology: nginx LB  ->  service-1 (generic FastAPI), with Prometheus scraping
+# the service directly. service-1 is a generic service (the same shape "Add
+# service" creates): it exposes /health and /metrics and is reached through the
+# LB at the /service-1/ prefix. More services slot in the same way — each gets
+# its own compose service, an nginx /<id>/ route, and a Prometheus scrape job.
+#
+# Restartable: `docker compose down` then `up` cleanly recreates everything.
+# Prometheus data is intentionally NOT persisted.
+
+services:
+  lb:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  user-db:
+    # PostgreSQL "user-db" — added by Add database
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sandbox
+      POSTGRES_PASSWORD: sandbox
+      POSTGRES_DB: user_db
+    volumes:
+      - ./user-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+  user-db-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://sandbox:sandbox@user-db:5432/user_db?sslmode=disable
+    depends_on:
+      - user-db
+  chat-db:
+    # PostgreSQL "chat-db" — added by Add database
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sandbox
+      POSTGRES_PASSWORD: sandbox
+      POSTGRES_DB: chat_db
+    volumes:
+      - ./chat-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+  chat-db-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://sandbox:sandbox@chat-db:5432/chat_db?sslmode=disable
+    depends_on:
+      - chat-db
+  chat-service:
+    # Service "chat-service" — added by Add service (generic FastAPI backend)
+    build: ./chat-service
+    environment:
+      # Redis token stream filled by llm-worker; POST /messages block-reads it.
+      # Entries are typed ({type: token|done|error, text}); completion keys off
+      # type=="done", so no marker-string env is needed here.
+      REDIS_HOST: llm-worker-stream
+  user-messages-stream:
+    # Kafka "user-messages-stream" — added by Add event stream
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://user-messages-stream:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@user-messages-stream:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  user-messages-stream-exporter:
+    image: danielqsj/kafka-exporter:latest
+    command:
+      - --kafka.server=user-messages-stream:9092
+    depends_on:
+      - user-messages-stream
+    restart: unless-stopped
+  user-messages-stream-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      - user-messages-stream
+    restart: no
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        set -e
+
+        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server
+        user-messages-stream:9092 --list >/dev/null 2>&1; do sleep 2; done
+
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server
+        user-messages-stream:9092 --create --if-not-exists --topic user-message
+        --partitions 1 --replication-factor 1
+  chat-db-cdc:
+    # CDC "chat-db-cdc" — added by Add CDC
+    build: ./chat-db-cdc
+    depends_on:
+      - chat-db
+      - user-messages-stream
+    environment:
+      CDC_ENGINE: postgres
+      CDC_DB_HOST: chat-db
+      CDC_DB_PORT: 5432
+      CDC_DB_NAME: chat_db
+      CDC_DB_USER: sandbox
+      CDC_DB_PASSWORD: sandbox
+      CDC_PG_SLOT: chat_db_cdc
+    volumes:
+      - ./chat-db/cdc.json:/cdc.json:ro
+    restart: unless-stopped
+  llm-worker:
+    # LLM Worker "llm-worker" — custom service type
+    build: ./llm-worker
+    environment:
+      SERVICE_ID: llm-worker
+      REDIS_HOST: llm-worker-stream
+      ETCD_WORKER_ID: llm-worker-1
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
+    volumes:
+      - ./grpc:/app/grpc_pkg:ro
+      - ./manifest.json:/manifest.json:ro
+      - ./llm-worker/worker.json:/config/worker.json:ro
+      - ./llm-worker/hooks.py:/app/hooks.py:ro
+      - ./etcd.json:/etcd/etcd.json:ro
+    depends_on:
+      - llm-worker-stream
+  llm-worker-stream:
+    # Redis token stream "llm-worker-stream" — added by Add service (LLM Worker)
+    image: redis:7-alpine
+  llm-worker-stream-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: redis://llm-worker-stream:6379
+    depends_on:
+      - llm-worker-stream
+  etcd-1:
+    image: gcr.io/etcd-development/etcd:v3.5.21
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-1
+      - --data-dir=/var/lib/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-1:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-1783613258188
+      - --heartbeat-interval=100
+      - --election-timeout=1000
+    restart: unless-stopped
+  etcd-2:
+    image: gcr.io/etcd-development/etcd:v3.5.21
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-2
+      - --data-dir=/var/lib/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-2:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-2:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-1783613258188
+      - --heartbeat-interval=100
+      - --election-timeout=1000
+    restart: unless-stopped
+  etcd-3:
+    image: gcr.io/etcd-development/etcd:v3.5.21
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-3
+      - --data-dir=/var/lib/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-3:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-3:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-1783613258188
+      - --heartbeat-interval=100
+      - --election-timeout=1000
+    restart: unless-stopped
+  llm-worker-scaler:
+    # Scaler for LLM worker "llm-worker" — watches batch utilization, drives autoscaling
+    build: ./llm-worker-scaler
+    environment:
+      SERVICE_ID: llm-worker-scaler
+      BASE: llm-worker
+      SYSTEM_ID: llm-app
+    volumes:
+      - ./llm-worker/scaler.json:/config/scaler.json:ro
+      - ./manifest.json:/manifest.json:ro
+    depends_on:
+      - llm-worker
+  usr-msg-consumer:
+    # Consumer group "processUserMessage-group" service "usr-msg-consumer" — custom service type
+    build: ./usr-msg-consumer
+    environment:
+      SERVICE_ID: usr-msg-consumer
+      ETCD_WORKER_ID: usr-msg-consumer-1
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
+    volumes:
+      - ./user-messages-stream/streams.json:/streams/user-messages-stream.json:ro
+      - ./etcd.json:/etcd/etcd.json:ro
+    depends_on:
+      - user-messages-stream
+  usr-msg-consumer-scaler:
+    # Scaler for consumer group service "usr-msg-consumer" — watches lag, drives autoscaling
+    build: ./usr-msg-consumer-scaler
+    environment:
+      CLUSTER: user-messages-stream
+      SERVICE_ID: usr-msg-consumer-scaler
+    volumes:
+      - ./usr-msg-consumer/scaler.json:/config/scaler.json:ro
+      - ./user-messages-stream/streams.json:/streams/user-messages-stream.json:ro
+    depends_on:
+      - user-messages-stream
+  coordinator:
+    # Service "coordinator" — added by Add service (generic FastAPI backend)
+    build: ./coordinator
+    environment:
+      ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
+  db-writers:
+    # Persistence readers "db-writers" — consume runs:started on "llm-worker-stream", persist finished runs
+    build: ./db-writers
+    environment:
+      SERVICE_ID: db-writers
+      REDIS_HOST: llm-worker-stream
+      ANNOUNCE_STREAM: runs:started
+      READER_GROUP: db-writers
+      DB_NODE: chat-db
+    depends_on:
+      - llm-worker-stream
+      - chat-db

@@ -33,8 +33,8 @@ function buildAddTopicPrompt({ systemId, cluster, topic, partitions, schemaModel
   const parts = Math.max(1, Number(partitions) || 1)
   const compose = `systems/${systemId}/docker-compose.yml`
   const entry = schemaModel
-    ? `{ "id": "${topic}", "producers": [], "consumers": [], "schemaModel": "${schemaModel}"${enforceSchema ? ', "enforceSchema": true' : ''} }`
-    : `{ "id": "${topic}", "producers": [], "consumers": [] }`
+    ? `{ "id": "${topic}", "partitions": ${parts}, "producers": [], "consumers": [], "schemaModel": "${schemaModel}"${enforceSchema ? ', "enforceSchema": true' : ''} }`
+    : `{ "id": "${topic}", "partitions": ${parts}, "producers": [], "consumers": [] }`
   const lines = [
     `Use the sandbox-event-stream skill to ADD a topic to the Kafka cluster "${cluster}" in the "${systemId}" system.`,
     '',
@@ -187,7 +187,79 @@ function TopicSchema({ systemId, clusterId, topic, models, onLaunch, onClose, on
   )
 }
 
-/** One topic row: id + live/pending tag, expandable to schema/producers/consumers. */
+/**
+ * The per-topic partition count: shown always, growable in place. Kafka can only
+ * ADD partitions, so the editor is increase-only (the backend enforces it too). A
+ * grow is a mechanical broker `--alter` + registry write — no rebuild, no session;
+ * consumer groups on the topic rebalance onto the new partitions automatically.
+ */
+function TopicPartitions({ systemId, clusterId, topic, onSaved }) {
+  const current = Number.isInteger(topic.partitions) ? topic.partitions : null
+  const [value, setValue] = useState(current ?? 1)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    setValue(current ?? 1)
+    setErr('')
+  }, [current])
+
+  // Registry-less broker-only topics have an unknown count — nothing to edit.
+  if (current === null) return null
+
+  const n = Math.round(Number(value))
+  const grow = Number.isInteger(n) && n > current
+
+  async function save() {
+    setSaving(true)
+    setErr('')
+    try {
+      const res = await fetch('/api/event-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ system: systemId, id: clusterId, topic: topic.id, partitions: n }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      onSaved?.()
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="topic-section">
+      <div className="topic-section-head">Partitions</div>
+      <div className="schema-field">
+        <div className="entity-row">
+          <input
+            type="number"
+            min={current}
+            max={64}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            disabled={saving}
+            style={{ width: 90, flex: '0 0 auto' }}
+          />
+          {grow && (
+            <button type="button" className="primary" onClick={save} disabled={saving}>
+              {saving ? 'Growing…' : `Grow ${current} → ${n}`}
+            </button>
+          )}
+        </div>
+        <small className="form-hint">
+          Increase-only (Kafka can’t shrink a topic). Applies to the live broker — consumer
+          groups rebalance onto the new partitions automatically.
+        </small>
+        {err && <small className="field-error">{err}</small>}
+      </div>
+    </div>
+  )
+}
+
+/** One topic row: id + partitions + live/pending tag, expandable to schema/producers/consumers. */
 function TopicRow({ systemId, clusterId, topic, models, onLaunch, onClose, onSaved }) {
   const [open, setOpen] = useState(false)
   return (
@@ -200,12 +272,21 @@ function TopicRow({ systemId, clusterId, topic, models, onLaunch, onClose, onSav
       >
         <span className={`skill-caret${open ? ' open' : ''}`}>▶</span>
         <span className="topic-id">{topic.id}</span>
+        {Number.isInteger(topic.partitions) && (
+          <span className="topic-partitions">{topic.partitions} partition{topic.partitions === 1 ? '' : 's'}</span>
+        )}
         {/* live is null until the broker probe returns — show no badge while unknown. */}
         {topic.live === false && <span className="topic-pending">pending</span>}
       </button>
 
       {open && (
         <div className="topic-detail">
+          <TopicPartitions
+            systemId={systemId}
+            clusterId={clusterId}
+            topic={topic}
+            onSaved={onSaved}
+          />
           <TopicSchema
             systemId={systemId}
             clusterId={clusterId}

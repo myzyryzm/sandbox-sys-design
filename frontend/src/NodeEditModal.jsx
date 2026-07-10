@@ -8,8 +8,12 @@ import EventStreamModal from './EventStreamModal.jsx'
 import NodeOutageModal from './NodeOutageModal.jsx'
 import ConfirmDelete from './ConfirmDelete.jsx'
 import ClientScenarioTab from './ClientScenarioTab.jsx'
+import ClientStateTab from './ClientStateTab.jsx'
 import WsClientMethodsTab from './WsClientMethodsTab.jsx'
 import ConsumerTab from './ConsumerTab.jsx'
+import EtcdClusterTab from './EtcdClusterTab.jsx'
+import EtcdKeyspacesTab from './EtcdKeyspacesTab.jsx'
+import ServiceSubscribersTab from './ServiceSubscribersTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
 import ServiceLbTab from './ServiceLbTab.jsx'
 import { customTypeOf } from './customTypes/index.js'
@@ -51,6 +55,7 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   const isClient = node.type === 'client'
   const isDatabase = node.origin === 'create-database'
   const isEventStream = node.origin === 'create-event-stream'
+  const isEtcd = node.origin === 'create-etcd'
   const isSecondary = !!node.replicaOf
   // Prometheus is shared infra: its only action is the visual Delete (remove the diagram
   // node, keep the container). No feature tabs, and NO Shutdown — never offer to stop the
@@ -64,7 +69,15 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     tabs.push({ id: 'calls', label: 'Calls' })
     // Rendered via the generic Component-tab path (no `switch` case). Lets a plain
     // service enable load balancing, or a cluster entry scale / re-balance / disable.
-    tabs.push({ id: 'lb', label: 'Load Balancing', Component: ServiceLbTab })
+    // A custom-typed service (service_type, e.g. an LLM worker) is skipped: the haproxy
+    // sidecar is HTTP-only and its backend rejects custom services — such a service
+    // scales through its OWN tab (client-side, no load balancer) instead.
+    if (!node.service_type) tabs.push({ id: 'lb', label: 'Load Balancing', Component: ServiceLbTab })
+    // Subscribers: the etcd keyspaces this service watches (its SUB rows on the diagram),
+    // where new subscriptions are added/implemented. Only shown when the system has an etcd
+    // cluster to subscribe to; custom-typed services can subscribe too (no service_type guard).
+    const hasEtcd = (manifest?.nodes || []).some((n) => n.type === 'etcd')
+    if (hasEtcd) tabs.push({ id: 'subscribers', label: 'Subscribers', Component: ServiceSubscribersTab })
   } else if (isExternal) {
     // External services expose an HTTP API (the third party's endpoints) but never gRPC
     // contracts. The Functions "trigger bank" is client-only, so they have no Functions tab —
@@ -84,6 +97,9 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
       tabs.push({ id: 'wsmethods', label: 'WebSocket', Component: WsClientMethodsTab })
     }
     tabs.push({ id: 'functions', label: 'Functions', Component: ClientScenarioTab })
+    // Stateless (default) vs stateful mode + the durable store viewer. Rendered via the generic
+    // Component-tab path below (no `switch` case needed).
+    tabs.push({ id: 'state', label: 'State', Component: ClientStateTab })
   } else if (isDatabase) {
     tabs.push({ id: 'schema', label: isSecondary ? 'Replica' : 'Schema' })
     // CDC + Seed on primaries only (replicas are read-only). Each has its own engine set.
@@ -94,6 +110,12 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     // Consumer functions: internal services that consume this cluster's topics. Rendered via the
     // generic Component-tab path below (no `switch` case needed).
     tabs.push({ id: 'consumers', label: 'Consumers', Component: ConsumerTab })
+  } else if (isEtcd) {
+    // Cluster config (size / Raft knobs / lease TTL + per-member stop-start) and the
+    // service-discovery keyspaces (register services, manage listeners, live workers).
+    // Both render via the generic Component-tab path below.
+    tabs.push({ id: 'cluster', label: 'Cluster', Component: EtcdClusterTab })
+    tabs.push({ id: 'keyspaces', label: 'Keyspaces', Component: EtcdKeyspacesTab })
   }
   // Custom service types inject their own tab(s) (e.g. a Download Coordinator's
   // Distribution tab) between the kind tabs and the universal Shutdown/Delete.
@@ -236,7 +258,7 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
 
   return (
     <div className="modal-overlay" onClick={dismiss}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-card node-edit-modal" onClick={(e) => e.stopPropagation()}>
         <header className="modal-head">
           <h2>
             Edit · <code>{node.label}</code>
@@ -244,27 +266,31 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
           <button className="modal-close" onClick={onClose} disabled={busy}>✕</button>
         </header>
 
-        <div className="modal-tabs" role="tablist">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={active === t.id}
-              className={[
-                'modal-tab',
-                active === t.id ? 'active' : '',
-                t.danger ? 'danger' : '',
-              ].filter(Boolean).join(' ')}
-              disabled={busy && active !== t.id}
-              onClick={() => setActive(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <div className="modal-body-split">
+          <div className="modal-tabs modal-tabs-side" role="tablist">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={active === t.id}
+                className={[
+                  'modal-tab',
+                  active === t.id ? 'active' : '',
+                  t.danger ? 'danger' : '',
+                ].filter(Boolean).join(' ')}
+                disabled={busy && active !== t.id}
+                onClick={() => setActive(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
 
-        {renderTab()}
+          <div className="modal-tab-content">
+            {renderTab()}
+          </div>
+        </div>
       </div>
     </div>
   )

@@ -1,0 +1,34 @@
+{
+  "consumers": [
+    {
+      "service": "usr-msg-consumer",
+      "name": "processUserMessage",
+      "cluster": "user-messages-stream",
+      "topic": "user-message",
+      "pollRate": 1000,
+      "groupId": "processUserMessage-group",
+      "downstream": [
+        "etcd",
+        "llm-worker"
+      ],
+      "downstreamDescriptions": {
+        "etcd": "Reads /services/llm-worker/ to keep the live worker list current.",
+        "llm-worker": "GetStatus picks a free worker (sticky per chat for prefix caching); AddPrompt admits the message's prompt."
+      },
+      "description": "workers = [] # all workers assigned to it\nchat_worker_dict = dict() # map of chat id to worker to enable prefix caching\n\nsharedFunction: find_available_worker(user_message) =>\nif user_message.chat in chat_worker_dict:\n    worker = chat_worker_dict[user_message.chat]\n    if worker.get_status() is True return worker\nelse:\n    for worker in workers:\n        if worker.get_status() is True return worker\nreturn None \n\nservice reads from stream \nif no message then return \nelse find_available_worker(user_message)\nif no available worker then return\nelse call worker.add_prompt and commit",
+      "implemented": true,
+      "conversationId": "e85e8315-001e-4e17-926b-741545ed611f",
+      "createdAt": "2026-07-09T14:04:45.388Z",
+      "updatedAt": "2026-07-09T14:04:45.388Z",
+      "history": [
+        {
+          "at": "2026-07-09T14:04:45.388Z",
+          "description": "workers = [] # all workers assigned to it\nchat_worker_dict = dict() # map of chat id to worker to enable prefix caching\n\nsharedFunction: find_available_worker(user_message) =>\nif user_message.chat in chat_worker_dict:\n    worker = chat_worker_dict[user_message.chat]\n    if worker.get_status() is True return worker\nelse:\n    for worker in workers:\n        if worker.get_status() is True return worker\nreturn None \n\nservice reads from stream \nif no message then return \nelse find_available_worker(user_message)\nif no available worker then return\nelse call worker.add_prompt and commit",
+          "topic": "user-message",
+          "pollRate": 1000,
+          "groupId": "processUserMessage-group"
+        }
+      ]
+    }
+  ]
+}

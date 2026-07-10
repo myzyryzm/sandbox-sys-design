@@ -1,0 +1,65 @@
+{
+  "contracts": {
+    "Worker": {
+      "instruction": "sets local source variable which points to the consumer that it is connected to. will include the host and port information for the source",
+      "methods": [
+        {
+          "name": "AddPrompt",
+          "request": {},
+          "response": {},
+          "requestType": "AddPromptRequest",
+          "responseType": "AddPromptReply",
+          "requestStreaming": false,
+          "responseStreaming": false
+        },
+        {
+          "name": "GetStatus",
+          "request": {},
+          "response": {},
+          "requestType": "StatusRequest",
+          "responseType": "StatusReply",
+          "requestStreaming": false,
+          "responseStreaming": false
+        },
+        {
+          "name": "UpdateConsumer",
+          "request": {
+            "host": "string",
+            "port": "int32"
+          },
+          "response": {
+            "ok": "bool"
+          },
+          "requestType": "UpdateConsumerRequest",
+          "responseType": "UpdateConsumerReply",
+          "requestStreaming": false,
+          "responseStreaming": false
+        }
+      ],
+      "conversationId": "589c781b-e513-4539-b6c2-447180c1a257",
+      "createdAt": "2026-07-08T03:21:38.162Z",
+      "source": "llm_worker"
+    },
+    "Consumer": {
+      "instruction": "updates the workers local variable with new workers this consumer connects to. will be given host and port for each worker",
+      "methods": [
+        {
+          "name": "UpdateWorkers",
+          "request": {
+            "workers": "repeated WorkerEndpoint"
+          },
+          "response": {
+            "ok": "bool",
+            "count": "int32"
+          },
+          "requestType": "UpdateWorkersRequest",
+          "responseType": "UpdateWorkersReply",
+          "requestStreaming": false,
+          "responseStreaming": false
+        }
+      ],
+      "conversationId": "be8c1b65-46f1-4a38-8634-4752f0412ebb",
+      "createdAt": "2026-07-09T20:04:47.343Z"
+    }
+  }
+}

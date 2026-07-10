@@ -20,7 +20,13 @@ body {
   /* Black page; the dark-grey diagram "canvas" rectangle floats on top of it. */
   background: #000;
   color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
 }
 
 /* Full-height app: a fixed header row, then the grey canvas fills the rest down to the
@@ -36,7 +42,9 @@ body {
 header {
   flex: 0 0 auto;
   display: flex;
-  align-items: baseline;
+  /* center (not baseline): the drag-toggle button is an inline-flex box that synthesizes its
+     baseline from its bottom edge, so baseline alignment floated it above the plain-text buttons. */
+  align-items: center;
   gap: 12px;
   margin-bottom: 20px;
 }
@@ -536,6 +544,26 @@ h1 {
   dominant-baseline: middle;
 }
 
+/* A worker group's scaler sidecar (consumer groups + LLM workers): amber accent
+   (matches the consume-edge palette) so it reads as the group's control loop, sitting
+   at the top of the group's stack and carrying the group's Edit button. */
+.node-box.scaler {
+  stroke: #e0a44f;
+  stroke-dasharray: 4 3;
+}
+
+/* An LLM worker group's box label — larger than the generic fleet label because it
+   doubles as the group's TITLE (the entry renders as the scaler header card, or a
+   bare Edit button on a scaler-less group). */
+
+.llm-group-label {
+  fill: #c9cdd6;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  dominant-baseline: middle;
+}
+
 /* Drag-mode move target spanning a fleet box: transparent but fully hittable, so a drag
    anywhere inside the combined body (cards, panel, or the gaps between them) moves the whole
    tier stack. Unlike .boundary-move-target this catches the interior too (pointer-events: all). */
@@ -734,8 +762,31 @@ h1 {
 }
 
 .endpoint-method {
-  fill: #6ea8fe;
+  fill: #38ffbd;
+  color: #38ffbd;
   font-weight: 700;
+}
+
+/* Client-function "ƒ" badge keeps the original blue (the base above is the HTTP-verb default). */
+.endpoint-method-fn {
+  fill: #6ea8fe;
+}
+
+/* A consumer-function "PULL" badge, tinted to match the amber consume edge (.consume-edge /
+   CONSUME_COLOR) it traces, so the row and its line read as the same relationship. */
+.endpoint-method-consume {
+  fill: #e0a44f;
+}
+
+/* A served-gRPC-method "RPC" badge, tinted to match the purple gRPC edge (.grpc-edge /
+   GRPC_COLOR) its trace lights up, so the row and its caller lines read as the same thing. */
+.endpoint-method-rpc {
+  fill: #b18cf2;
+}
+
+/* etcd keyspace "KEY" / subscription "SUB" badges. */
+.endpoint-method-etcd {
+  fill: #ff9eed;
 }
 
 .endpoint-empty {
@@ -890,18 +941,18 @@ h1 {
   color: var(--text);
 }
 
-.terminal-status[data-status='connected']::before {
-  content: '● ';
+.terminal-status[data-status="connected"]::before {
+  content: "● ";
   color: #2e7d32;
 }
 
-.terminal-status[data-status='connecting']::before {
-  content: '● ';
+.terminal-status[data-status="connecting"]::before {
+  content: "● ";
   color: #f9a825;
 }
 
-.terminal-status[data-status='disconnected']::before {
-  content: '● ';
+.terminal-status[data-status="disconnected"]::before {
+  content: "● ";
   color: #c62828;
 }
 
@@ -990,6 +1041,62 @@ h1 {
 .modal-tab:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* Node "Edit" modal: tabs live in a vertical, independently-scrollable side
+   menu instead of a top strip. Scoped classes so the shared .modal-tabs /
+   .modal-tab rules (also used by WsSharedMethodsModal) stay a top strip. */
+.modal-card.node-edit-modal {
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 96px); /* 96px = overlay's 48px top+bottom padding */
+}
+
+.node-edit-modal .modal-head {
+  flex-shrink: 0;
+}
+
+.modal-body-split {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-height: 0; /* let children shrink so overflow works */
+  overflow: hidden;
+}
+
+.modal-tabs-side {
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: none;
+  border-right: 1px solid #2a2e37;
+  margin-bottom: 0;
+  padding-right: 8px;
+  overflow-y: auto;
+  flex-shrink: 0;
+  min-width: 132px;
+}
+
+.modal-tabs-side .modal-tab {
+  text-align: left;
+  border-bottom: none;
+  border-left: 2px solid transparent;
+  margin-bottom: 0;
+  white-space: nowrap;
+}
+
+.modal-tabs-side .modal-tab.active {
+  border-left-color: #6ea8fe;
+}
+
+.modal-tabs-side .modal-tab.danger.active {
+  border-left-color: #c62828;
+}
+
+.modal-tab-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
 }
 
 .form-row {
@@ -1160,9 +1267,24 @@ h1 {
 }
 
 .endpoint-list-method {
-  color: #6ea8fe;
+  color: #38ffbd;
   font-weight: 700;
   min-width: 52px;
+}
+
+/* etcd listener "WATCH" badge keeps the original blue (the base above is the HTTP-verb default). */
+.endpoint-list-method-watch {
+  color: #6ea8fe;
+}
+
+/* Consumer-function "PULL" badge in the list, amber to match its diagram row + consume edge. */
+.endpoint-list-method-consume {
+  color: #e0a44f;
+}
+
+/* etcd keyspace "KEY" / subscription "SUB" badges in the list, matching their diagram rows. */
+.endpoint-list-method-etcd {
+  color: #ff9eed;
 }
 
 .endpoint-list-path {
@@ -1419,7 +1541,7 @@ h1 {
   flex-direction: column;
   gap: 4px;
 }
-.form-row-check input[type='checkbox'] {
+.form-row-check input[type="checkbox"] {
   flex: none;
   align-self: flex-start;
 }
@@ -1937,6 +2059,15 @@ h1 {
   padding: 1px 5px;
 }
 
+.topic-partitions {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  border: 1px solid #2a2e37;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
 .topic-detail {
   margin-top: 10px;
   padding-top: 10px;
@@ -2046,25 +2177,8 @@ h1 {
   cursor: default;
 }
 
-/* Test / simulate modal */
-.sim {
-  background: #14171e;
-  border: 1px solid #232733;
-  border-radius: 8px;
-  padding: 14px;
-}
-
-.sim-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.sim-title {
-  font-weight: 600;
-  font-size: 14px;
-}
-
+/* Shared modal helpers — a status pill (used by the End-to-End modal) and the
+   muted description paragraph reused across many modals. */
 .sim-status {
   font-size: 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -2084,73 +2198,6 @@ h1 {
   margin: 8px 0 12px;
 }
 
-.sim-controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-/* Endpoint selector spans its own row above the rate + button. */
-.sim-target {
-  flex-basis: 100%;
-}
-
-.sim-target select {
-  flex: 1;
-  background: #0b0d12;
-  color: var(--text);
-  border: 1px solid #2a2e37;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 13px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.sim-controls label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.sim-controls input {
-  width: 64px;
-  background: #0b0d12;
-  color: var(--text);
-  border: 1px solid #2a2e37;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 13px;
-}
-
-.sim-controls button {
-  margin-left: auto;
-  border: 1px solid #2a2e37;
-  border-radius: 6px;
-  padding: 6px 14px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.sim-controls button.primary {
-  background: #2e7d32;
-  border-color: #2e7d32;
-  color: #fff;
-}
-
-.sim-controls button.danger {
-  background: #c62828;
-  border-color: #c62828;
-  color: #fff;
-}
-
-.sim-controls button:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
 /* ===== gRPC ===== */
 
 /* gRPC edges (client -> server), dashed + purple, distinct from HTTP/trace edges. */
@@ -2161,12 +2208,11 @@ h1 {
   fill: none;
 }
 
-/* A Kafka consume edge (consumer service -> the cluster it reads from). Amber + a tighter dash
-   than .grpc-edge so it's distinct from a solid-gray producer/dep edge that points the same way. */
+/* A Kafka consume edge (consumer service -> the cluster it reads from). Solid amber so it's
+   distinct from a solid-gray producer/dep edge that points the same way (color, not dash). */
 .consume-edge {
   stroke: #e0a44f;
   stroke-width: 2;
-  stroke-dasharray: 3 3;
   fill: none;
 }
 
@@ -2431,6 +2477,16 @@ h1 {
   stroke-dasharray: 3 3;
   opacity: 0.7;
 }
+/* Always-on etcd discovery wiring (registrant → etcd → listeners), derived live from
+   etcd.json. Faint + dashed so it stays subordinate to the bright click-trace that lights
+   the same relationship (see the keyspace-trace block in SystemDiagram.jsx). */
+.etcd-edge {
+  stroke: #5aa0c0;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  fill: none;
+  opacity: 0.6;
+}
 /* Per-node bitmap grid drawn inside the node box (SVG). */
 .dc-node-cell {
   fill: #2a2f3c;
@@ -2453,6 +2509,32 @@ h1 {
   text-anchor: middle;
 }
 
+/* ── LLM Worker custom node body (per-sequence decode progress bars) ──────────── */
+.llm-node-bar {
+  fill: #2a2f3c;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 0.5;
+}
+.llm-node-bar.fill {
+  fill: #6ea8fe;
+  stroke: none;
+}
+.llm-node-bar.prefill {
+  fill: #d8a657;
+  stroke: none;
+}
+/* "implemented" badge on the worker's evict-hook section (green twin of .scenario-pending). */
+.llm-implemented {
+  color: #7fbf7f;
+  background: rgba(127, 191, 127, 0.12);
+  border: 1px solid rgba(127, 191, 127, 0.35);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 /* ── Service "Calls" tab: list of a service's API methods (Edit ▸ Calls) ───────── */
 .calls-list {
   list-style: none;
@@ -2465,7 +2547,9 @@ h1 {
   border-radius: 8px;
   margin-bottom: 6px;
   cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
 }
 .calls-row:hover {
   background: rgba(110, 168, 254, 0.1);

@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package llmworker;
+
+// Simulated LLM inference worker. AddPrompt admits a user message into the
+// continuous-batching loop — generated tokens stream to the worker's linked
+// redis (stream key tokens:<id>, values are the a-z characters of each token,
+// the configurable LAST_TOKEN string (default "DONE") last). GetStatus reports
+// whether the worker has space for another prompt.
+service Worker {
+  rpc AddPrompt (AddPromptRequest) returns (AddPromptReply);
+  rpc GetStatus (StatusRequest) returns (StatusReply);
+  rpc UpdateConsumer (UpdateConsumerRequest) returns (UpdateConsumerReply);
+}
+
+message AddPromptRequest {
+  int64 id = 1;                // user_message id — segments the redis token stream (tokens:<id>)
+  string content = 2;          // the prompt text (lowercased; a-z tokenized, other chars skipped)
+  optional int64 chat = 3;     // chat id: prefix-cache key + chat-history lookup
+  optional int64 message = 4;  // this prompt's message row id — excluded from the history query
+}
+
+message AddPromptReply {
+  bool accepted = 1;
+  int64 seq_id = 2;   // worker-local sequence id (valid when accepted)
+  string reason = 3;  // "worker full" | "empty prompt" | "" when accepted
+  bool cache_hit = 4; // the chat's cached prefix (KV caches) was reused
+}
+
+message StatusRequest {}
+
+message StatusReply {
+  bool has_space = 1;     // active_count < max_active
+  int32 active_count = 2;
+  int32 cached_count = 3;
+  int32 max_active = 4;   // current live-config value
+}
+
+// Point the worker at the consumer (source) it is connected to — the worker
+// stores this host:port as its local `source` so it can reach back to it.
+message UpdateConsumerRequest {
+  string host = 1;   // source consumer host
+  int32 port = 2;    // source consumer port
+}
+
+message UpdateConsumerReply {
+  bool ok = 1;       // true once the local source was updated
+}

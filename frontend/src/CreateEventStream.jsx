@@ -18,7 +18,7 @@ const TYPE_META = {
 export default function CreateEventStream({ systemId, onClose }) {
   const [type, setType] = useState('kafka')
   const [name, setName] = useState(TYPE_META.kafka.defaultName)
-  const [topics, setTopics] = useState([''])
+  const [topics, setTopics] = useState([{ id: '', partitions: 1 }])
   const [status, setStatus] = useState('idle') // idle | submitting | error
   const [error, setError] = useState(null)
 
@@ -31,11 +31,11 @@ export default function CreateEventStream({ systemId, onClose }) {
     setError(null)
   }
 
-  function updateTopic(i, value) {
-    setTopics((ts) => ts.map((t, j) => (j === i ? value : t)))
+  function updateTopic(i, patch) {
+    setTopics((ts) => ts.map((t, j) => (j === i ? { ...t, ...patch } : t)))
   }
   function addTopic() {
-    setTopics((ts) => [...ts, ''])
+    setTopics((ts) => [...ts, { id: '', partitions: 1 }])
   }
   function removeTopic(i) {
     setTopics((ts) => ts.filter((_, j) => j !== i))
@@ -46,7 +46,9 @@ export default function CreateEventStream({ systemId, onClose }) {
     setStatus('submitting')
     setError(null)
     try {
-      const payloadTopics = topics.map((t) => t.trim()).filter(Boolean)
+      const payloadTopics = topics
+        .map((t) => ({ id: t.id.trim(), partitions: Math.max(1, Math.round(Number(t.partitions) || 1)) }))
+        .filter((t) => t.id)
       const res = await fetch('/api/event-streams', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -108,14 +110,25 @@ export default function CreateEventStream({ systemId, onClose }) {
             {topics.map((t, i) => (
               <div className="entity-row" key={i}>
                 <input
-                  value={t}
-                  onChange={(e) => updateTopic(i, e.target.value)}
+                  value={t.id}
+                  onChange={(e) => updateTopic(i, { id: e.target.value })}
                   placeholder="topic name (e.g. orders)"
+                  disabled={busy}
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={64}
+                  value={t.partitions}
+                  onChange={(e) => updateTopic(i, { partitions: e.target.value })}
+                  title="partitions"
+                  style={{ width: 72, flex: '0 0 auto' }}
                   disabled={busy}
                 />
                 <button type="button" className="link-danger" onClick={() => removeTopic(i)} disabled={busy}>remove</button>
               </div>
             ))}
+            {topics.length > 0 && <small className="form-hint">Number = partitions per topic (fan-out for consumer-group scaling).</small>}
           </div>
 
           {error && <p className="modal-error">{error}</p>}

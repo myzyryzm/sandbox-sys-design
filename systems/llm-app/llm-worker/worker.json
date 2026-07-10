@@ -1,0 +1,5 @@
+{
+  "ttl_seconds": 30,
+  "chat_db": "chat-db",
+  "max_active": 5
+}

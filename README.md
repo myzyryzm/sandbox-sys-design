@@ -24,7 +24,7 @@ real Docker, not a mock. From the header and per-node Edit panels you can add:
 - **Custom service types** — typed services that scaffold real containers (the
   first is the peer-to-peer **Download Coordinator**),
 
-and exercise it all: generate load, trace an endpoint's request path, take a node
+and exercise it all: trace an endpoint's request path, take a node
 offline to watch failures propagate, and run **end-to-end test processes** that seed
 preconditions, drive clients, and probe for design defects (PASS/FAIL). The frontend
 stays generic — it renders whatever the selected system's `manifest.json` describes,
@@ -49,7 +49,6 @@ repo-root/
       consumers.json           # per-service Kafka consumer functions (if any)
       endtoend.json            # named end-to-end test processes (if any)
       endtoend-runs/           # persisted PASS/FAIL run reports
-      load.sh                  # load generator (honors URL + METHOD env)
       prometheus/prometheus.yml
       nginx/nginx.conf         # per-service /<id>/ routes (insertion markers)
       grpc/                    # gRPC contract bank: .proto + generated bindings + shared servicers
@@ -186,7 +185,6 @@ The header shows the system name/id and a row of top-level actions. Left to righ
 | Button | What it opens / does |
 | --- | --- |
 | **Drag** | Toggle drag mode — reposition nodes and move/resize the system-boundary box; the layout is saved to the manifest (`POST /api/layout`), no rebuild. |
-| **🧪 Test** | Simulations modal — today "Generate load" against a chosen endpoint. |
 | **🔁 End-to-End** | End-to-end test processes — define + run seed→drive→probe processes with a PASS/FAIL verdict. |
 | **📖 Skills** | Browse the Claude Code skills a launched session can use (served live from `.claude/skills/`). |
 | **＋ Add service** | Add a generic FastAPI service — or a **custom service type** (e.g. Download Coordinator). |
@@ -625,6 +623,50 @@ A cluster also has a **pause** toggle (`consumersPaused`) that consumer loops re
 
 ---
 
+## etcd (service discovery on a real Raft cluster)
+
+Click **"＋ Add etcd"** to provision a real **N-member etcd cluster** (N odd — 3/5/7 —
+one container per member, static bootstrap, no host ports, scraped natively by
+Prometheus). Only **one** etcd setup may exist per system: the menu item hides while a
+cluster is on the diagram and the backend 409s a second create. The create modal derives
+the Raft math live — **quorum = ⌊N/2⌋+1, tolerates ⌊N/2⌋ failures** — and takes the two
+Raft timing knobs (**heartbeat interval**, **election timeout**, validated ≥ 5×heartbeat)
+plus the **lease TTL**. Backend: `frontend/server/etcd.js`.
+
+The cluster renders as ONE diagram node: quorum-aware health (**red below quorum**,
+yellow degraded, green full), a per-member **dot strip** (leader ringed — kill the leader
+and watch the ring move), the derived quorum caption, and one clickable **KEY row per
+keyspace** — clicking it traces the discovery flow: registrant service **→ etcd**
+(lease-put keepalive) and **etcd →** each listener (watch push). No permanent edges;
+the arrows exist only while selected.
+
+Its Edit panel has two tabs:
+
+- **Cluster** — size / heartbeat / election / TTL with the derived quorum line. A
+  **TTL-only** save is a pure `etcd.json` write applied **live** (registration loops
+  re-read the mounted file by mtime — no rebuild); changing size or a Raft knob
+  **recreates the cluster** (fresh bootstrap token; leased registrations re-establish
+  themselves on reconnect). Below that, a per-member list with live health / leader
+  status and **Stop/Start** buttons — stop ⌈N/2⌉ members to lose quorum and watch
+  writes fail + the node turn red, then start one back and watch everything self-heal.
+- **Keyspaces** — **register a service** (creates `/services/<service>/`; each of its
+  workers — or every instance of a load-balanced service — keeps a **leased key** alive
+  there with value `host:port`) and add **listeners** per keyspace (a real etcd
+  `watch_prefix` — updates are **pushed**, never polled). The registry entry + compose
+  env/mount (`ETCD_WORKER_ID`, `ETCD_ENDPOINTS`, `etcd.json:ro`) are written
+  mechanically; the lease-keepalive / watch loops are authored into the service's
+  `app.py` by a launched Claude session (the `sandbox-etcd` skill), which flips
+  `implemented: true`. The tab lists each keyspace's **live workers** straight from the
+  cluster (kill a worker and its key vanishes within one TTL) and each listener exposes
+  `GET /<listener>/discovery/<service>` with its live view.
+
+Deleting is guarded like everything else: the cluster can't be deleted while keyspaces
+exist, and a service can't be deleted while others watch its keyspace. Routes:
+`POST/GET/PUT /api/etcd`, `POST/DELETE /api/etcd/keyspace`, `POST/DELETE
+/api/etcd/listener`, `POST /api/etcd/member` (the quorum demo).
+
+---
+
 ## WebSockets (an L4-balanced real-time tier)
 
 Click **"＋ Add WebSockets"** to provision a complete websocket tier in one mechanical
@@ -714,23 +756,6 @@ grid + aggregate %, and live chunk-source edges show the star→mesh shift. See 
 
 ---
 
-## Testing the system (the "Test" button)
-
-Click **"🧪 Test"** in the header to open the simulations modal. Today it has one
-simulation, **Generate load**: choose a **target endpoint** (method + path, from
-the same `/api/endpoints` catalog the LB shows), a rate (req/s), and **Start
-load**; request-rate, latency and in-flight metrics move on that service's node.
-**Stop** ends it.
-
-The dev-server plugin `frontend/server/simulate.js` spawns `load.sh` detached (in
-its own process group) with the chosen `URL` + `METHOD` in its environment, and
-tracks it per system — so Stop, or shutting down the dev server, kills the whole
-loop. `GET/POST /api/test/load` report and control its state. It's built as a
-list so future simulations (latency injection, kill a node, …) can slot in
-alongside.
-
----
-
 ## End-to-end test processes (the "End-to-End" button)
 
 Click **"🔁 End-to-End"** to define and run **end-to-end test processes** — the sandbox's
@@ -767,8 +792,7 @@ queries Prometheus**. If all four checks below agree, it's proven.
 **1. Generate load** through the load balancer (leave it running in a terminal):
 
 ```bash
-cd systems/hello-lb
-./load.sh            # or:  while true; do curl -s localhost:8080/service-1/health; done
+while true; do curl -s localhost:8080/service-1/health; done
 ```
 
 **2. Prometheus Targets page** — open
@@ -838,7 +862,7 @@ scrapes don't inflate req/s or latency.
 Every capability above entered through the same extensibility contract — a
 manifest node + compose service + scrape job, scaffolded by a dev-server plugin —
 so new ones keep slotting in without reworking the generic frontend. Ideas not
-built yet: optional Grafana dashboards, a Locust load generator, latency injection
+built yet: optional Grafana dashboards, latency injection
 (netem), and coordinator hot-standby / failover for the Download Coordinator (its
 orchestration state is deliberately kept in one separable object as the seam, but
 standby itself is out of scope today).
