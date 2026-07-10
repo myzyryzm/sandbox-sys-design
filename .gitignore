@@ -10,6 +10,10 @@ __pycache__/
 # Runtime state from start.sh / stop.sh
 .run/
 
+# Global app settings (colors + the dangerously-skip-permissions flag). Machine-local config,
+# written live by /api/settings; not committed.
+/settings.json
+
 # Per-client durable runtime stores (stateful clients / websocket "localStorage") — accumulating
 # run data, not committed config. The client scripts + registries stay tracked.
 systems/*/clients/*.state.json

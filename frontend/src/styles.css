@@ -761,32 +761,35 @@ h1 {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* Badge colors are user-configurable via Settings: the --badge-* vars are set on
+   :root by applyBadgeColors() (prefixColors.js) when settings load. The hardcoded
+   fallbacks below are the defaults, so an unset value renders exactly as before. */
 .endpoint-method {
-  fill: #38ffbd;
-  color: #38ffbd;
+  fill: var(--badge-http, #38ffbd);
+  color: var(--badge-http, #38ffbd);
   font-weight: 700;
 }
 
 /* Client-function "ƒ" badge keeps the original blue (the base above is the HTTP-verb default). */
 .endpoint-method-fn {
-  fill: #6ea8fe;
+  fill: var(--badge-fn, #6ea8fe);
 }
 
 /* A consumer-function "PULL" badge, tinted to match the amber consume edge (.consume-edge /
    CONSUME_COLOR) it traces, so the row and its line read as the same relationship. */
 .endpoint-method-consume {
-  fill: #e0a44f;
+  fill: var(--badge-consume, #e0a44f);
 }
 
 /* A served-gRPC-method "RPC" badge, tinted to match the purple gRPC edge (.grpc-edge /
    GRPC_COLOR) its trace lights up, so the row and its caller lines read as the same thing. */
 .endpoint-method-rpc {
-  fill: #b18cf2;
+  fill: var(--badge-rpc, #b18cf2);
 }
 
 /* etcd keyspace "KEY" / subscription "SUB" badges. */
 .endpoint-method-etcd {
-  fill: #ff9eed;
+  fill: var(--badge-etcd, #ff9eed);
 }
 
 .endpoint-empty {
@@ -1267,24 +1270,24 @@ h1 {
 }
 
 .endpoint-list-method {
-  color: #38ffbd;
+  color: var(--badge-http, #38ffbd);
   font-weight: 700;
   min-width: 52px;
 }
 
-/* etcd listener "WATCH" badge keeps the original blue (the base above is the HTTP-verb default). */
+/* etcd listener "WATCH" badge keeps the original blue — shares the function badge color. */
 .endpoint-list-method-watch {
-  color: #6ea8fe;
+  color: var(--badge-fn, #6ea8fe);
 }
 
 /* Consumer-function "PULL" badge in the list, amber to match its diagram row + consume edge. */
 .endpoint-list-method-consume {
-  color: #e0a44f;
+  color: var(--badge-consume, #e0a44f);
 }
 
 /* etcd keyspace "KEY" / subscription "SUB" badges in the list, matching their diagram rows. */
 .endpoint-list-method-etcd {
-  color: #ff9eed;
+  color: var(--badge-etcd, #ff9eed);
 }
 
 .endpoint-list-path {
@@ -2175,6 +2178,68 @@ h1 {
 .modal-actions button:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* Settings modal. Sections separated by a hairline; the prefix-color rows lay a role
+   label + native color swatch + hex field + reset button on one line. */
+.settings-section {
+  border-top: 1px solid #2a2e37;
+  padding-top: 14px;
+  margin-top: 14px;
+}
+.settings-section:first-of-type {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+.settings-section h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+.settings-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.settings-colors {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.settings-color-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.settings-color-label {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+}
+/* Native color input styled down to a compact swatch (the .modal-card input padding/border
+   would otherwise bloat it). */
+.modal-card input.settings-color-swatch {
+  flex: none;
+  width: 34px;
+  height: 26px;
+  padding: 2px;
+  cursor: pointer;
+}
+.modal-card input.settings-color-hex {
+  flex: none;
+  width: 86px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: lowercase;
+}
+.modal-card input.settings-color-hex.invalid {
+  border-color: #c62828;
+}
+.settings-color-reset {
+  flex: none;
+  font-size: 15px;
+  line-height: 1;
 }
 
 /* Shared modal helpers — a status pill (used by the End-to-End modal) and the
