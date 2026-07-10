@@ -173,7 +173,11 @@ rebuild** (the frontend re-reads them on a timer):
   schemaModel?, enforceSchema? }], consumersPaused? }`. `schemaModel` references a model-bank type as the
   topic's message contract; `enforceSchema` makes producer/consumer code validate at runtime;
   `consumersPaused` is a cluster-level pause toggle read live (no rebuild). `grpc/_registry.json` is the
-  gRPC contract bank + provenance.
+  gRPC contract bank: pure SHAPE (method records with field maps + `formAuthored`), plus each contract's
+  owning `server` and per-method `description`s (the behavior text written when the one owning service
+  attaches it). The backend synthesizes/splices the `.proto` and regenerates `_pb2*` itself (real protoc
+  in docker) — bank edits are staged model-bank-style and applied in one batch; a session runs only to
+  propagate shape changes into attached services' code.
 
 ### Mutations are done by launched Claude sessions + skills, not by the backend
 
@@ -194,8 +198,8 @@ skill in `.claude/skills/` — it has the canonical procedure and `Verify` steps
 | Add/update a Kafka cluster, topics, and per-service **consumer functions** | `sandbox-event-stream` |
 | Wire **etcd service discovery** (leased-key registration + watch listeners) | `sandbox-etcd` |
 | Author a **client function** (a multi-step call sequence run through the lb) | `sandbox-client-scenario` |
-| Define a gRPC contract (`.proto` + protoc + shared servicer) | `sandbox-grpc-contract` |
-| Attach a contract to a service (server/client roles, targets) | `sandbox-grpc-attach` |
+| Propagate a gRPC contract shape change into attached services | `sandbox-grpc-contract` |
+| Serve a contract (one owner; servicer from per-method descriptions) or wire a caller | `sandbox-grpc-attach` |
 | Circuit-breaker + retry on a connection (edge) | `sandbox-resilience` |
 | Put a **per-service load balancer** in front of a service (N instances + haproxy sidecar) | `sandbox-service-lb` |
 | Register a new custom service type | `sandbox-custom-service-type` |

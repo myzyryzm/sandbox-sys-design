@@ -24,19 +24,23 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x43onsumer.proto\x12\x0bllmconsumer\",\n\x0eWorkerEndpoint\x12\x0c\n\x04host\x18\x01 \x01(\t\x12\x0c\n\x04port\x18\x02 \x01(\x05\"D\n\x14UpdateWorkersRequest\x12,\n\x07workers\x18\x01 \x03(\x0b\x32\x1b.llmconsumer.WorkerEndpoint\"/\n\x12UpdateWorkersReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\r\n\x05\x63ount\x18\x02 \x01(\x05\x32_\n\x08\x43onsumer\x12S\n\rUpdateWorkers\x12!.llmconsumer.UpdateWorkersRequest\x1a\x1f.llmconsumer.UpdateWorkersReplyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x43onsumer.proto\x12\x0bllmconsumer\"D\n\x14UpdateWorkersRequest\x12,\n\x07workers\x18\x01 \x03(\x0b\x32\x1b.llmconsumer.WorkerEndpoint\"/\n\x12UpdateWorkersReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\r\n\x05\x63ount\x18\x02 \x01(\x05\"%\n\x12OnChatEvictRequest\x12\x0f\n\x07\x63hat_id\x18\x01 \x01(\x05\"\x1e\n\x10OnChatEvictReply\x12\n\n\x02ok\x18\x01 \x01(\x08\",\n\x0eWorkerEndpoint\x12\x0c\n\x04host\x18\x01 \x01(\t\x12\x0c\n\x04port\x18\x02 \x01(\x05\x32\xae\x01\n\x08\x43onsumer\x12S\n\rUpdateWorkers\x12!.llmconsumer.UpdateWorkersRequest\x1a\x1f.llmconsumer.UpdateWorkersReply\x12M\n\x0bOnChatEvict\x12\x1f.llmconsumer.OnChatEvictRequest\x1a\x1d.llmconsumer.OnChatEvictReplyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'Consumer_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_WORKERENDPOINT']._serialized_start=31
-  _globals['_WORKERENDPOINT']._serialized_end=75
-  _globals['_UPDATEWORKERSREQUEST']._serialized_start=77
-  _globals['_UPDATEWORKERSREQUEST']._serialized_end=145
-  _globals['_UPDATEWORKERSREPLY']._serialized_start=147
-  _globals['_UPDATEWORKERSREPLY']._serialized_end=194
-  _globals['_CONSUMER']._serialized_start=196
-  _globals['_CONSUMER']._serialized_end=291
+  _globals['_UPDATEWORKERSREQUEST']._serialized_start=31
+  _globals['_UPDATEWORKERSREQUEST']._serialized_end=99
+  _globals['_UPDATEWORKERSREPLY']._serialized_start=101
+  _globals['_UPDATEWORKERSREPLY']._serialized_end=148
+  _globals['_ONCHATEVICTREQUEST']._serialized_start=150
+  _globals['_ONCHATEVICTREQUEST']._serialized_end=187
+  _globals['_ONCHATEVICTREPLY']._serialized_start=189
+  _globals['_ONCHATEVICTREPLY']._serialized_end=219
+  _globals['_WORKERENDPOINT']._serialized_start=221
+  _globals['_WORKERENDPOINT']._serialized_end=265
+  _globals['_CONSUMER']._serialized_start=268
+  _globals['_CONSUMER']._serialized_end=442
 # @@protoc_insertion_point(module_scope)

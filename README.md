@@ -193,7 +193,7 @@ The header shows the system name/id and a row of top-level actions. Left to righ
 | **＋ Add database** | Provision Postgres / MongoDB / Redis / MinIO (+ exporter). |
 | **＋ Add event stream** | Provision a single-broker Kafka cluster (+ exporter). |
 | **＋ Add WebSockets** | Provision a whole websocket tier: haproxy L4 lb + N `ws` relay servers + redis pub/sub bus + redis presence cache + a host-run client pool. |
-| **＋ gRPC contract** | Open the gRPC contract bank (define / upload `.proto` contracts). |
+| **＋ gRPC contract** | Open the gRPC contract bank (pure shape: add methods / upload `.proto`; edits are staged, reviewed, applied in one batch). |
 | **＋ Models** | Open the model bank (reusable TypeScript interfaces). |
 | **🗒 Queue** | Show the edit queue — pending Claude sessions run one at a time. |
 | **Edit with Claude ▸** | Toggle the embedded Claude Code terminal. |
@@ -561,19 +561,28 @@ step inference).
 ## gRPC contracts between services
 
 The header's **"＋ gRPC contract"** button opens the contract **bank**, and each
-**service** node's Edit panel has a **gRPC** tab for attaching. A gRPC *contract* is a
-`.proto` service authored once and kept in the per-system bank under `systems/<id>/grpc/`
-(its `_registry.json` records every method + provenance). You define a contract's RPC
-methods + message types in the bank — or upload a complete `.proto`, validated by the
-real `protoc` — then from a service's gRPC tab **attach** it as a **server** (imports the
-shared servicer + runs a gRPC server) and/or **client** (a stub pointed at editable
-targets). Roles live on the service nodes' manifest `grpc` block, so the diagram draws
-gRPC edges as soon as you attach.
+**service** node's Edit panel has a **gRPC** tab for serving. A gRPC *contract* is pure
+**shape** — a `.proto` service (RPC methods + message types) kept in the per-system bank
+under `systems/<id>/grpc/` (`_registry.json` records every method). The bank works like
+the model bank: creating a **new** contract (form method or a complete `.proto`, validated
+by the real `protoc`) persists immediately — the backend synthesizes/splices the proto and
+generates the `_pb2` bindings itself, no Claude session. Edits to an **existing** contract
+(add/edit/delete a method, re-upload, delete the contract) are **staged**, badged, then
+"Review & save" shows the affected services and applies the batch in one POST; if any
+changed contract is attached, ONE propagation session updates the affected code
+(`sandbox-grpc-contract` skill). There is no free-form description in the bank.
 
-The registry edit is instant; the `.proto` / `_pb2` / `_servicer.py` codegen and
-the `app.py` wiring are done by a launched Claude session (the
-`sandbox-grpc-contract` / `sandbox-grpc-attach` skills). Backend:
-`frontend/server/grpc.js` + `grpcInstall.js`.
+Behavior lives with the **server**: each contract is served by exactly **one** owning
+service (endpoint-like — attaching it elsewhere 409s until detached). From a service's
+gRPC tab you attach an unowned contract and write a **description per method**; a
+launched session (`sandbox-grpc-attach` skill) authors
+`systems/<id>/grpc/<Contract>_servicer.py` from those descriptions (blank = an
+UNIMPLEMENTED stub), wires the gRPC server on `:50051`, and rebuilds. Later description
+edits update just those method bodies in place; detach unwires (blocked while other
+services still dial it). **Client** wiring is not edited in the tab — the flows that make
+a service call a contract (endpoints, consumer functions, custom types) write the
+manifest `grpc.clients` block themselves, which is what draws the purple gRPC edges.
+Backend: `frontend/server/grpc.js` + `grpcProto.js` + `grpcInstall.js`.
 
 ---
 

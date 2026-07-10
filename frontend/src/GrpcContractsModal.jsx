@@ -1,14 +1,23 @@
 import { useCallback, useEffect, useState } from 'react'
+import { buildGrpcUpdatePrompt, methodSig } from './grpcBank.js'
 
 /**
- * gRPC contract authoring (Part A). Lists the system's contracts and lets the user
- * add a method to one (new or existing): an optional request/response field set
- * (proto types) + a streaming toggle + a free-text instruction. On submit it
- * persists the method to the per-system registry via POST /api/grpc-contracts
- * (with a fresh Claude session id), then launches that session to author the
- * .proto, run protoc, and generate the system's single shared servicer
- * (sandbox-grpc-contract skill). Re-opening a contract shows the original
- * instruction text — the provenance of the generated implementation.
+ * gRPC contract bank (Part A) — pure SHAPE, model-bank workflow.
+ *
+ * Creating a NEW contract (first form method, or uploading a .proto whose
+ * service name is new) persists immediately: the backend synthesizes/validates
+ * the proto and generates the _pb2 bindings itself — no Claude session (a new
+ * contract has no owner and no behavior yet).
+ *
+ * Everything on an EXISTING contract is STAGED locally (add/edit/delete a
+ * method, re-upload, delete the contract), badged, then "Review & save" shows
+ * the affected services (the contract's owning server + its callers, joined
+ * from the manifest) and applies the whole batch in one POST /api/grpc-apply.
+ * If any changed contract is attached, ONE propagation session updates the
+ * owner's servicer + client call sites and rebuilds (sandbox-grpc-contract).
+ *
+ * Behavior text lives elsewhere: per-method descriptions are written from the
+ * service Edit modal's gRPC tab (the serving side), not here.
  */
 
 // Proto types offered in the field dropdowns; `repeated` variants for collections.
@@ -24,12 +33,10 @@ function blankForm() {
     request: [{ name: '', type: 'string' }],
     response: [{ name: '', type: 'string' }],
     responseStreaming: false,
-    instruction: '',
   }
 }
 
 // Turn dynamic {name,type} rows into a flat { name: type } object, dropping blanks.
-// Empty -> {} so the backend stores nothing and Claude infers from the instruction.
 function rowsToFields(rows) {
   const out = {}
   for (const r of rows) {
@@ -44,147 +51,205 @@ function fieldsToRows(obj) {
   return rows.length ? rows : [{ name: '', type: 'string' }]
 }
 
-function shape(obj) {
-  const keys = Object.keys(obj || {})
-  return keys.length ? keys.map((k) => `${k}: ${obj[k]}`).join(', ') : 'inferred'
+const sameFields = (a, b) => JSON.stringify(a || {}) === JSON.stringify(b || {})
+
+// Client-side mirror of the backend's upload check, only to route the submit:
+// an uploaded proto whose service name already exists becomes a STAGED
+// replace-proto draft; a new name creates immediately. (The backend re-checks.)
+function protoServiceName(text) {
+  const src = (text || '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+  const names = [...src.matchAll(/\bservice\s+([A-Za-z_]\w*)\s*\{/g)].map((m) => m[1])
+  return names.length === 1 ? names[0] : null
 }
 
-// A method's display signature. Form-authored methods carry request/response field
-// maps; uploaded methods carry the message type names (requestType/responseType)
-// instead, so fall back to those (with any stream markers) when the maps are empty.
-function methodSig(m) {
-  const reqHas = m.request && Object.keys(m.request).length
-  const resHas = m.response && Object.keys(m.response).length
-  const reqInner = reqHas ? shape(m.request) : `${m.requestStreaming ? 'stream ' : ''}${m.requestType || 'inferred'}`
-  const resInner = resHas ? shape(m.response) : m.responseType || 'inferred'
-  return `(${reqInner}) → ${m.responseStreaming ? 'stream ' : ''}(${resInner})`
-}
-
-function buildContractPrompt({ systemId, contract, method, request, response, responseStreaming, instruction }) {
-  const fmt = (o) => (Object.keys(o).length ? JSON.stringify(o) : 'none (infer from the instruction)')
-  return [
-    `Use the sandbox-grpc-contract skill to author a gRPC method in the "${systemId}" system.`,
-    ``,
-    `Contract (proto service): ${contract}`,
-    `Method: ${method}`,
-    `Request fields (name -> proto type): ${fmt(request)}`,
-    `Response fields (name -> proto type): ${fmt(response)}`,
-    `Response streaming: ${responseStreaming ? 'yes (returns (stream ...))' : 'no'}`,
-    ``,
-    `What the method should do:`,
-    instruction.trim() || '(no description given — infer something reasonable)',
-    ``,
-    `Write/append it to systems/${systemId}/grpc/${contract}.proto with sequential field`,
-    `numbers, run protoc, and generate the SINGLE shared servicer`,
-    `systems/${systemId}/grpc/${contract}_servicer.py (generated once for the whole system).`,
-  ].join('\n')
-}
-
-// Prompt for the upload path: the .proto is already written + protoc-validated, so
-// the session only generates the bindings + shared servicer (it must not re-author
-// the proto).
-function buildUploadPrompt({ systemId, contract, methods, instruction }) {
-  const sig = (m) =>
-    `  ${m.name}(${m.requestStreaming ? 'stream ' : ''}${m.requestType}) -> ${m.responseStreaming ? 'stream ' : ''}${m.responseType}`
-  return [
-    `Use the sandbox-grpc-contract skill to finish a gRPC contract in the "${systemId}" system.`,
-    ``,
-    `An existing .proto was just UPLOADED and already passed protoc validation; it is`,
-    `written at systems/${systemId}/grpc/${contract}.proto. Do NOT rewrite or re-author the`,
-    `.proto — it is the source of truth.`,
-    ``,
-    `Contract (proto service): ${contract}`,
-    `Methods:`,
-    ...(methods || []).map(sig),
-    ``,
-    `Do this:`,
-    `1. Run protoc to generate systems/${systemId}/grpc/${contract}_pb2.py and`,
-    `   ${contract}_pb2_grpc.py from the uploaded .proto.`,
-    `2. Implement the SINGLE shared servicer systems/${systemId}/grpc/${contract}_servicer.py`,
-    `   (generated once for the whole system) for the methods above.`,
-    ``,
-    `What the methods should do:`,
-    (instruction || '').trim() || '(no description given — infer reasonable behavior from the .proto)',
-  ].join('\n')
+// How a contract row shows who uses it.
+function attachmentLabel(c) {
+  if (c.servers.length > 1) return `served by ${c.servers.join(', ')} (custom)`
+  if (c.server) return `served by ${c.server}`
+  return 'unattached'
 }
 
 export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
   const [contracts, setContracts] = useState(null) // null = loading
+  const [drafts, setDrafts] = useState({}) // staged edits: { name: {kind, ...} }
   const [form, setForm] = useState(blankForm)
+  const [editingMethod, setEditingMethod] = useState(null) // method name being edited
   const [openName, setOpenName] = useState(null) // expanded contract row
+  const [confirmName, setConfirmName] = useState(null) // contract pending delete-stage confirm
+  const [review, setReview] = useState(false)
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [tab, setTab] = useState('form') // 'form' (build a method) | 'upload' (.proto file)
   const [proto, setProto] = useState('') // uploaded / pasted .proto text
-  const [protoInstruction, setProtoInstruction] = useState('')
 
   const load = useCallback(() => {
     return fetch(`/api/grpc-contracts?system=${encodeURIComponent(systemId)}`)
       .then((r) => r.json())
-      .then((d) => setContracts(d.ok ? d.contracts : []))
-      .catch(() => setContracts([]))
+      .then((d) => {
+        const list = d.ok ? d.contracts : []
+        setContracts(list)
+        return list
+      })
+      .catch(() => {
+        setContracts([])
+        return []
+      })
   }, [systemId])
 
   useEffect(() => {
     load()
   }, [load])
 
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
+  const byName = new Map((contracts || []).map((c) => [c.name, c]))
 
-  // Row editors for the request/response field lists.
+  // A contract's method list with its staged draft applied (what review saves).
+  function draftedMethods(c) {
+    const d = drafts[c.name]
+    if (!d || d.kind !== 'methods') return c.methods
+    const deletes = new Set(d.deletes)
+    const out = c.methods.filter((m) => !deletes.has(m.name)).map((m) => d.upserts[m.name] || m)
+    for (const u of Object.values(d.upserts)) {
+      if (!out.some((m) => m.name === u.name)) out.push(u)
+    }
+    return out
+  }
+
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
   const updateRow = (key, i, patch) =>
     setForm((f) => ({ ...f, [key]: f[key].map((r, j) => (j === i ? { ...r, ...patch } : r)) }))
-  const addRow = (key) =>
-    setForm((f) => ({ ...f, [key]: [...f[key], { name: '', type: 'string' }] }))
-  const removeRow = (key, i) =>
-    setForm((f) => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }))
+  const addRow = (key) => setForm((f) => ({ ...f, [key]: [...f[key], { name: '', type: 'string' }] }))
+  const removeRow = (key, i) => setForm((f) => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }))
 
-  // Pre-fill the form's contract name so a new method joins an existing contract.
-  function addMethodTo(name) {
-    setForm((f) => ({ ...blankForm(), contract: name }))
+  function resetForm() {
+    setForm(blankForm())
+    setEditingMethod(null)
     setError(null)
   }
 
-  async function submit() {
+  // Pre-fill the form so a new method joins an existing contract (staged).
+  function addMethodTo(name) {
+    setForm({ ...blankForm(), contract: name })
+    setEditingMethod(null)
+    setTab('form')
     setError(null)
-    if (!/^[A-Z][A-Za-z0-9]*$/.test(form.contract.trim())) {
-      return setError('Contract must be PascalCase (e.g. ChunkTransfer)')
-    }
-    if (!/^[A-Z][A-Za-z0-9]*$/.test(form.method.trim())) {
-      return setError('Method must be PascalCase (e.g. GetChunk)')
-    }
-    const conversationId = crypto.randomUUID()
-    const request = rowsToFields(form.request)
-    const response = rowsToFields(form.response)
-    const body = {
-      system: systemId,
-      contract: form.contract.trim(),
-      method: form.method.trim(),
-      request,
-      response,
+  }
+
+  // Load an existing (or staged) method into the form for a staged edit.
+  function startEditMethod(c, m) {
+    setForm({
+      contract: c.name,
+      method: m.name,
+      request: fieldsToRows(m.request),
+      response: fieldsToRows(m.response),
+      responseStreaming: !!m.responseStreaming,
+    })
+    setEditingMethod(m.name)
+    setTab('form')
+    setError(null)
+  }
+
+  // Merge one staged change into a contract's draft, dropping no-op drafts.
+  function stageMethodChange(name, mutate) {
+    setDrafts((all) => {
+      const cur = all[name]
+      const d =
+        cur && cur.kind === 'methods'
+          ? { kind: 'methods', upserts: { ...cur.upserts }, deletes: [...cur.deletes] }
+          : { kind: 'methods', upserts: {}, deletes: [] }
+      mutate(d)
+      const next = { ...all }
+      if (!Object.keys(d.upserts).length && !d.deletes.length) delete next[name]
+      else next[name] = d
+      return next
+    })
+  }
+
+  function submitForm() {
+    setError(null)
+    const contract = form.contract.trim()
+    const method = form.method.trim()
+    if (!/^[A-Z][A-Za-z0-9]*$/.test(contract)) return setError('Contract must be PascalCase (e.g. ChunkTransfer)')
+    if (!/^[A-Z][A-Za-z0-9]*$/.test(method)) return setError('Method must be PascalCase (e.g. GetChunk)')
+    const record = {
+      name: method,
+      request: rowsToFields(form.request),
+      response: rowsToFields(form.response),
       responseStreaming: form.responseStreaming,
-      instruction: form.instruction,
-      conversationId,
+      formAuthored: true,
     }
+
+    const existing = byName.get(contract)
+    if (!existing) return createContract(contract, record)
+
+    // Staged upsert on an existing contract (model-bank "Stage edit").
+    if (drafts[contract]?.kind === 'delete') return setError(`"${contract}" is staged for deletion — undo that first`)
+    if (drafts[contract]?.kind === 'replace-proto') return setError(`"${contract}" has a staged re-upload — form edits would be overwritten`)
+    const saved = existing.methods.find((m) => m.name === method)
+    if (saved && !editingMethod && !drafts[contract]?.upserts?.[method]) {
+      return setError(`method "${method}" already exists — use its Edit action to stage a change`)
+    }
+    if (saved && !saved.formAuthored) {
+      return setError(`method "${method}" came from an uploaded .proto — delete it or re-upload to reshape it`)
+    }
+    stageMethodChange(contract, (d) => {
+      d.deletes = d.deletes.filter((n) => n !== method)
+      const noop =
+        saved &&
+        sameFields(saved.request, record.request) &&
+        sameFields(saved.response, record.response) &&
+        !!saved.responseStreaming === record.responseStreaming
+      if (noop) delete d.upserts[method]
+      else d.upserts[method] = record
+    })
+    resetForm()
+    setOpenName(contract)
+  }
+
+  // Create a brand-new contract immediately — it has no owner or callers yet,
+  // so there is nothing to propagate (the backend runs protoc mechanically).
+  async function createContract(contract, record) {
     setBusy(true)
     try {
       const res = await fetch('/api/grpc-contracts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ system: systemId, contract, methods: [record] }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      onLaunch({
-        sessionId: conversationId,
-        mode: 'new',
-        prompt: buildContractPrompt({ ...body, request, response }),
-      }, { kind: 'grpc', target: body.contract, title: body.method })
-      onClose()
+      await load()
+      resetForm()
+      setOpenName(contract)
     } catch (err) {
-      setBusy(false)
       setError(err.message)
+    } finally {
+      setBusy(false)
     }
+  }
+
+  // Stage a method delete (or drop a staged-only method).
+  function deleteMethod(c, m) {
+    setError(null)
+    stageMethodChange(c.name, (d) => {
+      delete d.upserts[m.name]
+      const saved = c.methods.some((x) => x.name === m.name)
+      if (saved && !d.deletes.includes(m.name)) d.deletes.push(m.name)
+    })
+    if (editingMethod === m.name) resetForm()
+  }
+
+  // Stage / unstage a whole-contract delete.
+  function stageContractDelete(name) {
+    setDrafts((all) => ({ ...all, [name]: { kind: 'delete' } }))
+    setConfirmName(null)
+    if (form.contract.trim() === name) resetForm()
+  }
+  function unstage(name) {
+    setDrafts((all) => {
+      const next = { ...all }
+      delete next[name]
+      return next
+    })
   }
 
   // Load the chosen .proto into the editable textarea (the user can also paste).
@@ -199,43 +264,104 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
     }
   }
 
-  // Upload path: the backend validates the whole .proto with real protoc and only
-  // registers it if it compiles; on success we launch the session that generates the
-  // bindings + shared servicer. A validation failure is shown verbatim (what's wrong).
+  // Upload: a NEW service name creates immediately (backend validates with real
+  // protoc); an existing name stages a replace-proto draft for review.
   async function submitUpload() {
     setError(null)
     if (!proto.trim()) return setError('Choose or paste a .proto file first')
-    const conversationId = crypto.randomUUID()
+    const name = protoServiceName(proto)
+    if (name && byName.has(name)) {
+      setDrafts((all) => ({ ...all, [name]: { kind: 'replace-proto', protoFile: proto } }))
+      setProto('')
+      setOpenName(name)
+      return
+    }
     setBusy(true)
     try {
       const res = await fetch('/api/grpc-contracts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          system: systemId,
-          protoFile: proto,
-          instruction: protoInstruction,
-          conversationId,
-        }),
+        body: JSON.stringify({ system: systemId, protoFile: proto }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      onLaunch({
-        sessionId: conversationId,
-        mode: 'new',
-        prompt: buildUploadPrompt({
-          systemId,
-          contract: data.contract,
-          methods: data.methods,
-          instruction: protoInstruction,
-        }),
-      }, { kind: 'grpc', target: data.contract, title: 'upload proto' })
-      onClose()
+      await load()
+      setProto('')
+      setOpenName(data.contract)
     } catch (err) {
-      setBusy(false)
       setError(err.message)
+    } finally {
+      setBusy(false)
     }
   }
+
+  // Apply every staged draft in one batch; the backend returns the affected
+  // services (impact) — if any, launch ONE propagation session.
+  async function confirmSave() {
+    setError(null)
+    const names = Object.keys(drafts)
+    if (!names.length) return setReview(false)
+    const changes = names.map((name) => {
+      const d = drafts[name]
+      if (d.kind === 'methods') {
+        return { contract: name, kind: 'methods', upserts: Object.values(d.upserts), deletes: d.deletes }
+      }
+      if (d.kind === 'replace-proto') return { contract: name, kind: 'replace-proto', protoFile: d.protoFile }
+      return { contract: name, kind: 'delete' }
+    })
+    setBusy(true)
+    try {
+      const res = await fetch('/api/grpc-apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ system: systemId, changes }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+
+      const impact = data.impact || { owners: [], clients: [] }
+      const fresh = await load() // post-apply registry (carried descriptions, new methods)
+      if (!impact.owners.length && !impact.clients.length) {
+        // Nothing attached — pure shape + codegen, stay open.
+        setDrafts({})
+        setReview(false)
+        setBusy(false)
+        return
+      }
+
+      const freshByName = new Map(fresh.map((c) => [c.name, c]))
+      const entries = names.map((name) => {
+        const d = drafts[name]
+        if (d.kind === 'delete') return { contract: name, kind: 'delete' }
+        if (d.kind === 'replace-proto') {
+          return { contract: name, kind: 'replace-proto', methods: freshByName.get(name)?.methods || [] }
+        }
+        const methods = freshByName.get(name)?.methods || []
+        return {
+          contract: name,
+          kind: 'methods',
+          upserts: Object.keys(d.upserts).map((n) => methods.find((m) => m.name === n)).filter(Boolean),
+          deletes: d.deletes,
+        }
+      })
+      onLaunch({
+        sessionId: crypto.randomUUID(),
+        mode: 'new',
+        prompt: buildGrpcUpdatePrompt({ systemId, entries, impact }),
+      }, {
+        kind: 'grpc',
+        target: 'grpc',
+        title: names.length === 1 ? `update ${names[0]}` : `update ${names.length} contracts`,
+      })
+      onClose()
+    } catch (err) {
+      setError(err.message)
+      setBusy(false)
+    }
+  }
+
+  const dirtyCount = Object.keys(drafts).length
+  const editingExisting = byName.has(form.contract.trim())
 
   return (
     <div className="modal-overlay" onClick={busy ? undefined : onClose}>
@@ -245,7 +371,13 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
           <button className="modal-close" onClick={onClose} disabled={busy}>✕</button>
         </header>
 
-        {/* Existing contracts (re-open shows the original instruction text). */}
+        <p className="sim-desc">
+          A contract is pure <strong>shape</strong> (a proto <code>service</code> + messages). Each is
+          served by <strong>one</strong> owning service — attach it (and describe each method’s
+          behavior) from that service’s Edit → gRPC tab.
+        </p>
+
+        {/* Existing contracts */}
         {contracts === null ? (
           <p className="sim-desc">Loading…</p>
         ) : contracts.length === 0 ? (
@@ -254,6 +386,9 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
           <ul className="endpoint-list">
             {contracts.map((c) => {
               const open = openName === c.name
+              const draft = drafts[c.name]
+              const methods = draftedMethods(c)
+              const confirming = confirmName === c.name
               return (
                 <li key={c.name} className="grpc-contract">
                   <div className="grpc-contract-head">
@@ -264,20 +399,54 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
                       <span className={`skill-caret${open ? ' open' : ''}`}>▸</span>
                       <code>{c.name}</code>
                     </button>
-                    <span className="grpc-contract-meta">{c.methods.length} method{c.methods.length === 1 ? '' : 's'}</span>
-                    <button className="link" disabled={busy} onClick={() => addMethodTo(c.name)}>+ method</button>
+                    {draft && (
+                      <span className="model-dirty-badge">
+                        {draft.kind === 'delete' ? 'deleting' : draft.kind === 'replace-proto' ? 're-upload' : 'modified'}
+                      </span>
+                    )}
+                    <span className="grpc-contract-meta">
+                      {methods.length} method{methods.length === 1 ? '' : 's'} · {attachmentLabel(c)}
+                    </span>
+                    {draft ? (
+                      <button className="link" disabled={busy} onClick={() => unstage(c.name)}>undo</button>
+                    ) : confirming ? (
+                      <span className="endpoint-list-actions">
+                        <span className="endpoint-confirm">Delete?</span>
+                        <button className="link" disabled={busy} onClick={() => stageContractDelete(c.name)}>Yes</button>
+                        <button className="link" disabled={busy} onClick={() => setConfirmName(null)}>No</button>
+                      </span>
+                    ) : (
+                      <span className="endpoint-list-actions">
+                        <button className="link" disabled={busy} onClick={() => addMethodTo(c.name)}>+ method</button>
+                        <button className="link-danger" disabled={busy} onClick={() => setConfirmName(c.name)}>Delete</button>
+                      </span>
+                    )}
                   </div>
-                  {open && (
+                  {open && draft?.kind !== 'delete' && (
                     <div className="grpc-contract-body">
-                      {c.instruction && (
-                        <p className="grpc-instruction"><span className="grpc-label">instruction</span> {c.instruction}</p>
+                      {draft?.kind === 'replace-proto' && (
+                        <p className="sim-desc">Staged re-upload — the methods below are replaced by the new .proto on save.</p>
                       )}
-                      {c.methods.map((m) => (
-                        <div key={m.name} className="grpc-method">
-                          <code>{m.name}</code>
-                          <span className="grpc-sig">{methodSig(m)}</span>
-                        </div>
-                      ))}
+                      {methods.map((m) => {
+                        const staged = draft?.kind === 'methods' && !!draft.upserts[m.name]
+                        return (
+                          <div key={m.name} className="grpc-method">
+                            <code>{m.name}</code>
+                            <span className="grpc-sig" title={m.description || undefined}>{methodSig(m)}</span>
+                            {staged && <span className="model-dirty-badge">staged</span>}
+                            {draft?.kind !== 'replace-proto' && (
+                              <span className="endpoint-list-actions">
+                                {m.formAuthored ? (
+                                  <button className="link" disabled={busy} onClick={() => startEditMethod(c, m)}>Edit</button>
+                                ) : (
+                                  <span className="grpc-contract-meta" title="This method came from an uploaded .proto — delete it or re-upload to reshape it.">uploaded</span>
+                                )}
+                                <button className="link-danger" disabled={busy} onClick={() => deleteMethod(c, m)}>Delete</button>
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </li>
@@ -286,132 +455,185 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
           </ul>
         )}
 
-        {/* Author a contract: build a method via the form, or upload a whole .proto. */}
-        <div className="form-section">
-          <div className="grpc-tabs">
-            <button
-              type="button"
-              className={`grpc-tab${tab === 'form' ? ' active' : ''}`}
-              onClick={() => { setTab('form'); setError(null) }}
-              disabled={busy}
-            >Add method</button>
-            <button
-              type="button"
-              className={`grpc-tab${tab === 'upload' ? ' active' : ''}`}
-              onClick={() => { setTab('upload'); setError(null) }}
-              disabled={busy}
-            >Upload .proto</button>
-          </div>
-
-          {tab === 'form' ? (
-            <>
-              <label className="form-row">
-                <span>Contract</span>
-                <input value={form.contract} onChange={set('contract')} placeholder="ChunkTransfer" disabled={busy} />
-              </label>
-              <label className="form-row">
-                <span>Method</span>
-                <input value={form.method} onChange={set('method')} placeholder="GetChunk" disabled={busy} />
-              </label>
-
-              {['request', 'response'].map((key) => (
-                <div className="form-section" key={key}>
-                  <div className="form-section-head">
-                    <span>{key} fields <em className="grpc-optional">(optional — inferred if blank)</em></span>
-                    <button type="button" onClick={() => addRow(key)} disabled={busy}>+ field</button>
+        {review ? (
+          /* Impact review — what this staged batch will change */
+          <div className="form-section">
+            <div className="form-section-head">
+              <span>Review changes</span>
+            </div>
+            <p className="sim-desc">
+              Saving applies {dirtyCount} staged contract change{dirtyCount === 1 ? '' : 's'} (
+              {Object.keys(drafts).join(', ')}). The backend re-runs protoc and regenerates the
+              bindings; nothing is saved unless every changed contract compiles.
+            </p>
+            {(() => {
+              const affected = Object.keys(drafts)
+                .map((name) => byName.get(name))
+                .filter(Boolean)
+                .filter((c) => c.servers.length || c.clients.length)
+              return affected.length === 0 ? (
+                <p className="sim-desc">No services serve or call these contracts — changes will just be saved.</p>
+              ) : (
+                <>
+                  <div className="impact-group">
+                    <div className="impact-group-head">Affected services</div>
+                    <ul className="impact-list">
+                      {affected.flatMap((c) => [
+                        ...c.servers.map((s) => (
+                          <li key={`${c.name}|s|${s}`}>
+                            <code>{s}</code> serves {c.name}
+                            {drafts[c.name]?.kind === 'delete' && <span className="impact-field"> (will be unwired)</span>}
+                          </li>
+                        )),
+                        ...c.clients.map((cl) => (
+                          <li key={`${c.name}|c|${cl.service}`}>
+                            <code>{cl.service}</code> calls {c.name}
+                          </li>
+                        )),
+                      ])}
+                    </ul>
                   </div>
-                  {form[key].map((r, i) => (
-                    <div className="field-row" key={i}>
-                      <input
-                        value={r.name}
-                        onChange={(e) => updateRow(key, i, { name: e.target.value })}
-                        placeholder="field_name"
-                        disabled={busy}
-                      />
-                      <select value={r.type} onChange={(e) => updateRow(key, i, { type: e.target.value })} disabled={busy}>
-                        {PROTO_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                      </select>
-                      <button type="button" className="link-danger" onClick={() => removeRow(key, i)} disabled={busy}>×</button>
+                  <p className="form-hint">
+                    A single Claude session will update each owning service’s servicer (per its stored
+                    method descriptions), each caller’s call sites, and rebuild them
+                    (sandbox-grpc-contract skill).
+                  </p>
+                </>
+              )
+            })()}
+
+            {error && <p className="modal-error">{error}</p>}
+
+            <div className="modal-actions">
+              <button type="button" onClick={() => setReview(false)} disabled={busy}>Back</button>
+              <button type="button" className="primary" onClick={confirmSave} disabled={busy}>
+                {busy ? 'Applying…' : 'Confirm & save → apply'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Author shape: build a method via the form, or upload a whole .proto. */}
+            <div className="form-section">
+              <div className="grpc-tabs">
+                <button
+                  type="button"
+                  className={`grpc-tab${tab === 'form' ? ' active' : ''}`}
+                  onClick={() => { setTab('form'); setError(null) }}
+                  disabled={busy}
+                >{editingMethod ? 'Edit method' : 'Add method'}</button>
+                <button
+                  type="button"
+                  className={`grpc-tab${tab === 'upload' ? ' active' : ''}`}
+                  onClick={() => { setTab('upload'); setError(null) }}
+                  disabled={busy}
+                >Upload .proto</button>
+              </div>
+
+              {tab === 'form' ? (
+                <>
+                  <label className="form-row">
+                    <span>Contract</span>
+                    <input value={form.contract} onChange={set('contract')} placeholder="ChunkTransfer" disabled={busy || !!editingMethod} />
+                  </label>
+                  <label className="form-row">
+                    <span>Method</span>
+                    <input value={form.method} onChange={set('method')} placeholder="GetChunk" disabled={busy || !!editingMethod} />
+                  </label>
+
+                  {['request', 'response'].map((key) => (
+                    <div className="form-section" key={key}>
+                      <div className="form-section-head">
+                        <span>{key} fields <em className="grpc-optional">(blank = empty message)</em></span>
+                        <button type="button" onClick={() => addRow(key)} disabled={busy}>+ field</button>
+                      </div>
+                      {form[key].map((r, i) => (
+                        <div className="field-row" key={i}>
+                          <input
+                            value={r.name}
+                            onChange={(e) => updateRow(key, i, { name: e.target.value })}
+                            placeholder="field_name"
+                            disabled={busy}
+                          />
+                          <select value={r.type} onChange={(e) => updateRow(key, i, { type: e.target.value })} disabled={busy}>
+                            {PROTO_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                          <button type="button" className="link-danger" onClick={() => removeRow(key, i)} disabled={busy}>×</button>
+                        </div>
+                      ))}
+                      {key === 'response' && (
+                        <label className="grpc-check">
+                          <input
+                            type="checkbox"
+                            checked={form.responseStreaming}
+                            onChange={(e) => setForm((f) => ({ ...f, responseStreaming: e.target.checked }))}
+                            disabled={busy}
+                          />
+                          <span>Streaming response (<code>returns (stream …)</code>)</span>
+                        </label>
+                      )}
                     </div>
                   ))}
-                  {key === 'response' && (
-                    <label className="grpc-check">
-                      <input
-                        type="checkbox"
-                        checked={form.responseStreaming}
-                        onChange={(e) => setForm((f) => ({ ...f, responseStreaming: e.target.checked }))}
-                        disabled={busy}
-                      />
-                      <span>Streaming response (<code>returns (stream …)</code>)</span>
-                    </label>
-                  )}
-                </div>
-              ))}
 
-              <label className="form-row">
-                <span>Describe</span>
-                <textarea
-                  className="desc-input"
-                  value={form.instruction}
-                  onChange={set('instruction')}
-                  placeholder="What should this method do? (drives the shared servicer implementation)"
-                  rows={3}
-                  disabled={busy}
-                />
-              </label>
-            </>
-          ) : (
-            <>
-              <p className="sim-desc">
-                Upload a complete proto3 <code>.proto</code> (one self-contained <code>service</code>).
-                It's validated with <code>protoc</code> before anything is created — if it doesn't
-                compile, the exact error is shown and nothing is registered.
-              </p>
-              <label className="form-row">
-                <span>.proto file</span>
-                <input type="file" accept=".proto,text/plain" onChange={onProtoFile} disabled={busy} />
-              </label>
-              <label className="form-row">
-                <span>Contents</span>
-                <textarea
-                  className="proto-input"
-                  value={proto}
-                  onChange={(e) => setProto(e.target.value)}
-                  placeholder={'syntax = "proto3";\n\nservice ChunkTransfer {\n  rpc GetChunk (ChunkRequest) returns (stream ChunkFrame);\n}\n\nmessage ChunkRequest { int32 chunk_id = 1; }'}
-                  rows={12}
-                  spellCheck={false}
-                  disabled={busy}
-                />
-              </label>
-              <label className="form-row">
-                <span>Describe</span>
-                <textarea
-                  className="desc-input"
-                  value={protoInstruction}
-                  onChange={(e) => setProtoInstruction(e.target.value)}
-                  placeholder="What should these methods do? (drives the shared servicer implementation)"
-                  rows={3}
-                  disabled={busy}
-                />
-              </label>
-            </>
-          )}
+                  <small className="form-hint">
+                    {editingExisting
+                      ? 'Edits to an existing contract are staged — review what they affect, then save them all together.'
+                      : 'A new contract is created immediately (the backend synthesizes the .proto and runs protoc). Describe each method’s behavior later, when a service attaches it as server.'}
+                  </small>
+                </>
+              ) : (
+                <>
+                  <p className="sim-desc">
+                    Upload a complete proto3 <code>.proto</code> (one self-contained <code>service</code>).
+                    It's validated with <code>protoc</code> before anything is created — if it doesn't
+                    compile, the exact error is shown and nothing is registered. Re-uploading an existing
+                    contract's service stages a replacement for review.
+                  </p>
+                  <label className="form-row">
+                    <span>.proto file</span>
+                    <input type="file" accept=".proto,text/plain" onChange={onProtoFile} disabled={busy} />
+                  </label>
+                  <label className="form-row">
+                    <span>Contents</span>
+                    <textarea
+                      className="proto-input"
+                      value={proto}
+                      onChange={(e) => setProto(e.target.value)}
+                      placeholder={'syntax = "proto3";\n\nservice ChunkTransfer {\n  rpc GetChunk (ChunkRequest) returns (stream ChunkFrame);\n}\n\nmessage ChunkRequest { int32 chunk_id = 1; }'}
+                      rows={12}
+                      spellCheck={false}
+                      disabled={busy}
+                    />
+                  </label>
+                </>
+              )}
 
-          {error && <p className="modal-error">{error}</p>}
+              {error && <p className="modal-error">{error}</p>}
 
-          <div className="modal-actions">
-            <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
-            {tab === 'form' ? (
-              <button type="button" className="primary" onClick={submit} disabled={busy}>
-                {busy ? 'Working…' : 'Author & open Claude'}
-              </button>
-            ) : (
-              <button type="button" className="primary" onClick={submitUpload} disabled={busy}>
-                {busy ? 'Validating…' : 'Upload & validate'}
-              </button>
+              <div className="modal-actions">
+                <button type="button" onClick={onClose} disabled={busy}>Close</button>
+                {tab === 'form' ? (
+                  <button type="button" className="primary" onClick={submitForm} disabled={busy}>
+                    {busy ? 'Working…' : editingExisting ? 'Stage method' : 'Create contract'}
+                  </button>
+                ) : (
+                  <button type="button" className="primary" onClick={submitUpload} disabled={busy}>
+                    {busy ? 'Validating…' : 'Upload & validate'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Review bar — appears once there are staged edits */}
+            {dirtyCount > 0 && (
+              <div className="form-section model-review-bar">
+                <button type="button" className="primary" onClick={() => { setError(null); setReview(true) }} disabled={busy}>
+                  Review &amp; save changes ({dirtyCount})
+                </button>
+              </div>
             )}
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </div>
   )

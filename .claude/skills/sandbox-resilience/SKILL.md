@@ -75,8 +75,8 @@ many clients retrying a recovered service synchronize and re-overwhelm it).
    - `open_behavior` is `fail_fast` (raise/return an error while OPEN) or `fallback` (return
      `fallback_response` while OPEN).
 2. `systems/<id>/resilience/` — the **single shared wrapper** package (the breaker/retry engine),
-   imported by every wired service. Same anti-drift rule as the gRPC shared servicer
-   ([[sandbox-grpc-contract]]): one implementation for the whole system; per-service differences
+   imported by every wired service. Same anti-drift rule as a gRPC contract's single servicer
+   ([[sandbox-grpc-attach]]): one implementation for the whole system; per-service differences
    come only from the per-connection policy in the manifest, never from divergent code.
 3. `systems/<id>/<service>/` — the service's `app.py` / `Dockerfile` / `requirements.txt`, wired to
    route its outbound call through the wrapper.

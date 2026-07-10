@@ -159,6 +159,17 @@ Expect a `Content-Type: text/event-stream` response header and `data:` frames ar
 them). curl exiting 28 (the `-m` deadline) is expected. The route still appears in
 `/<service>/openapi.json`.
 
+### Calling a gRPC contract downstream
+
+If the endpoint's behavior calls a gRPC contract (a method another service serves), wire
+this service as a **client** per the client-wiring section of [[sandbox-grpc-attach]]: add
+`{ "contract": "<C>", "targets": ["<owning service id>"] }` to this node's manifest
+`grpc.clients` (the owner is the one node whose `grpc.servers` lists the contract — that's
+what draws the purple gRPC edge), add the `./grpc:/app/grpc_pkg:ro` + manifest mounts and
+`SERVICE_ID` env if missing, and build the stub from the mounted manifest at startup. Also
+include the serving node in this endpoint's `downstream` (and `downstreamDescriptions`).
+Prune the `clients` entry if a later edit removes the call.
+
 ### Editing an existing endpoint
 
 When the task is to **update** a route that already exists (the modal's Edit flow), the
