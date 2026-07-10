@@ -56,9 +56,25 @@
           "responseType": "UpdateWorkersReply",
           "requestStreaming": false,
           "responseStreaming": false
+        },
+        {
+          "name": "OnChatEvict",
+          "request": {
+            "chat_id": "int32"
+          },
+          "response": {
+            "ok": "bool"
+          },
+          "requestType": "OnChatEvictRequest",
+          "responseType": "OnChatEvictReply",
+          "requestStreaming": false,
+          "responseStreaming": false,
+          "formAuthored": true,
+          "description": "remove the chat_id from the local chat_id to worker map",
+          "conversationId": "67b8cb91-ab1e-4fbf-ac78-1aaa34bcb79f"
         }
       ],
-      "conversationId": "be8c1b65-46f1-4a38-8634-4752f0412ebb",
+      "conversationId": "67b8cb91-ab1e-4fbf-ac78-1aaa34bcb79f",
       "createdAt": "2026-07-09T20:04:47.343Z"
     }
   }

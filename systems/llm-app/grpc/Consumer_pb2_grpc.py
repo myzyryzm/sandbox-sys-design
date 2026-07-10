@@ -26,10 +26,7 @@ if _version_not_supported:
 
 
 class ConsumerStub(object):
-    """The consumer side of the worker<->consumer link. UpdateWorkers hands the
-    consumer the full, current set of workers it should connect to (each a
-    host:port), replacing whatever local worker list it held before.
-    """
+    """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
         """Constructor.
@@ -42,15 +39,23 @@ class ConsumerStub(object):
                 request_serializer=Consumer__pb2.UpdateWorkersRequest.SerializeToString,
                 response_deserializer=Consumer__pb2.UpdateWorkersReply.FromString,
                 _registered_method=True)
+        self.OnChatEvict = channel.unary_unary(
+                '/llmconsumer.Consumer/OnChatEvict',
+                request_serializer=Consumer__pb2.OnChatEvictRequest.SerializeToString,
+                response_deserializer=Consumer__pb2.OnChatEvictReply.FromString,
+                _registered_method=True)
 
 
 class ConsumerServicer(object):
-    """The consumer side of the worker<->consumer link. UpdateWorkers hands the
-    consumer the full, current set of workers it should connect to (each a
-    host:port), replacing whatever local worker list it held before.
-    """
+    """Missing associated documentation comment in .proto file."""
 
     def UpdateWorkers(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def OnChatEvict(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -64,6 +69,11 @@ def add_ConsumerServicer_to_server(servicer, server):
                     request_deserializer=Consumer__pb2.UpdateWorkersRequest.FromString,
                     response_serializer=Consumer__pb2.UpdateWorkersReply.SerializeToString,
             ),
+            'OnChatEvict': grpc.unary_unary_rpc_method_handler(
+                    servicer.OnChatEvict,
+                    request_deserializer=Consumer__pb2.OnChatEvictRequest.FromString,
+                    response_serializer=Consumer__pb2.OnChatEvictReply.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'llmconsumer.Consumer', rpc_method_handlers)
@@ -73,10 +83,7 @@ def add_ConsumerServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class Consumer(object):
-    """The consumer side of the worker<->consumer link. UpdateWorkers hands the
-    consumer the full, current set of workers it should connect to (each a
-    host:port), replacing whatever local worker list it held before.
-    """
+    """Missing associated documentation comment in .proto file."""
 
     @staticmethod
     def UpdateWorkers(request,
@@ -95,6 +102,33 @@ class Consumer(object):
             '/llmconsumer.Consumer/UpdateWorkers',
             Consumer__pb2.UpdateWorkersRequest.SerializeToString,
             Consumer__pb2.UpdateWorkersReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def OnChatEvict(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/llmconsumer.Consumer/OnChatEvict',
+            Consumer__pb2.OnChatEvictRequest.SerializeToString,
+            Consumer__pb2.OnChatEvictReply.FromString,
             options,
             channel_credentials,
             insecure,

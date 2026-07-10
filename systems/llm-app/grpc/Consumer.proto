@@ -2,20 +2,11 @@ syntax = "proto3";
 
 package llmconsumer;
 
-// The consumer side of the worker<->consumer link. UpdateWorkers hands the
-// consumer the full, current set of workers it should connect to (each a
-// host:port), replacing whatever local worker list it held before.
 service Consumer {
   rpc UpdateWorkers (UpdateWorkersRequest) returns (UpdateWorkersReply);
+  rpc OnChatEvict (OnChatEvictRequest) returns (OnChatEvictReply);
 }
 
-// One worker the consumer can reach — the address it dials to send work.
-message WorkerEndpoint {
-  string host = 1;   // worker host
-  int32 port = 2;    // worker gRPC port
-}
-
-// Replace the consumer's local workers list with this new set.
 message UpdateWorkersRequest {
   repeated WorkerEndpoint workers = 1;
 }
@@ -23,4 +14,17 @@ message UpdateWorkersRequest {
 message UpdateWorkersReply {
   bool ok = 1;       // true once the local workers list was updated
   int32 count = 2;   // number of workers now registered
+}
+
+message OnChatEvictRequest {
+  int32 chat_id = 1;
+}
+
+message OnChatEvictReply {
+  bool ok = 1;
+}
+
+message WorkerEndpoint {
+  string host = 1;   // worker host
+  int32 port = 2;    // worker gRPC port
 }

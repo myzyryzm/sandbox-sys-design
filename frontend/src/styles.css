@@ -2268,8 +2268,21 @@ h1 {
 }
 
 .grpc-method {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   margin: 2px 0;
+}
+
+/* One served/attachable method + its description editor, grouped visually. */
+.grpc-method-block {
+  margin: 6px 0 10px;
+}
+
+.grpc-method-block .desc-input {
+  width: 100%;
+  margin-top: 4px;
 }
 
 .grpc-sig {

@@ -1,3 +1,0 @@
-service Scheduler {
-  rpc RemoveConversation(RemoveConversationRequest) returns (RemoveConversationReply);
-}

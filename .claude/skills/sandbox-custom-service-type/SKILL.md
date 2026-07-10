@@ -74,9 +74,12 @@ If the type ships fixed gRPC contracts, install them with
 bindings, and upserts `_registry.json` in the SAME shape as a modal-authored contract (so the
 gRPC modal lists/views/edits it identically). Pin `grpcio-tools` to match the runtime
 `grpcio`/`protobuf` versions in your service image. Wire roles by writing the node's manifest
-`grpc` block (`{ servers, clients:[{contract,targets}], overrides }`) — see
-[[sandbox-grpc-attach]]. (Templated, deterministic app code may wire the servicer/stub directly
-instead of launching a Claude session; the bank is still the single source of truth.)
+`grpc` block (`{ servers, clients:[{contract,targets}] }`) — see [[sandbox-grpc-attach]].
+(Templated, deterministic app code may wire the servicer/stub directly instead of launching a
+Claude session; the bank is still the single source of truth.) Custom types are the ONE
+exemption from the bank's one-server-per-contract rule: they may write multi-server blocks
+(e.g. every download-coordinator node serves ChunkTransfer), which the generic attach UI
+then treats as owned (hidden from its picker).
 
 ## Frontend rendering — `frontend/src/customTypes/<type>/index.jsx`
 

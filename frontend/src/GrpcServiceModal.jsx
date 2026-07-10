@@ -1,55 +1,35 @@
 import { useCallback, useEffect, useState } from 'react'
+import {
+  buildGrpcAttachPrompt,
+  buildGrpcDescriptionsPrompt,
+  buildGrpcDetachPrompt,
+  joinDescription,
+  methodSig,
+} from './grpcBank.js'
 
 /**
- * Per-service gRPC overview + attach (Part B). Shows what contracts a service
- * serves, which it consumes (and to which targets), and any overrides. Lets the
- * user:
- *  - Attach a contract as server and/or client (optionally with an override
- *    implementation): POST /api/grpc-attach writes the manifest grpc block (so the
- *    diagram draws edges immediately), then launches a Claude session to wire the
- *    code (sandbox-grpc-attach skill).
- *  - Re-point a client's targets: a manifest-only write (no regen) — the running
- *    service reads its targets from the mounted manifest, so a restart applies it.
+ * Per-service gRPC tab (Part B) — SERVER-only, endpoint-style.
+ *
+ * A contract is served by exactly ONE owning service. This tab:
+ *  - Attach: pick an unowned contract, describe each method's behavior, then
+ *    POST /api/grpc-attach (manifest grpc.servers + registry descriptions) and
+ *    launch a session that authors the servicer + wiring (sandbox-grpc-attach).
+ *  - Describe: append to a served method's description (endpoint-style
+ *    accumulation) and launch a session that edits that method body in place.
+ *  - Detach: POST /api/grpc-detach (409 while other services still dial this
+ *    one) and launch the unwire session.
+ *
+ * Client wiring is NOT edited here: a service becomes a caller through the
+ * flows that make it call the contract (endpoints, consumers, custom types),
+ * which write the manifest `grpc.clients` block themselves. The Calls list
+ * below is read-only visibility of that block.
  */
-
-function blankAttach() {
-  return { contract: '', asServer: false, asClient: false, targets: [], override: '' }
-}
-
-function buildAttachPrompt({ systemId, service, contract, asServer, asClient, targets, override }) {
-  const roles = [asServer && 'server', asClient && 'client'].filter(Boolean).join(' + ') || 'none'
-  const lines = [
-    `Use the sandbox-grpc-attach skill to attach the gRPC contract "${contract}" to service "${service}" in the "${systemId}" system.`,
-    ``,
-    `Roles: ${roles}`,
-  ]
-  if (asServer) {
-    lines.push(
-      override.trim()
-        ? `Server: use a SERVICE-SPECIFIC override servicer (the user supplied override text) at systems/${systemId}/${service}/grpc/${contract}_servicer_override.py — do NOT change the shared servicer.`
-        : `Server: import the system's shared servicer systems/${systemId}/grpc/${contract}_servicer.py (do not regenerate it) and register it on ${service}'s gRPC server.`,
-    )
-  }
-  if (asClient) {
-    lines.push(`Client targets (read from the manifest grpc block, editable later): ${targets.length ? targets.join(', ') : '(none yet)'}`)
-  }
-  if (override.trim()) {
-    lines.push(``, `Override implementation request:`, override.trim())
-  }
-  lines.push(
-    ``,
-    `The manifest grpc block for ${service} has already been written; wire app.py / Dockerfile /`,
-    `requirements (gRPC server on port 50051 in the FastAPI lifespan; client stubs from the manifest`,
-    `targets), then rebuild just this service.`,
-  )
-  return lines.join('\n')
-}
-
 export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, embedded = false, onBusyChange }) {
   const service = node.id
-  const [data, setData] = useState(null) // { grpc, contracts, services } | null
-  const [attach, setAttach] = useState(blankAttach)
-  const [editTargets, setEditTargets] = useState(null) // { contract, targets } being edited
+  const [data, setData] = useState(null) // { grpc, contracts } | null
+  const [attachName, setAttachName] = useState('')
+  const [attachDescs, setAttachDescs] = useState({}) // method -> description (attach form)
+  const [descEdits, setDescEdits] = useState({}) // `${contract}|${method}` -> new chunk
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
 
@@ -58,222 +38,248 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
   const load = useCallback(() => {
     return fetch(`/api/grpc-service?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(service)}`)
       .then((r) => r.json())
-      .then((d) => setData(d.ok ? d : { grpc: { servers: [], clients: [], overrides: [] }, contracts: [], services: [] }))
-      .catch(() => setData({ grpc: { servers: [], clients: [], overrides: [] }, contracts: [], services: [] }))
+      .then((d) => setData(d.ok ? d : { grpc: { servers: [], clients: [], overrides: [] }, contracts: [] }))
+      .catch(() => setData({ grpc: { servers: [], clients: [], overrides: [] }, contracts: [] }))
   }, [systemId, service])
 
   useEffect(() => {
     load()
   }, [load])
 
-  // POST the attach state. `launch` true => also open a Claude session to wire code
-  // (role/override change); false => manifest-only (a targets re-point, no regen).
-  async function post({ contract, asServer, asClient, targets, override }, launch) {
+  const g = data?.grpc || { servers: [], clients: [], overrides: [] }
+  const contracts = data?.contracts || []
+  const byName = new Map(contracts.map((c) => [c.name, c]))
+  const served = (g.servers || []).map((name) => byName.get(name)).filter(Boolean)
+  // Attachable = unowned by anyone (custom multi-server contracts stay hidden).
+  const attachable = contracts.filter((c) => !c.servers.length)
+  const attaching = byName.get(attachName)
+
+  async function postJson(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
+    return d
+  }
+
+  // Attach as the contract's single owning server, then launch the session that
+  // authors the servicer from the method descriptions and wires this service.
+  async function submitAttach() {
     setError(null)
+    if (!attaching) return setError('Pick a contract')
+    const conversationId = crypto.randomUUID()
+    const descriptions = {}
+    for (const m of attaching.methods) {
+      const text = (attachDescs[m.name] || '').trim()
+      if (text) descriptions[m.name] = text
+    }
     setBusy(true)
     try {
-      const res = await fetch('/api/grpc-attach', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          system: systemId, service, contract,
-          asServer, asClient, targets, override: !!override.trim(),
+      await postJson('/api/grpc-attach', { system: systemId, service, contract: attaching.name, descriptions, conversationId })
+      onLaunch({
+        sessionId: conversationId,
+        mode: 'new',
+        prompt: buildGrpcAttachPrompt({
+          systemId,
+          service,
+          contract: attaching.name,
+          methods: attaching.methods.map((m) => ({ ...m, description: descriptions[m.name] || '' })),
         }),
-      })
-      const d = await res.json().catch(() => ({}))
-      if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
-      if (launch) {
-        onLaunch({
-          sessionId: crypto.randomUUID(),
-          mode: 'new',
-          prompt: buildAttachPrompt({ systemId, service, contract, asServer, asClient, targets, override }),
-        }, { kind: 'grpc', target: service, title: `attach ${contract}` })
-        onClose()
-        return
-      }
-      setEditTargets(null)
-      await load()
-      setBusy(false)
+      }, { kind: 'grpc', target: service, title: `attach ${attaching.name}` })
+      onClose()
     } catch (err) {
       setError(err.message)
       setBusy(false)
     }
   }
 
-  function submitAttach() {
-    if (!attach.contract) return setError('Pick a contract')
-    if (!attach.asServer && !attach.asClient) return setError('Choose server and/or client')
-    post(attach, true)
+  // Persist appended descriptions for one served contract's edited methods,
+  // then launch ONE session that edits those method bodies in place.
+  async function saveDescriptions(c) {
+    setError(null)
+    const edited = c.methods
+      .map((m) => ({ m, change: (descEdits[`${c.name}|${m.name}`] || '').trim() }))
+      .filter((e) => e.change)
+    if (!edited.length) return
+    const conversationId = crypto.randomUUID()
+    setBusy(true)
+    try {
+      for (const { m, change } of edited) {
+        await postJson('/api/grpc-descriptions', {
+          system: systemId,
+          contract: c.name,
+          method: m.name,
+          description: joinDescription(m.description, change),
+          conversationId,
+        })
+      }
+      onLaunch({
+        sessionId: conversationId,
+        mode: 'new',
+        prompt: buildGrpcDescriptionsPrompt({
+          systemId,
+          service,
+          contract: c.name,
+          methods: edited.map(({ m, change }) => ({ ...m, priorDescription: m.description, change })),
+        }),
+      }, { kind: 'grpc', target: service, title: `describe ${c.name}` })
+      onClose()
+    } catch (err) {
+      setError(err.message)
+      setBusy(false)
+    }
   }
 
-  // Re-point a client's targets without code regen (manifest-only).
-  function saveTargets() {
-    const g = data.grpc
-    post(
-      {
-        contract: editTargets.contract,
-        asServer: (g.servers || []).includes(editTargets.contract),
-        asClient: true,
-        targets: editTargets.targets,
-        override: (g.overrides || []).includes(editTargets.contract) ? 'keep' : '',
-      },
-      false,
-    )
+  // Detach (guarded server-side while other services still dial this one),
+  // then launch the unwire session.
+  async function detach(contract) {
+    setError(null)
+    setBusy(true)
+    try {
+      await postJson('/api/grpc-detach', { system: systemId, service, contract })
+      onLaunch({
+        sessionId: crypto.randomUUID(),
+        mode: 'new',
+        prompt: buildGrpcDetachPrompt({ systemId, service, contract }),
+      }, { kind: 'grpc', target: service, title: `detach ${contract}` })
+      onClose()
+    } catch (err) {
+      setError(err.message)
+      setBusy(false)
+    }
   }
-
-  function detach(contract) {
-    post({ contract, asServer: false, asClient: false, targets: [], override: '' }, false)
-  }
-
-  const toggleTarget = (list, t) =>
-    list.includes(t) ? list.filter((x) => x !== t) : [...list, t]
-
-  const g = data?.grpc || { servers: [], clients: [], overrides: [] }
 
   const body = (
     <>
       {data === null ? (
-          <p className="sim-desc">Loading…</p>
-        ) : (
-          <>
-            {/* Serves */}
-            <div className="form-section">
-              <div className="form-section-head"><span>Serves</span></div>
-              {g.servers.length === 0 ? (
-                <p className="sim-desc">none</p>
-              ) : (
-                <ul className="grpc-attach-list">
-                  {g.servers.map((c) => (
-                    <li key={c}>
-                      <code>{c}</code>
-                      {g.overrides.includes(c) && <span className="grpc-override-tag">override</span>}
-                      <button className="link-danger" disabled={busy} onClick={() => detach(c)}>detach</button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            {/* Calls (clients + editable targets) */}
-            <div className="form-section">
-              <div className="form-section-head"><span>Calls</span></div>
-              {g.clients.length === 0 ? (
-                <p className="sim-desc">none</p>
-              ) : (
-                <ul className="grpc-attach-list">
-                  {g.clients.map((c) => (
-                    <li key={c.contract} className="grpc-client-row">
-                      <code>{c.contract}</code>
-                      {editTargets?.contract === c.contract ? (
-                        <span className="grpc-target-editor">
-                          {data.services.map((s) => (
-                            <label key={s} className="grpc-check">
-                              <input
-                                type="checkbox"
-                                checked={editTargets.targets.includes(s)}
-                                onChange={() => setEditTargets((e) => ({ ...e, targets: toggleTarget(e.targets, s) }))}
-                                disabled={busy}
-                              />
-                              <span>{s}</span>
-                            </label>
-                          ))}
-                          <button className="link" disabled={busy} onClick={saveTargets}>save</button>
-                          <button className="link" disabled={busy} onClick={() => setEditTargets(null)}>cancel</button>
-                        </span>
-                      ) : (
-                        <>
-                          <span className="grpc-targets">→ {c.targets.length ? c.targets.join(', ') : '(no targets)'}</span>
-                          <button className="link" disabled={busy} onClick={() => setEditTargets({ contract: c.contract, targets: c.targets })}>edit targets</button>
-                          <button className="link-danger" disabled={busy} onClick={() => detach(c.contract)}>detach</button>
-                        </>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            {/* Attach a contract */}
-            <div className="form-section">
-              <div className="form-section-head"><span>Attach contract</span></div>
-              {data.contracts.length === 0 ? (
-                <p className="sim-desc">No contracts defined yet — author one with “＋ gRPC contract”.</p>
-              ) : (
-                <>
-                  <label className="form-row">
-                    <span>Contract</span>
-                    <select
-                      value={attach.contract}
-                      onChange={(e) => setAttach((a) => ({ ...a, contract: e.target.value }))}
-                      disabled={busy}
-                    >
-                      <option value="">— pick —</option>
-                      {data.contracts.map((c) => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </label>
-
-                  <label className="grpc-check">
-                    <input
-                      type="checkbox"
-                      checked={attach.asServer}
-                      onChange={(e) => setAttach((a) => ({ ...a, asServer: e.target.checked }))}
-                      disabled={busy}
-                    />
-                    <span>Act as server</span>
-                  </label>
-                  <label className="grpc-check">
-                    <input
-                      type="checkbox"
-                      checked={attach.asClient}
-                      onChange={(e) => setAttach((a) => ({ ...a, asClient: e.target.checked }))}
-                      disabled={busy}
-                    />
-                    <span>Act as client</span>
-                  </label>
-
-                  {attach.asClient && (
-                    <div className="form-row">
-                      <span>Targets</span>
-                      <div className="grpc-target-editor">
-                        {data.services.length === 0 ? (
-                          <em className="grpc-optional">no other services to target</em>
-                        ) : data.services.map((s) => (
-                          <label key={s} className="grpc-check">
-                            <input
-                              type="checkbox"
-                              checked={attach.targets.includes(s)}
-                              onChange={() => setAttach((a) => ({ ...a, targets: toggleTarget(a.targets, s) }))}
+        <p className="sim-desc">Loading…</p>
+      ) : (
+        <>
+          {/* Serves — the contracts this service owns, with per-method behavior */}
+          <div className="form-section">
+            <div className="form-section-head"><span>Serves</span></div>
+            {served.length === 0 ? (
+              <p className="sim-desc">none — attach a contract below to serve it.</p>
+            ) : (
+              served.map((c) => {
+                const dirty = c.methods.some((m) => (descEdits[`${c.name}|${m.name}`] || '').trim())
+                return (
+                  <div key={c.name} className="grpc-contract">
+                    <div className="grpc-contract-head">
+                      <code>{c.name}</code>
+                      <span className="grpc-contract-meta">{c.methods.length} method{c.methods.length === 1 ? '' : 's'}</span>
+                      <button className="link-danger" disabled={busy} onClick={() => detach(c.name)}>detach</button>
+                    </div>
+                    <div className="grpc-contract-body">
+                      {c.methods.map((m) => {
+                        const key = `${c.name}|${m.name}`
+                        return (
+                          <div key={m.name} className="grpc-method-block">
+                            <div className="grpc-method">
+                              <code>{m.name}</code>
+                              <span className="grpc-sig">{methodSig(m)}</span>
+                            </div>
+                            {m.description && <p className="grpc-instruction"><span className="grpc-label">does</span> {m.description}</p>}
+                            <textarea
+                              className="desc-input"
+                              value={descEdits[key] || ''}
+                              onChange={(e) => setDescEdits((d) => ({ ...d, [key]: e.target.value }))}
+                              placeholder={m.description ? 'Describe a change to this method’s behavior…' : 'Describe what this method should do…'}
+                              rows={2}
                               disabled={busy}
                             />
-                            <span>{s}</span>
-                          </label>
-                        ))}
-                      </div>
+                          </div>
+                        )
+                      })}
+                      {dirty && (
+                        <div className="modal-actions">
+                          <button type="button" className="primary" disabled={busy} onClick={() => saveDescriptions(c)}>
+                            {busy ? 'Working…' : 'Save & update methods'}
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  )}
-
-                  {attach.asServer && (
-                    <label className="form-row">
-                      <span>Override</span>
-                      <textarea
-                        className="desc-input"
-                        value={attach.override}
-                        onChange={(e) => setAttach((a) => ({ ...a, override: e.target.value }))}
-                        placeholder="Optional — describe a service-specific servicer that diverges from the shared one. Leave blank to import the shared servicer."
-                        rows={2}
-                        disabled={busy}
-                      />
-                    </label>
-                  )}
-
-                  <div className="modal-actions">
-                    <button type="button" className="primary" onClick={submitAttach} disabled={busy}>
-                      {busy ? 'Working…' : 'Attach & open Claude'}
-                    </button>
                   </div>
-                </>
-              )}
+                )
+              })
+            )}
+          </div>
+
+          {/* Calls — read-only: client wiring is written by the flows that call */}
+          {(g.clients || []).length > 0 && (
+            <div className="form-section">
+              <div className="form-section-head"><span>Calls</span></div>
+              <ul className="grpc-attach-list">
+                {g.clients.map((c) => (
+                  <li key={c.contract}>
+                    <code>{c.contract}</code>
+                    <span className="grpc-targets">→ {c.targets?.length ? c.targets.join(', ') : '(no targets)'}</span>
+                  </li>
+                ))}
+              </ul>
+              <small className="form-hint">
+                Wired by the flows that make this service call the contract (endpoints, consumer
+                functions, custom types) — not editable here.
+              </small>
             </div>
+          )}
+
+          {/* Attach a contract as this service's SERVER */}
+          <div className="form-section">
+            <div className="form-section-head"><span>Attach contract (as server)</span></div>
+            {contracts.length === 0 ? (
+              <p className="sim-desc">No contracts defined yet — author one with “＋ gRPC contract”.</p>
+            ) : attachable.length === 0 ? (
+              <p className="sim-desc">Every contract already has an owning server (one server per contract — detach it there first).</p>
+            ) : (
+              <>
+                <label className="form-row">
+                  <span>Contract</span>
+                  <select
+                    value={attachName}
+                    onChange={(e) => { setAttachName(e.target.value); setAttachDescs({}) }}
+                    disabled={busy}
+                  >
+                    <option value="">— pick —</option>
+                    {attachable.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+                  </select>
+                </label>
+
+                {attaching && (
+                  <>
+                    <small className="form-hint">
+                      {service} becomes this contract’s single owning server. Describe each method —
+                      the descriptions drive the servicer implementation (blank = UNIMPLEMENTED stub).
+                    </small>
+                    {attaching.methods.map((m) => (
+                      <div key={m.name} className="grpc-method-block">
+                        <div className="grpc-method">
+                          <code>{m.name}</code>
+                          <span className="grpc-sig">{methodSig(m)}</span>
+                        </div>
+                        <textarea
+                          className="desc-input"
+                          value={attachDescs[m.name] || ''}
+                          onChange={(e) => setAttachDescs((d) => ({ ...d, [m.name]: e.target.value }))}
+                          placeholder="What should this method do?"
+                          rows={2}
+                          disabled={busy}
+                        />
+                      </div>
+                    ))}
+                    <div className="modal-actions">
+                      <button type="button" className="primary" onClick={submitAttach} disabled={busy}>
+                        {busy ? 'Working…' : 'Attach & open Claude'}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+          </div>
 
           {error && <p className="modal-error">{error}</p>}
         </>
