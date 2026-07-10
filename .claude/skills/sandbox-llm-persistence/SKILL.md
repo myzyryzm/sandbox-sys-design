@@ -127,6 +127,10 @@ CONFLICT) — a reader crash after persist but before XACK redelivers the run.
   return at least `{ "group": <READER_GROUP>, "consumer": <SERVICE_ID> }` plus live
   counters (active/persisted); the Readers tab and the aggregate state route
   (`GET /api/custom/persistence-reader/state?system=<id>`) poll it through the lb.
+- The diagram shows the group's claim loop as a clickable **`PULL <fn>`** row (fn
+  from the manifest node's `persistence` block, default `readLlmStream`); clicking
+  it traces reader → stream redis (labeled with the announce stream) and reader →
+  target db. Rendering is automatic — nothing for a session to wire.
 
 ## Scaling
 

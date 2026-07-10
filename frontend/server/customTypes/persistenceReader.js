@@ -34,6 +34,7 @@ const SERVICE_FILES = ['app.py', 'requirements.txt', 'Dockerfile']
 
 const MAX_MEMBERS = 8 // total members in a group (base + instances)
 const ANNOUNCE_STREAM = 'runs:started' // where accepted AddPrompts announce runs
+const READER_FN = 'readLlmStream' // the claim loop's name — the node's clickable PULL row
 const LB = 'http://localhost:8080' // the system's load balancer (compose maps 8080:80)
 const SKIP_REBUILD = () => process.env.CREATE_SVC_SKIP_REBUILD === '1'
 const DB_TYPES = new Set(['postgres', 'mongodb']) // structured persist targets
@@ -168,6 +169,7 @@ async function onAdd({ system, name, manifest, options }) {
     stream,
     announce: ANNOUNCE_STREAM,
     group: name,
+    fn: READER_FN,
     db: freeform ? null : db,
     table: freeform ? '' : table,
     field: freeform ? '' : field,
@@ -200,6 +202,7 @@ async function onAdd({ system, name, manifest, options }) {
       stream,
       announce: ANNOUNCE_STREAM,
       group: name,
+      fn: READER_FN,
       db: freeform ? null : db,
       table: freeform ? '' : table,
       field: freeform ? '' : field,

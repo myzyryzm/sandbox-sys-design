@@ -6,6 +6,7 @@
       "stream": "llm-worker-stream",
       "announce": "runs:started",
       "group": "db-writers",
+      "fn": "readLlmStream",
       "db": "chat-db",
       "table": "message",
       "field": "content",

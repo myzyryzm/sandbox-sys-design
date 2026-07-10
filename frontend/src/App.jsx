@@ -685,6 +685,26 @@ export default function App() {
     if (n.type !== 'service') continue
     consumerFunctions[n.id] = consumers.filter((c) => c.service === n.id)
   }
+  // Persistence reader groups render the same PULL row — pulling announced runs from
+  // their stream redis instead of a Kafka topic. The consumerTrace shape is
+  // transport-agnostic (cluster = the stream node, topic = the announce stream), so
+  // the row is synthesized straight from the node's manifest persistence block.
+  for (const n of manifest.nodes || []) {
+    const p = n.persistence
+    if (n.service_type !== 'persistence_reader' || n.instanceOf || !p) continue
+    consumerFunctions[n.id] = [
+      ...(consumerFunctions[n.id] || []),
+      {
+        name: p.fn || 'readLlmStream',
+        cluster: p.stream,
+        topic: p.announce,
+        downstream: p.db ? [p.db] : [],
+        downstreamDescriptions: p.db
+          ? { [p.db]: `persists each finished run's output to ${p.table}.${p.field}` }
+          : {},
+      },
+    ]
+  }
 
   return (
     <div className="app">

@@ -238,7 +238,7 @@ export default function ServiceSubscribersTab({ systemId, node, manifest, onClos
               return (
                 <li key={identity} className="endpoint-list-row"
                   style={editKey === identity ? { flexWrap: 'wrap' } : undefined}>
-                  <span className="endpoint-list-method">SUB</span>
+                  <span className="endpoint-list-method endpoint-list-method-etcd">SUB</span>
                   <code className="endpoint-alias">{onName(identity)}</code>
                   <span className="endpoint-list-path" title={ks.type === 'config' ? 'config keyspace' : 'discovery keyspace'}>
                     {ks.prefix}

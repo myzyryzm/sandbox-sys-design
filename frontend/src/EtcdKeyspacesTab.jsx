@@ -467,7 +467,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
                       const dirty = draft !== undefined && draft !== v.value
                       return (
                         <div className="entity-row" key={v.key}>
-                          <span className="endpoint-list-method">KEY</span>
+                          <span className="endpoint-list-method endpoint-list-method-etcd">KEY</span>
                           <code className="endpoint-alias">{v.key}</code>
                           <input
                             value={draft ?? v.value}
@@ -520,7 +520,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
                 <ul className="endpoint-list">
                   {ks.workers.map((w) => (
                     <li key={w.id} className="endpoint-list-row">
-                      <span className="endpoint-list-method">KEY</span>
+                      <span className="endpoint-list-method endpoint-list-method-etcd">KEY</span>
                       <code className="endpoint-alias">{w.id}</code>
                       <span className="endpoint-list-path">→ {w.value}</span>
                     </li>
@@ -534,7 +534,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
                   const lnKey = `ln:${identity}:${l.service}`
                   return (
                     <li key={l.service} className="endpoint-list-row">
-                      <span className="endpoint-list-method">WATCH</span>
+                      <span className="endpoint-list-method endpoint-list-method-watch">WATCH</span>
                       <code className="endpoint-alias">{l.service}</code>
                       {!l.implemented && (
                         <span className="scenario-pending" title="Watch loop not implemented yet — resume the Claude session">pending</span>

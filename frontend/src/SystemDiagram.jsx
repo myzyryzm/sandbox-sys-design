@@ -2199,7 +2199,7 @@ export default function SystemDiagram({
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
-                      <tspan className="endpoint-method">ƒ</tspan> {fn.name}
+                      <tspan className="endpoint-method endpoint-method-fn">ƒ</tspan> {fn.name}
                     </text>
                   </g>
                 )
@@ -2279,7 +2279,7 @@ export default function SystemDiagram({
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
-                      <tspan className="endpoint-method">KEY</tspan> {camelName(ident)}
+                      <tspan className="endpoint-method endpoint-method-etcd">KEY</tspan> {camelName(ident)}
                     </text>
                   </g>
                 )
@@ -2314,7 +2314,7 @@ export default function SystemDiagram({
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
-                      <tspan className="endpoint-method">SUB</tspan> {onName(ident)}
+                      <tspan className="endpoint-method endpoint-method-etcd">SUB</tspan> {onName(ident)}
                     </text>
                   </g>
                 )
@@ -2506,7 +2506,7 @@ export default function SystemDiagram({
             return (
               <g key={name}>
                 <text x={PAD} y={y + 12} className="endpoint-row">
-                  <tspan className="endpoint-method">ƒ</tspan> {name}
+                  <tspan className="endpoint-method endpoint-method-fn">ƒ</tspan> {name}
                 </text>
                 {pending && (
                   <text x={pl.w - PAD} y={y + 12} className="ws-shared-pending">
