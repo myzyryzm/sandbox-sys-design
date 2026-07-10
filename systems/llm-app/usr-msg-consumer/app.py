@@ -172,6 +172,18 @@ async def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.get("/workers")
+async def workers():
+    """The live worker set pushed by the coordinator's rebalance via
+    Consumer.UpdateWorkers — lets a human/end-to-end test see the assignment land."""
+    ws = worker_registry.workers()
+    return {
+        "id": os.environ.get("SERVICE_ID", "usr-msg-consumer"),
+        "count": len(ws),
+        "workers": [f"{h}:{p}" for h, p in ws],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Kafka consumer function "processUserMessage" (sandbox-event-stream skill)
 #

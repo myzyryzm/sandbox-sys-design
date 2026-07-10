@@ -65,6 +65,11 @@ services:
   chat-service:
     # Service "chat-service" — added by Add service (generic FastAPI backend)
     build: ./chat-service
+    environment:
+      # Redis token stream filled by llm-worker; POST /messages block-reads it.
+      # Entries are typed ({type: token|done|error, text}); completion keys off
+      # type=="done", so no marker-string env is needed here.
+      REDIS_HOST: llm-worker-stream
   user-messages-stream:
     # Kafka "user-messages-stream" — added by Add event stream
     image: apache/kafka:3.8.0
@@ -236,3 +241,15 @@ services:
     build: ./coordinator
     environment:
       ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
+  db-writers:
+    # Persistence readers "db-writers" — consume runs:started on "llm-worker-stream", persist finished runs
+    build: ./db-writers
+    environment:
+      SERVICE_ID: db-writers
+      REDIS_HOST: llm-worker-stream
+      ANNOUNCE_STREAM: runs:started
+      READER_GROUP: db-writers
+      DB_NODE: chat-db
+    depends_on:
+      - llm-worker-stream
+      - chat-db

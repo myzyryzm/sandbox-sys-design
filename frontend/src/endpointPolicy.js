@@ -47,6 +47,11 @@ export function endpointPolicy(endpoint, ownerNode) {
   // not the endpoint surfaces, so they're hidden everywhere — diagram rows and the load
   // balancer included.
   if (p.startsWith('/discovery/') || p.startsWith('/config/')) return { visibility: 'hidden', locked: true }
+  // The coordinator's `/assignments` is a read-only introspection view of its last-pushed
+  // llm-worker -> usr-msg-consumer rebalance map — control-plane plumbing, not part of any
+  // service's client surface — so hide it everywhere (diagram rows + the load balancer), the
+  // same as the discovery/config views above.
+  if (p === '/assignments') return { visibility: 'hidden', locked: true }
   if (genericInternal(p)) return { visibility: 'internal', locked: true }
   // User-marked internal: a normally-public route the user has taken off the load
   // balancer's surface. Unlike the built-in operational routes above it stays editable

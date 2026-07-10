@@ -10,13 +10,16 @@ Endpoints:
   GET /metrics  -> Prometheus exposition format (the three metrics defined below)
 """
 
+import asyncio
+import json
 import os
 import threading
 import time
 
 import psycopg
+import redis.asyncio as aioredis
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
@@ -296,6 +299,170 @@ def get_chats(
             )
             for row in rows
         ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Post a message + stream the assistant reply (POST /messages, SSE)
+#
+# This is the write half of the LLM chat loop and it fans out to three
+# downstreams:
+#   1. user-db          — confirm the X-User-Id header is a real user.
+#   2. chat-db          — confirm the chat is that user's, then insert the user
+#                         Message and its UserMessage row in ONE transaction.
+#   3. llm-worker-stream— block-read the redis token stream the worker fills and
+#                         relay each token to the caller as Server-Sent Events.
+#
+# The inference itself is decoupled and asynchronous: the user_message INSERT is
+# what chat-db-cdc captures -> user-messages-stream (Kafka) -> usr-msg-consumer,
+# which admits the prompt to an llm-worker (Worker.AddPrompt). That worker XADDs
+# one typed entry per generated token to redis key `tokens:<user_message id>`
+# ({type:"token", text:<a-z char>}), finishing with {type:"done"} — or
+# {type:"error"} if the generation aborts. Because our UserMessage row id ==
+# assistant_msg_id, the stream we read is `tokens:<assistant_msg_id>`.
+#
+# Handler is async (SSE needs a streaming response); the blocking psycopg work
+# runs in a worker thread via asyncio.to_thread so the event loop stays free.
+# ---------------------------------------------------------------------------
+
+REDIS_HOST = os.environ.get("REDIS_HOST", "llm-worker-stream")
+XREAD_BLOCK_MS = 5000     # block up to 5s per XREAD, then loop (send a keepalive)
+STREAM_MAX_SECONDS = 120  # hard cap on the SSE stream so the request always ends
+
+
+class CreateMessageRequest(BaseModel):
+    chat_id: int
+    content: str
+
+
+def _prepare_message(user_id: int, chat_id: int, content: str) -> int:
+    """Verify the user + chat, then write the Message and UserMessage rows in one
+    chat-db transaction. Returns assistant_msg_id — the user_message row id the
+    llm-worker streams generated tokens under (redis key `tokens:<id>`).
+
+    Raises HTTPException (404 user/chat missing, 503 db unavailable); it runs in a
+    thread via asyncio.to_thread, so the exception propagates to the handler."""
+    # 1. Confirm the caller's user exists (user-db).
+    try:
+        with psycopg.connect(
+            USER_DB_DSN, row_factory=dict_row, autocommit=True
+        ) as conn:
+            user = conn.execute(
+                'SELECT id FROM "user" WHERE id = %s', (user_id,)
+            ).fetchone()
+    except psycopg.Error:
+        raise HTTPException(status_code=503, detail="user-db unavailable")
+    if user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+
+    user_msg_id = next_snowflake()
+    assistant_msg_id = next_snowflake()
+
+    # 2. Confirm the chat is this user's, then insert both rows atomically
+    #    (chat-db, single transaction — the `with` commits on clean exit and
+    #    rolls back if anything raises). user_message.content carries the prompt
+    #    text: it's NOT NULL and is what usr-msg-consumer forwards to the worker.
+    try:
+        with psycopg.connect(CHAT_DB_DSN, row_factory=dict_row) as conn:
+            chat = conn.execute(
+                "SELECT id FROM chat WHERE id = %s AND user_id = %s",
+                (chat_id, user_id),
+            ).fetchone()
+            if chat is None:
+                raise HTTPException(status_code=404, detail="chat not found")
+            conn.execute(
+                "INSERT INTO message (id, chat_id, content, role)"
+                " VALUES (%s, %s, %s, 'user')",
+                (user_msg_id, chat_id, content),
+            )
+            conn.execute(
+                "INSERT INTO user_message (id, content, message_id, chat_id)"
+                " VALUES (%s, %s, %s, %s)",
+                (assistant_msg_id, content, user_msg_id, chat_id),
+            )
+            conn.commit()
+    except HTTPException:
+        raise
+    except psycopg.Error:
+        raise HTTPException(status_code=503, detail="chat-db unavailable")
+
+    return assistant_msg_id
+
+
+async def _token_stream(assistant_msg_id: int):
+    """Relay the llm-worker's generated tokens for this message as SSE frames.
+
+    Block-reads redis stream `tokens:<assistant_msg_id>` (typed entries
+    {type: token|done|error, text}), pushing each token down as
+    `data: {"token": ...}` and closing with a `{"done": true, "last": ...}` or
+    `{"error": ...}` frame. Completion keys off the entry's TYPE — the done
+    text is the worker's configurable marker string, informational only.
+    Starts at id "0" so no early token is missed. BOUNDED by STREAM_MAX_SECONDS
+    so the request always terminates even if the worker never finishes (prompt
+    dropped / no capacity)."""
+    key = f"tokens:{assistant_msg_id}"
+    last_id = "0"  # "0" = from the start of the stream; advanced as we read
+    deadline = time.monotonic() + STREAM_MAX_SECONDS
+    r = aioredis.Redis(host=REDIS_HOST, port=6379)
+    try:
+        while time.monotonic() < deadline:
+            result = await r.xread({key: last_id}, block=XREAD_BLOCK_MS)
+            if not result:
+                # XREAD timed out with nothing new: emit an SSE comment as a
+                # keepalive and block again (the worker may still be spinning up).
+                yield ": keepalive\n\n"
+                continue
+            for _stream, entries in result:
+                for entry_id, fields in entries:
+                    last_id = entry_id  # only fetch newer entries next round
+                    etype = fields.get(b"type", b"").decode()
+                    text = fields.get(b"text", b"").decode()
+                    if etype == "token":
+                        yield f"data: {json.dumps({'token': text})}\n\n"
+                    elif etype == "done":
+                        yield f"data: {json.dumps({'done': True, 'last': text})}\n\n"
+                        return  # generation complete
+                    elif etype == "error":
+                        yield f"data: {json.dumps({'error': text})}\n\n"
+                        return  # generation aborted
+                    # unknown-shape entries: skip defensively
+    finally:
+        await r.aclose()
+
+
+@app.post("/messages")
+async def create_message(
+    body: CreateMessageRequest,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    """Post a user message to a chat and stream the assistant's reply as SSE.
+
+    Verifies the caller (X-User-Id -> user-db) and the chat (chat_id + user_id
+    -> chat-db), writes the user Message + its UserMessage row in one
+    transaction, then streams the llm-worker's generated tokens (via
+    llm-worker-stream) back as `text/event-stream`. See the block comment above
+    for the full CDC -> Kafka -> worker -> redis inference path.
+    """
+    if not x_user_id:
+        raise HTTPException(status_code=400, detail="missing X-User-Id header")
+    try:
+        user_id = int(x_user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid X-User-Id header")
+
+    # Do the verify + transactional write BEFORE returning the stream, so real
+    # failures surface as proper HTTP status codes (not mid-stream). Blocking
+    # psycopg work runs off the event loop.
+    assistant_msg_id = await asyncio.to_thread(
+        _prepare_message, user_id, body.chat_id, body.content
+    )
+
+    return StreamingResponse(
+        _token_stream(assistant_msg_id),
+        media_type="text/event-stream",
+        # Disable nginx (lb) response buffering for THIS response so tokens reach
+        # the caller incrementally — no nginx.conf change needed.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

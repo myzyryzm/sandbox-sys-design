@@ -11,8 +11,9 @@
 import consumerGroup from './consumerGroup/index.jsx'
 import downloadCoordinator from './downloadCoordinator/index.jsx'
 import llmWorker from './llmWorker/index.jsx'
+import persistenceReader from './persistenceReader/index.jsx'
 
-const MODULES = [consumerGroup, downloadCoordinator, llmWorker]
+const MODULES = [consumerGroup, downloadCoordinator, llmWorker, persistenceReader]
 
 const TYPES = {}
 for (const m of MODULES) {

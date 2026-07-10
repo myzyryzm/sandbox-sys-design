@@ -40,6 +40,14 @@ export default {
     if (node.service_type === 'consumer_scaler' && p === '/state') {
       return { visibility: 'hidden', locked: true }
     }
+    // The group's /workers is a read-only introspection view of the live worker set
+    // the coordinator pushes via Consumer.UpdateWorkers — control-plane plumbing, not
+    // part of the group's client surface — so keep it off the load balancer (and the
+    // endpoint lists), the same as the scaler's /state above and the coordinator's
+    // twin /assignments view.
+    if (node.service_type === 'consumer_group' && p === '/workers') {
+      return { visibility: 'hidden', locked: true }
+    }
     return null
   },
 

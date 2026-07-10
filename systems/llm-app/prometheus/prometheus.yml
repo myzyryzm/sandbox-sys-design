@@ -66,5 +66,7 @@ scrape_configs:
     {
         job_name: etcd,
         static_configs: [ { targets: [ etcd-1:2379, etcd-2:2379, etcd-3:2379 ] } ]
-      }
+      },
+    # Persistence readers "db-writers" — custom service type
+    { job_name: db-writers, static_configs: [ { targets: [ db-writers:8000 ] } ] }
   ]

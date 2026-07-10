@@ -9,6 +9,7 @@
 // renders at the top of the group's stack carrying the group's Edit button.
 import WorkerTab from './WorkerTab.jsx'
 import ScalingTab from './ScalingTab.jsx'
+import PersistenceTab from './PersistenceTab.jsx'
 import { DiagramBody, bodyHeight } from './DiagramBody.jsx'
 
 export default {
@@ -26,6 +27,7 @@ export default {
       return [
         { id: 'llm', label: 'LLM Worker', Component: WorkerTab },
         { id: 'scaling', label: 'Scaling', Component: ScalingTab },
+        { id: 'persistence', label: 'Persistence', Component: PersistenceTab },
       ]
     }
     return []

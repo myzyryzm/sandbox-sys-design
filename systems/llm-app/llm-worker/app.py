@@ -4,10 +4,16 @@ Roles in one process:
   - Worker gRPC SERVER : AddPrompt admits a user message into the batch;
                          GetStatus reports capacity. (:50051, intra-network)
   - worker loop thread : steps every active sequence (prefill, then one decode
-                         per tick), XADDs each generated token as its a-z character
-                         to the linked redis stream tokens:<user_message_id>; a
-                         finished sequence emits the configurable LAST_TOKEN string
-                         (etcd /config/app-settings/, default "DONE") as the last entry.
+                         per tick), XADDs each generated token to the linked redis
+                         stream tokens:<user_message_id> as a typed entry
+                         {type:"token", text:<a-z char>}. A finished sequence emits
+                         {type:"done", text:<LAST_TOKEN>} last (the text is the
+                         configurable etcd /config/app-settings/ marker, default
+                         "DONE" — informational only; consumers key off type); an
+                         aborted sequence emits {type:"error", text:<reason>}.
+                         Every ACCEPTED AddPrompt also announces the new run on the
+                         runs:started stream ({run_id:<user_message_id>}) so
+                         persistence readers can claim it via XREADGROUP.
   - reaper loop thread : every 2s evicts prefix-cache entries older than the TTL
                          and fires the user-authored on_cache_evict hook.
 
@@ -49,7 +55,7 @@ import redis  # noqa: E402
 import Worker_pb2_grpc as worker_grpc  # noqa: E402
 from Worker_servicer import WorkerServicer  # noqa: E402
 
-from model import END_TOKEN, Sequence, detokenize, tokenize  # noqa: E402
+from model import Sequence, detokenize, tokenize  # noqa: E402
 
 SERVICE_ID = os.environ.get("SERVICE_ID", "llm-worker")
 REDIS_HOST = os.environ.get("REDIS_HOST", f"{SERVICE_ID}-stream")
@@ -57,7 +63,9 @@ GRPC_PORT = 50051
 STEP_INTERVAL = 0.25  # seconds per batch step — a 100-token output streams over ~25s
 REAP_INTERVAL = 2.0
 STREAM_MAXLEN = 256  # per-stream cap (approximate trim)
-STREAM_TTL_S = 600  # stream key expiry once END is written
+STREAM_TTL_S = 600  # stream key expiry once the final done/error entry is written
+ANNOUNCE_STREAM = "runs:started"  # every accepted AddPrompt XADDs {run_id} here
+ANNOUNCE_MAXLEN = 1024  # approximate trim; readers' unread window never nears this
 
 # --- live config (mtime-polled bind mount; edits apply with no rebuild) -----
 _CFG_PATH = "/config/worker.json"
@@ -105,7 +113,8 @@ http_requests_in_flight = Gauge(
 EXCLUDED_PATHS = {"/metrics"}
 
 llm_tokens_streamed_total = Counter(
-    "llm_tokens_streamed_total", "Tokens XADDed to the linked redis stream (incl. END)"
+    "llm_tokens_streamed_total",
+    "Entries XADDed to the linked redis token streams (incl. the final done/error entry)",
 )
 llm_prompts_total = Counter(
     "llm_prompts_total", "AddPrompt outcomes", ["result"]  # accepted | rejected
@@ -132,11 +141,14 @@ class InferenceEngine:
         self.active = []  # list[Sequence]
         self.cached = {}  # chat id -> (Sequence, cached_at)
         self.counter = 0
+        self.source = None  # "host:port" of the usr-msg-consumer feeding this worker
+        #                     (set by the coordinator's rebalance via Worker.UpdateConsumer)
 
     # --- gRPC-facing (called via asyncio.to_thread from the servicer) -------
     def add_prompt(self, um_id, content, chat, message):
         prompt_tokens = tokenize(content)
 
+        hit_seq_id = None
         with self.lock:
             if len(self.active) >= int(cfg()["max_active"]):
                 llm_prompts_total.labels(result="rejected").inc()
@@ -148,12 +160,15 @@ class InferenceEngine:
                     self.cached[chat] = entry  # put back untouched
                     llm_prompts_total.labels(result="rejected").inc()
                     return {"accepted": False, "seq_id": 0, "reason": "empty prompt", "cache_hit": False}
-                seq_id = self.counter
+                hit_seq_id = self.counter
                 self.counter += 1
-                self.active.append(prev.continue_with(seq_id, um_id, prompt_tokens))
+                self.active.append(prev.continue_with(hit_seq_id, um_id, prompt_tokens))
                 llm_prompts_total.labels(result="accepted").inc()
                 llm_cache_hits_total.inc()
-                return {"accepted": True, "seq_id": seq_id, "reason": "", "cache_hit": True}
+        if hit_seq_id is not None:
+            # Announce OUTSIDE the lock — a stalled redis must not block admits.
+            self._announce_run(um_id)
+            return {"accepted": True, "seq_id": hit_seq_id, "reason": "", "cache_hit": True}
 
         # Cache miss: maybe pull the chat's prior messages (outside the lock —
         # the query can be slow and must not stall the worker loop).
@@ -173,6 +188,7 @@ class InferenceEngine:
             self.counter += 1
             self.active.append(Sequence(seq_id, um_id, chat, history_tokens + prompt_tokens))
         llm_prompts_total.labels(result="accepted").inc()
+        self._announce_run(um_id)  # outside the lock, accepted admits only
         return {"accepted": True, "seq_id": seq_id, "reason": "", "cache_hit": False}
 
     def status(self):
@@ -184,6 +200,13 @@ class InferenceEngine:
                 "cached_count": len(self.cached),
                 "max_active": max_active,
             }
+
+    def update_consumer(self, host, port):
+        """Point this worker at the usr-msg-consumer feeding it. Called by the
+        coordinator's rebalance (Worker.UpdateConsumer) whenever the worker<->
+        consumer assignment changes; we just record the source's host:port."""
+        with self.lock:
+            self.source = f"{host}:{port}"
 
     def state(self):
         """Full view for /llm/state (the Edit tab + diagram poll this)."""
@@ -205,10 +228,12 @@ class InferenceEngine:
                 for chat, (_seq, ts) in self.cached.items()
             ]
             counter = self.counter
+            source = self.source
         c = cfg()
         return {
             "ok": True,
             "id": SERVICE_ID,
+            "source": source,
             "active": active,
             "active_count": len(active),
             "cached": cached,
@@ -243,19 +268,31 @@ class InferenceEngine:
             print(f"[{SERVICE_ID}] chat history query failed ({chat_db}): {exc}", flush=True)
             return []
 
-    def _stream_token(self, um_id, token):
+    def _stream_entry(self, um_id, etype, text, final=False):
+        """XADD one typed entry {type, text} to tokens:<um_id>. type is
+        token|done|error; the done entry's text is the configurable LAST_TOKEN
+        string (informational only — consumers key off type, never the text).
+        final=True (done/error) starts the stream's expiry countdown."""
         try:
             key = f"tokens:{um_id}"
-            # Stream the CHARACTER, not the int id: tokens 0-25 -> their a-z letter,
-            # the END token (26) -> the configurable LAST_TOKEN string (live etcd
-            # /config/app-settings/, default "DONE"). See _char below. Control flow
-            # still keys off the INTEGER arg — only the redis value becomes a char.
-            _redis.xadd(key, {"t": _char(token)}, maxlen=STREAM_MAXLEN, approximate=True)
+            _redis.xadd(key, {"type": etype, "text": text}, maxlen=STREAM_MAXLEN, approximate=True)
             llm_tokens_streamed_total.inc()
-            if token == END_TOKEN:
+            if final:
                 _redis.expire(key, STREAM_TTL_S)
         except Exception as exc:
             print(f"[{SERVICE_ID}] redis xadd failed: {exc}", flush=True)
+
+    def _announce_run(self, um_id):
+        """XADD {run_id} to the runs:started announcement stream for every
+        ACCEPTED AddPrompt. Persistence readers XREADGROUP this stream (the group
+        divides runs across members, one reader per run) and then accumulate
+        tokens:<run_id>. Best-effort: a redis outage only costs the announce."""
+        try:
+            _redis.xadd(
+                ANNOUNCE_STREAM, {"run_id": str(um_id)}, maxlen=ANNOUNCE_MAXLEN, approximate=True
+            )
+        except Exception as exc:
+            print(f"[{SERVICE_ID}] {ANNOUNCE_STREAM} xadd failed: {exc}", flush=True)
 
     # --- background loops (daemon threads) ------------------------------------
     def worker_loop(self):
@@ -267,10 +304,14 @@ class InferenceEngine:
                     if not seq.prefilled:
                         seq.prefill()
                     else:
-                        self._stream_token(seq.user_message_id, seq.decode_step())
+                        self._stream_entry(
+                            seq.user_message_id, "token", detokenize([seq.decode_step()])
+                        )
                 except Exception as exc:
-                    # A poisoned sequence must not stall the batch: finish it.
+                    # A poisoned sequence must not stall the batch: finish it,
+                    # remembering the reason so it ends with an error entry.
                     print(f"[{SERVICE_ID}] step failed for seq {seq.seq_id}: {exc}", flush=True)
+                    seq.error = f"step failed: {exc}"
                     seq.done = True
 
             finished = []
@@ -282,13 +323,18 @@ class InferenceEngine:
                         still.append(s)
                         continue
                     finished.append(s)
-                    if s.chat is not None and keep_cache:
+                    # An errored sequence's KV state is not trustworthy: never cache it.
+                    if s.chat is not None and keep_cache and not getattr(s, "error", None):
                         self.cached[s.chat] = (s, time.time())
                 self.active[:] = still
                 llm_active_sequences.set(len(self.active))
                 llm_cached_prefixes.set(len(self.cached))
             for s in finished:
-                self._stream_token(s.user_message_id, END_TOKEN)
+                err = getattr(s, "error", None)
+                if err:
+                    self._stream_entry(s.user_message_id, "error", err, final=True)
+                else:
+                    self._stream_entry(s.user_message_id, "done", _last_token(), final=True)
             time.sleep(STEP_INTERVAL)
 
     def reaper_loop(self):
@@ -476,8 +522,8 @@ threading.Thread(target=_register_worker, daemon=True).start()
 # etcd config-keyspace listener  (/config/app-settings/, sandbox-etcd skill)
 #
 # The worker keeps a live CONFIG map from the app-settings config keyspace and
-# reads CONFIG["LAST_TOKEN"] (default "DONE") at token-emit time (_last_token
-# above) as the redis token stream's END marker.
+# reads CONFIG["LAST_TOKEN"] (default "DONE") at emit time (_last_token above)
+# as the done entry's text — informational only; consumers key off type=="done".
 #
 # Transport: the SAME httpx-over-v3-JSON-gateway fallback the registration loop
 # uses (the etcd3 client pins protobuf<4, incompatible with this worker's
@@ -495,19 +541,11 @@ _config_lock = threading.Lock()  # one writer (watch thread) + whole-map readers
 
 
 def _last_token():
-    """The stream's END marker string, from the live app-settings config (pushed
-    over etcd). Falls back to "DONE" when the key is unset, empty, deleted, or the
-    map has not populated yet — CONFIG.get() is an atomic single read (no lock)."""
+    """The done entry's text, from the live app-settings config (pushed over
+    etcd). Informational only — consumers key off type=="done", never this text.
+    Falls back to "DONE" when the key is unset, empty, deleted, or the map has
+    not populated yet — CONFIG.get() is an atomic single read (no lock)."""
     return CONFIG.get("LAST_TOKEN") or "DONE"
-
-
-def _char(token):
-    """Redis stream VALUE for a token: normal tokens (0-25) -> their a-z letter
-    (via model.detokenize); the END token (26, the "last token") -> the
-    configurable LAST_TOKEN string (default "DONE")."""
-    if token == END_TOKEN:
-        return _last_token()
-    return detokenize([token])   # letter for 0-25, "" for anything outside the vocab
 
 
 def _prefix_range_end(prefix):

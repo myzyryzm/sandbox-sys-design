@@ -20,8 +20,8 @@
       "type": "prometheus",
       "origin": "create-prometheus",
       "position": {
-        "x": -29,
-        "y": 317
+        "x": 207,
+        "y": 146
       },
       "metrics": [
         {
@@ -358,8 +358,8 @@
       "origin": "create-custom-service",
       "streamOf": "llm-worker",
       "position": {
-        "x": 266,
-        "y": 249
+        "x": 67,
+        "y": 360
       },
       "metrics": [
         {
@@ -617,8 +617,8 @@
       "type": "service",
       "origin": "create-service",
       "position": {
-        "x": 395,
-        "y": 559
+        "x": 419,
+        "y": 421
       },
       "metrics": [
         {
@@ -656,6 +656,85 @@
           }
         ]
       }
+    },
+    {
+      "id": "frontend",
+      "label": "frontend",
+      "type": "client",
+      "origin": "create-client",
+      "external": true,
+      "stateful": true,
+      "position": {
+        "x": -389,
+        "y": 120
+      },
+      "metrics": []
+    },
+    {
+      "id": "db-writers",
+      "label": "db-writers",
+      "type": "service",
+      "origin": "create-custom-service",
+      "service_type": "persistence_reader",
+      "persistence": {
+        "worker": "llm-worker",
+        "stream": "llm-worker-stream",
+        "announce": "runs:started",
+        "group": "db-writers",
+        "db": "chat-db",
+        "table": "message",
+        "field": "content"
+      },
+      "position": {
+        "x": 327,
+        "y": 695
+      },
+      "metrics": [
+        {
+          "label": "req/s",
+          "query": "sum(rate(http_requests_total{job=\"db-writers\"}[1m]))",
+          "unit": "/s"
+        },
+        {
+          "label": "p95",
+          "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"db-writers\"}[1m])) by (le)) * 1000",
+          "unit": "ms"
+        },
+        {
+          "label": "in-flight",
+          "query": "sum(http_requests_in_flight{job=\"db-writers\"})",
+          "unit": ""
+        },
+        {
+          "label": "errors",
+          "query": "(sum(rate(http_requests_total{job=\"db-writers\",status=~\"5..\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"db-writers\"}[1m])), 0.0001)",
+          "unit": "%",
+          "scale": 100
+        },
+        {
+          "label": "persisted",
+          "query": "sum(persistence_runs_total{job=~\"db-writers(-\\d+)?\"}) or vector(0)",
+          "unit": ""
+        },
+        {
+          "label": "active",
+          "query": "sum(persistence_active_runs{job=~\"db-writers(-\\d+)?\"}) or vector(0)",
+          "unit": ""
+        }
+      ],
+      "health": {
+        "query": "up{job=\"db-writers\"}",
+        "rules": [
+          {
+            "color": "red",
+            "when": "value < 1"
+          },
+          {
+            "color": "green",
+            "when": "value >= 1"
+          }
+        ]
+      }
     }
   ],
   "edges": [
@@ -676,6 +755,16 @@
       "from": "usr-msg-consumer",
       "to": "user-messages-stream",
       "origin": "consumer-fn"
+    },
+    {
+      "from": "db-writers",
+      "to": "llm-worker-stream",
+      "origin": "create-custom-service"
+    },
+    {
+      "from": "db-writers",
+      "to": "chat-db",
+      "origin": "create-custom-service"
     }
   ],
   "boundary": {

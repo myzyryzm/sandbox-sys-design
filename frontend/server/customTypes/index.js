@@ -12,9 +12,11 @@
 import consumerGroup from './consumerGroup.js'
 import downloadCoordinator from './downloadCoordinator.js'
 import llmWorker from './llmWorker.js'
+import persistenceReader from './persistenceReader.js'
 
 export const CUSTOM_TYPES = {
   [consumerGroup.serviceType]: consumerGroup,
   [downloadCoordinator.serviceType]: downloadCoordinator,
   [llmWorker.serviceType]: llmWorker,
+  [persistenceReader.serviceType]: persistenceReader,
 }

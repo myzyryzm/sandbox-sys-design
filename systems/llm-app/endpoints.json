@@ -61,6 +61,51 @@
           "description": "get chats for user; user_id is from header; chats should be ordered by updated_at; cursor is start index (default to 0) and maxChats is how many to query (default to 10)"
         }
       ]
+    },
+    {
+      "method": "POST",
+      "path": "/messages",
+      "protocol": "sse",
+      "alias": "createMessage",
+      "request": {},
+      "response": {},
+      "requestModel": "CreateMessageRequest",
+      "responseModel": "",
+      "description": "verify user exists in user_id via user_id in auth header. if not then error\nverify chat exists via chat_id and user_id matchest up. if not then error\nuser_msg_id = snowflake_id\nassistant_msg_id = snowflake_id\nwrite in single transaction [\nMessage(id: user_msg_id, content: request.content, chat: Chat(id: request.chat_id), role: 'user')\nUserMessage(id: assistant_msg_id, message: user_msg_id, chat: Chat(id: request.chat_id))\n]\nthen relay the llm-worker's generated tokens as SSE. The worker XADDs TYPED entries to redis stream tokens:{assistant_msg_id} on llm-worker-stream — each entry is {type: \"token\"|\"done\"|\"error\", text: string}. Read with XREAD BLOCK 5000 from id \"0\" and dispatch on type (NEVER on the text):\n- type==\"token\": yield data: {\"token\": <text>}   # one a-z char\n- type==\"done\": yield data: {\"done\": true, \"last\": <text>} and close — <text> is the worker's configurable LAST_TOKEN marker (etcd /config/app-settings/, default \"DONE\"), informational only\n- type==\"error\": yield data: {\"error\": <text>} and close — the generation aborted\nA timed-out XREAD sends an SSE keepalive comment and blocks again; the whole stream is hard-capped at 120s so the request always terminates. (The worker also XADDs {run_id: assistant_msg_id} to the runs:started stream on every accepted AddPrompt — that announcement drives the persistence readers, not this endpoint.)",
+      "downstream": [
+        "user-db",
+        "chat-db",
+        "llm-worker-stream"
+      ],
+      "downstreamDescriptions": {
+        "user-db": "verifies the X-User-Id header refers to an existing user before accepting the message",
+        "chat-db": "verifies the chat belongs to the user, then inserts the user Message + UserMessage rows in one transaction (the user_message INSERT is what CDC captures to drive inference)",
+        "llm-worker-stream": "block-reads the worker's typed token stream (tokens:<assistant_msg_id>, entries {type: token|done|error, text}) and relays each token to the caller as SSE, closing on the done/error entry (keyed off type, never the text)"
+      },
+      "downstreamMethods": {},
+      "conversationId": "5718be1c-461d-459f-b70c-bc01aaf0e2b5",
+      "history": [
+        {
+          "at": "2026-07-09T22:38:37.630Z",
+          "alias": "createMessage",
+          "path": "/messages",
+          "request": {},
+          "response": {},
+          "requestModel": "CreateMessageRequest",
+          "responseModel": "",
+          "description": "verify user exists in user_id via user_id in auth header. if not then error\nverify chat exists via chat_id and user_id matchest up. if not then error\nuser_msg_id = snowflake_id\nassistant_msg_id = snowflake_id\nwrite in single transaction [\nMessage(id: user_msg_id, content: request.content, chat: Chat(id: request.chat_id), role: 'user')\nUserMessage(id: assistant_msg_id, message: user_msg_id, chat: Chat(id: request.chat_id))\n]\nthen read from redis stream and send sse events to caller of this method. do something like this (you will need to check what the output is from the llm worker and redis stream is in no way am i saying the below is correct)\nlast_token = env.LAST_TOKEN (from app-settings config)\nlast_id = \"0\"\nwhile True:\n    result = XREAD BLOCK 5000 STREAMS stream:{request_id} last_id\n    if result:\n        for entry_id, fields in result:\n            token = fields[\"token\"]\n            yield f\"data: {json.dumps({'token': token})}\\n\\n\"   # push down SSE\n            last_id = entry_id\n            if token == last_token:\n                return\n    else: timed out, loop and block again (lets you send keepalives)"
+        },
+        {
+          "at": "2026-07-10T02:38:13.000Z",
+          "alias": "createMessage",
+          "path": "/messages",
+          "request": {},
+          "response": {},
+          "requestModel": "CreateMessageRequest",
+          "responseModel": "",
+          "description": "verify user exists in user_id via user_id in auth header. if not then error\nverify chat exists via chat_id and user_id matchest up. if not then error\nuser_msg_id = snowflake_id\nassistant_msg_id = snowflake_id\nwrite in single transaction [\nMessage(id: user_msg_id, content: request.content, chat: Chat(id: request.chat_id), role: 'user')\nUserMessage(id: assistant_msg_id, message: user_msg_id, chat: Chat(id: request.chat_id))\n]\nthen relay the llm-worker's generated tokens as SSE. The worker XADDs TYPED entries to redis stream tokens:{assistant_msg_id} on llm-worker-stream — each entry is {type: \"token\"|\"done\"|\"error\", text: string}. Read with XREAD BLOCK 5000 from id \"0\" and dispatch on type (NEVER on the text):\n- type==\"token\": yield data: {\"token\": <text>}   # one a-z char\n- type==\"done\": yield data: {\"done\": true, \"last\": <text>} and close — <text> is the worker's configurable LAST_TOKEN marker (etcd /config/app-settings/, default \"DONE\"), informational only\n- type==\"error\": yield data: {\"error\": <text>} and close — the generation aborted\nA timed-out XREAD sends an SSE keepalive comment and blocks again; the whole stream is hard-capped at 120s so the request always terminates. (The worker also XADDs {run_id: assistant_msg_id} to the runs:started stream on every accepted AddPrompt — that announcement drives the persistence readers, not this endpoint.)"
+        }
+      ]
     }
   ]
 }

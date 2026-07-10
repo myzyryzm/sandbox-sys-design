@@ -268,6 +268,18 @@ function readJson(file) {
   }
 }
 
+// Drop persistence-reader entries whose owning service was removed. Entries whose
+// TARGETS (worker / stream / db) are being removed cannot reach here — findDependents
+// blocks those deletes while a reader still references them.
+function pruneReaders(system, removedIds) {
+  const file = path.join(systemDir(system), 'persistence.json')
+  const data = readJson(file)
+  if (!data || !Array.isArray(data.readers)) return
+  const before = data.readers.length
+  data.readers = data.readers.filter((r) => r && !removedIds.has(r.service))
+  if (data.readers.length !== before) fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n')
+}
+
 // Drop etcd keyspaces owned by a removed service and listener entries naming one, so
 // the discovery registry never references nodes that no longer exist. (Deleting a
 // keyspace owner with LISTENERS is blocked by findDependents; this prunes the
@@ -397,6 +409,23 @@ function findDependents(system, manifest, id, kind, cascadeIds = new Set()) {
   for (const c of consumers && Array.isArray(consumers.consumers) ? consumers.consumers : []) {
     if (skip(c?.service) || !Array.isArray(c.downstream) || !c.downstream.includes(id)) continue
     deps.push({ node: c.service, label: labelOf(c.service), via: 'consumer', detail: `function ${c.name}`, calls: [] })
+  }
+
+  // Persistence readers — persistence.json: each reader group XREADGROUPs the worker's
+  // runs:started announcements on its stream redis and writes finished runs into its
+  // target db, so deleting the worker, the stream, or the db would strand the group's
+  // authored loop. (Deleting the READER group itself is the supported teardown.)
+  const persistence = readJson(path.join(dir, 'persistence.json'))
+  for (const r of persistence && Array.isArray(persistence.readers) ? persistence.readers : []) {
+    if (skip(r?.service)) continue
+    const refs = [
+      [r.worker, `persists runs announced by ${r.worker}`],
+      [r.stream, `consumes ${r.announce || 'runs:started'} + token streams`],
+      [r.db, r.table ? `writes run output to ${r.table}.${r.field}` : 'writes run output to this database'],
+    ]
+    for (const [ref, detail] of refs) {
+      if (ref === id) deps.push({ node: r.service, label: labelOf(r.service), via: 'persistence', detail, calls: [] })
+    }
   }
 
   // etcd — deleting the CLUSTER is blocked while any keyspace still has a registered
@@ -556,6 +585,8 @@ export async function handleDelete(body) {
   }
   // Drop consumer functions that referenced any removed node (as owner service or as cluster).
   pruneConsumers(system, removedIds)
+  // Drop persistence-reader entries owned by any removed service.
+  pruneReaders(system, removedIds)
   // Drop etcd keyspaces/listeners that referenced any removed service.
   pruneEtcd(system, removedIds)
   writeManifest(system, manifest)

@@ -4,8 +4,13 @@ Roles in one process:
   - Worker gRPC SERVER : AddPrompt admits a user message into the batch;
                          GetStatus reports capacity. (:50051, intra-network)
   - worker loop thread : steps every active sequence (prefill, then one decode
-                         per tick), XADDs each generated token to the linked
-                         redis stream tokens:<user_message_id>, END token 26 last.
+                         per tick), XADDs each generated token to the linked redis
+                         stream tokens:<user_message_id> as a typed entry
+                         {type:"token", text:<a-z char>}; a finished sequence
+                         emits {type:"done", text:"DONE"} last, an aborted one
+                         {type:"error", text:<reason>}. Every ACCEPTED AddPrompt
+                         also announces the run on the runs:started stream
+                         ({run_id:<user_message_id>}) for persistence readers.
   - reaper loop thread : every 2s evicts prefix-cache entries older than the TTL
                          and fires the user-authored on_cache_evict hook.
 
@@ -47,7 +52,7 @@ import redis  # noqa: E402
 import Worker_pb2_grpc as worker_grpc  # noqa: E402
 from Worker_servicer import WorkerServicer  # noqa: E402
 
-from model import END_TOKEN, Sequence, detokenize, tokenize  # noqa: E402
+from model import Sequence, detokenize, tokenize  # noqa: E402
 
 SERVICE_ID = os.environ.get("SERVICE_ID", "llm-worker")
 REDIS_HOST = os.environ.get("REDIS_HOST", f"{SERVICE_ID}-stream")
@@ -55,7 +60,10 @@ GRPC_PORT = 50051
 STEP_INTERVAL = 0.25  # seconds per batch step — a 100-token output streams over ~25s
 REAP_INTERVAL = 2.0
 STREAM_MAXLEN = 256  # per-stream cap (approximate trim)
-STREAM_TTL_S = 600  # stream key expiry once END is written
+STREAM_TTL_S = 600  # stream key expiry once the final done/error entry is written
+ANNOUNCE_STREAM = "runs:started"  # every accepted AddPrompt XADDs {run_id} here
+ANNOUNCE_MAXLEN = 1024  # approximate trim; readers' unread window never nears this
+LAST_TOKEN = "DONE"  # the done entry's text — informational; consumers key off type
 
 # --- live config (mtime-polled bind mount; edits apply with no rebuild) -----
 _CFG_PATH = "/config/worker.json"
@@ -103,7 +111,8 @@ http_requests_in_flight = Gauge(
 EXCLUDED_PATHS = {"/metrics"}
 
 llm_tokens_streamed_total = Counter(
-    "llm_tokens_streamed_total", "Tokens XADDed to the linked redis stream (incl. END)"
+    "llm_tokens_streamed_total",
+    "Entries XADDed to the linked redis token streams (incl. the final done/error entry)",
 )
 llm_prompts_total = Counter(
     "llm_prompts_total", "AddPrompt outcomes", ["result"]  # accepted | rejected
@@ -135,6 +144,7 @@ class InferenceEngine:
     def add_prompt(self, um_id, content, chat, message):
         prompt_tokens = tokenize(content)
 
+        hit_seq_id = None
         with self.lock:
             if len(self.active) >= int(cfg()["max_active"]):
                 llm_prompts_total.labels(result="rejected").inc()
@@ -146,12 +156,15 @@ class InferenceEngine:
                     self.cached[chat] = entry  # put back untouched
                     llm_prompts_total.labels(result="rejected").inc()
                     return {"accepted": False, "seq_id": 0, "reason": "empty prompt", "cache_hit": False}
-                seq_id = self.counter
+                hit_seq_id = self.counter
                 self.counter += 1
-                self.active.append(prev.continue_with(seq_id, um_id, prompt_tokens))
+                self.active.append(prev.continue_with(hit_seq_id, um_id, prompt_tokens))
                 llm_prompts_total.labels(result="accepted").inc()
                 llm_cache_hits_total.inc()
-                return {"accepted": True, "seq_id": seq_id, "reason": "", "cache_hit": True}
+        if hit_seq_id is not None:
+            # Announce OUTSIDE the lock — a stalled redis must not block admits.
+            self._announce_run(um_id)
+            return {"accepted": True, "seq_id": hit_seq_id, "reason": "", "cache_hit": True}
 
         # Cache miss: maybe pull the chat's prior messages (outside the lock —
         # the query can be slow and must not stall the worker loop).
@@ -171,6 +184,7 @@ class InferenceEngine:
             self.counter += 1
             self.active.append(Sequence(seq_id, um_id, chat, history_tokens + prompt_tokens))
         llm_prompts_total.labels(result="accepted").inc()
+        self._announce_run(um_id)  # outside the lock, accepted admits only
         return {"accepted": True, "seq_id": seq_id, "reason": "", "cache_hit": False}
 
     def status(self):
@@ -241,15 +255,30 @@ class InferenceEngine:
             print(f"[{SERVICE_ID}] chat history query failed ({chat_db}): {exc}", flush=True)
             return []
 
-    def _stream_token(self, um_id, token):
+    def _stream_entry(self, um_id, etype, text, final=False):
+        """XADD one typed entry {type, text} to tokens:<um_id>. type is
+        token|done|error; consumers key off type, never the text. final=True
+        (done/error) starts the stream's expiry countdown."""
         try:
             key = f"tokens:{um_id}"
-            _redis.xadd(key, {"t": int(token)}, maxlen=STREAM_MAXLEN, approximate=True)
+            _redis.xadd(key, {"type": etype, "text": text}, maxlen=STREAM_MAXLEN, approximate=True)
             llm_tokens_streamed_total.inc()
-            if token == END_TOKEN:
+            if final:
                 _redis.expire(key, STREAM_TTL_S)
         except Exception as exc:
             print(f"[{SERVICE_ID}] redis xadd failed: {exc}", flush=True)
+
+    def _announce_run(self, um_id):
+        """XADD {run_id} to the runs:started announcement stream for every
+        ACCEPTED AddPrompt. Persistence readers XREADGROUP this stream (the group
+        divides runs across members, one reader per run) and then accumulate
+        tokens:<run_id>. Best-effort: a redis outage only costs the announce."""
+        try:
+            _redis.xadd(
+                ANNOUNCE_STREAM, {"run_id": str(um_id)}, maxlen=ANNOUNCE_MAXLEN, approximate=True
+            )
+        except Exception as exc:
+            print(f"[{SERVICE_ID}] {ANNOUNCE_STREAM} xadd failed: {exc}", flush=True)
 
     # --- background loops (daemon threads) ------------------------------------
     def worker_loop(self):
@@ -261,10 +290,14 @@ class InferenceEngine:
                     if not seq.prefilled:
                         seq.prefill()
                     else:
-                        self._stream_token(seq.user_message_id, seq.decode_step())
+                        self._stream_entry(
+                            seq.user_message_id, "token", detokenize([seq.decode_step()])
+                        )
                 except Exception as exc:
-                    # A poisoned sequence must not stall the batch: finish it.
+                    # A poisoned sequence must not stall the batch: finish it,
+                    # remembering the reason so it ends with an error entry.
                     print(f"[{SERVICE_ID}] step failed for seq {seq.seq_id}: {exc}", flush=True)
+                    seq.error = f"step failed: {exc}"
                     seq.done = True
 
             finished = []
@@ -276,13 +309,18 @@ class InferenceEngine:
                         still.append(s)
                         continue
                     finished.append(s)
-                    if s.chat is not None and keep_cache:
+                    # An errored sequence's KV state is not trustworthy: never cache it.
+                    if s.chat is not None and keep_cache and not getattr(s, "error", None):
                         self.cached[s.chat] = (s, time.time())
                 self.active[:] = still
                 llm_active_sequences.set(len(self.active))
                 llm_cached_prefixes.set(len(self.cached))
             for s in finished:
-                self._stream_token(s.user_message_id, END_TOKEN)
+                err = getattr(s, "error", None)
+                if err:
+                    self._stream_entry(s.user_message_id, "error", err, final=True)
+                else:
+                    self._stream_entry(s.user_message_id, "done", LAST_TOKEN, final=True)
             time.sleep(STEP_INTERVAL)
 
     def reaper_loop(self):

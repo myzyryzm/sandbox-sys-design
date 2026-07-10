@@ -1,0 +1,41 @@
+{
+  "readers": [
+    {
+      "service": "db-writers",
+      "worker": "llm-worker",
+      "stream": "llm-worker-stream",
+      "announce": "runs:started",
+      "group": "db-writers",
+      "db": "chat-db",
+      "table": "message",
+      "field": "content",
+      "freeform": "",
+      "description": "persist each finished generation as an assistant message row for its chat (role assistant, chat_id from the run's user_message row); mark partial/failed runs with a status suffix",
+      "members": [
+        "db-writers"
+      ],
+      "implemented": true,
+      "conversationId": "00f51491-7cc4-4052-8a7b-22dc4f99aa86",
+      "createdAt": "2026-07-10T02:48:49.756Z",
+      "updatedAt": "2026-07-10T02:52:33.967Z",
+      "history": [
+        {
+          "at": "2026-07-10T02:48:49.756Z",
+          "description": "persist each finished generation as an assistant message row for its chat (role assistant, chat_id from the run's user_message row); mark partial/failed runs with a status suffix",
+          "db": "chat-db",
+          "table": "message",
+          "field": "content",
+          "freeform": ""
+        },
+        {
+          "at": "2026-07-10T02:52:33.967Z",
+          "description": "persist each finished generation as an assistant message row for its chat (role assistant, chat_id from the run's user_message row); mark partial/failed runs with a status suffix",
+          "db": "chat-db",
+          "table": "message",
+          "field": "content",
+          "freeform": ""
+        }
+      ]
+    }
+  ]
+}

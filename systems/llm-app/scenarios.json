@@ -1,0 +1,27 @@
+{
+  "functions": [
+    {
+      "client": "frontend",
+      "name": "getChats",
+      "args": [],
+      "description": "calls chat-service.getChats. always supply a valid user_id at runtime",
+      "steps": [
+        {
+          "method": "GET",
+          "path": "/chat-service/chats",
+          "label": ""
+        }
+      ],
+      "conversationId": "43f194f4-b496-4104-afe3-08d025252082",
+      "createdAt": "2026-07-09T22:36:16.376Z",
+      "updatedAt": "2026-07-09T22:36:16.376Z",
+      "history": [
+        {
+          "at": "2026-07-09T22:36:16.376Z",
+          "description": "calls chat-service.getChats. always supply a valid user_id at runtime",
+          "args": []
+        }
+      ]
+    }
+  ]
+}
