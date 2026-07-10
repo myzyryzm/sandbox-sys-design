@@ -33,6 +33,8 @@ import {
   removeClientScript,
   clientStatePath,
   readClientState,
+  clientModule,
+  clientsDir,
 } from './clientScript.js'
 
 // A truthy stateful flag from a request body (accepts a boolean or the string "true").
@@ -107,13 +109,26 @@ function getClientState(system, id) {
   return { ok: true, stateful: !!node.stateful, state: readClientState(system, id) }
 }
 
-// Clear a client's durable store (delete the file). Its next stateful run starts fresh.
+// Clear a client's durable store (delete the file). Its next stateful run starts fresh. Also
+// removes the per-instance stores (<module>.i<N>.state.json) an end-to-end run's stateful
+// instance pool creates for instances 2..N (instance 1 uses the canonical store). Exact-module
+// match, so clearing "frontend" can't eat "frontend-admin"'s files.
 function clearClientState(body) {
   const { system, id } = body
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)
   const manifest = readManifest(system)
   if (!findClient(manifest, id)) throw bad(`"${id}" is not a client in this system`)
   fs.rmSync(clientStatePath(system, id), { force: true })
+  const instanceRe = new RegExp(`^${clientModule(id)}\\.i\\d+\\.state\\.json$`)
+  let entries = []
+  try {
+    entries = fs.readdirSync(clientsDir(system))
+  } catch {
+    /* no clients dir yet — nothing to clear */
+  }
+  for (const f of entries) {
+    if (instanceRe.test(f)) fs.rmSync(path.join(clientsDir(system), f), { force: true })
+  }
   return { ok: true, cleared: true }
 }
 

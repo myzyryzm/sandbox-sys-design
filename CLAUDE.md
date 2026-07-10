@@ -159,10 +159,14 @@ rebuild** (the frontend re-reads them on a timer):
   rules, mounted read-only into the `<db>-cdc` worker container (`type:"cdc"`, `cdcOf:"<db>"`). Rule
   edits rewrite this file + `restart` the worker; the first rule builds the worker via a launched
   session (`frontend/server/cdc.js`).
-- `endtoend.json` — `{ processes:[{ id, name, client_list:[{client,method,intervalSeconds}],
-  failure_list:[…], constraint_list:[…] }] }`, named **end-to-end test processes**. Defining is pure
+- `endtoend.json` — `{ processes:[{ id, name, client_list:[{client,method, requestsPerSecond |
+  instances}], failure_list:[…], constraint_list:[…] }] }`, named **end-to-end test processes**. A
+  stateless client's row carries `requestsPerSecond` (0.01–20 req/s, fractional); a **stateful**
+  client's row instead carries `instances` (1–20 concurrent session-loop instances to keep alive);
+  legacy `intervalSeconds` rows are normalized on read (rps = 1/interval). Defining is pure
   data; **running** launches a session (the `sandbox-end-to-end-process` skill) that seeds preconditions,
-  drives the listed client methods on their intervals, probes for the `failure_list` states, and writes a
+  drives the listed client methods (stateless at their req/s, stateful as respawned instance pools),
+  probes for the `failure_list` states, and writes a
   PASS/FAIL report to `systems/<id>/endtoend-runs/`. The `run` flag is an in-memory coordination marker
   the session polls for early-stop (`frontend/server/endtoend.js`).
 - `streams.json` (per Kafka cluster) — `{ topics:[{ id, producers:[svc], consumers:[{groupId,members}],

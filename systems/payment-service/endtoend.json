@@ -7,22 +7,22 @@
         {
           "client": "mobile-app",
           "method": "checkout",
-          "intervalSeconds": 1
+          "requestsPerSecond": 1
         },
         {
           "client": "externals-trigger",
           "method": "trigger_processPayments",
-          "intervalSeconds": 10
+          "requestsPerSecond": 0.1
         },
         {
           "client": "externals-trigger",
           "method": "trigger_processPayouts",
-          "intervalSeconds": 10
+          "requestsPerSecond": 0.1
         },
         {
           "client": "mobile-app",
           "method": "shipOrder",
-          "intervalSeconds": 5
+          "requestsPerSecond": 0.2
         }
       ],
       "failure_list": [
