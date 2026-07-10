@@ -18,6 +18,8 @@ import WsSharedMethodsModal from './WsSharedMethodsModal.jsx'
 import { CUSTOM_RUNTIMES } from './customTypes/index.js'
 import EndToEndModal from './EndToEndModal.jsx'
 import SkillsModal from './SkillsModal.jsx'
+import SettingsModal from './SettingsModal.jsx'
+import { DEFAULT_PREFIX_COLORS, applyBadgeColors } from './prefixColors.js'
 import { queryInstant, queryVector } from './prometheus.js'
 import { pickColor } from './health.js'
 import { deriveFunctionTrace } from './scenarioBank.js'
@@ -46,6 +48,26 @@ function MoveIcon() {
       <polyline points="19 9 22 12 19 15" />
       <line x1="2" y1="12" x2="22" y2="12" />
       <line x1="12" y1="2" x2="12" y2="22" />
+    </svg>
+  )
+}
+
+function GearIcon() {
+  return (
+    <svg
+      className="move-icon"
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
   )
 }
@@ -145,6 +167,13 @@ export default function App() {
   const [pausedConsumers, setPausedConsumers] = useState(() => new Set())
   const [showEndToEnd, setShowEndToEnd] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
+  // Global app settings (repo-root settings.json via /api/settings). Fetched once on mount;
+  // prefixColors re-tint the diagram's badges (via CSS vars) and edges (passed to SystemDiagram).
+  const [settings, setSettings] = useState({
+    prefixColors: DEFAULT_PREFIX_COLORS,
+    dangerouslySkipPermissions: false,
+  })
   const [endpoints, setEndpoints] = useState([])
   // The node whose tabbed "Edit" modal is open (endpoints / gRPC / calls / schema /
   // topics / shutdown / delete — whichever tabs apply to that node's kind).
@@ -228,6 +257,29 @@ export default function App() {
       clearInterval(id)
     }
   }, [])
+
+  // Load global settings once on mount (colors + the dangerously-skip-permissions flag). These
+  // rarely change, so no polling — the Settings modal lifts saves back via onSave(setSettings).
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/settings')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled && d.ok) setSettings(d.settings)
+      })
+      .catch(() => {
+        /* keep the built-in defaults */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Push the configured prefix colors onto the --badge-* CSS vars so every badge across the
+  // SVG diagram + HTML lists re-tints. Edge colors are threaded to SystemDiagram via props below.
+  useEffect(() => {
+    applyBadgeColors(settings.prefixColors)
+  }, [settings.prefixColors])
 
   // Poll metrics on the manifest's cadence once the manifest is loaded.
   useEffect(() => {
@@ -724,6 +776,9 @@ export default function App() {
         <button className="header-btn no-auto" onClick={() => setShowSkills(true)}>
           📖 Skills
         </button>
+        <button className="header-btn no-auto" onClick={() => setShowSettings(true)}>
+          <GearIcon /> Settings
+        </button>
         <AddMenu
           groups={[
             {
@@ -782,6 +837,7 @@ export default function App() {
         nodeData={nodeData}
         endpoints={endpoints}
         systemId={SYSTEM_ID}
+        colors={settings.prefixColors}
         dragMode={dragMode}
         onRequestEdit={setEditTarget}
         onRequestConnectionResilience={setConnectionTarget}
@@ -907,6 +963,13 @@ export default function App() {
         />
       )}
       {showSkills && <SkillsModal onClose={() => setShowSkills(false)} />}
+      {showSettings && (
+        <SettingsModal
+          settings={settings}
+          onSave={setSettings}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
       {showGrpcContracts && (
         <GrpcContractsModal
           systemId={SYSTEM_ID}

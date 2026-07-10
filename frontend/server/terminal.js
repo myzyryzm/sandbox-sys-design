@@ -13,6 +13,7 @@ import path from 'node:path'
 import { WebSocketServer } from 'ws'
 import nodePty from 'node-pty'
 import { repoRoot, systemsDir, isValidSystem } from './systems.js'
+import { readSettings } from './settings.js'
 
 // Completion sentinel. Queue-launched sessions (mode === 'new') are instructed to
 // print DONE_TOKEN as their very last action; we watch the PTY output for it and
@@ -178,8 +179,13 @@ export default function claudeTerminal() {
         } else {
           args = ['--append-system-prompt', buildSystemPrompt(id)]
         }
-        // Pin model + effort ahead of the mode-specific flags for every session.
-        args = [...MODEL_ARGS, ...args]
+        // Pin model + effort ahead of the mode-specific flags for every session. When the
+        // global "dangerously skip permissions" setting is on, prepend the flag too, so it
+        // applies to every mode (new / resume / ad-hoc) and stays BEFORE any positional prompt.
+        // Read server-side (not from a browser query param) so this escalation can't be forced
+        // from the client.
+        const permArgs = readSettings().dangerouslySkipPermissions ? ['--dangerously-skip-permissions'] : []
+        args = [...MODEL_ARGS, ...permArgs, ...args]
 
         const pty = nodePty.spawn('claude', args, {
           name: 'xterm-256color',

@@ -54,12 +54,16 @@ const COLOR_HEX = {
   orange: '#fb8c00',
 }
 
-const TRACE_COLOR = '#6ea8fe'
-const GRPC_COLOR = '#b18cf2'
+// Defaults for the user-configurable relationship-edge colors (Settings → prefix colors).
+// The LIVE values are derived from the `colors` prop inside the component; these fallbacks
+// keep the diagram identical when no setting is present. Must match DEFAULT_PREFIX_COLORS in
+// prefixColors.js and the badge fallbacks in styles.css so a row and its traced line stay in sync.
+const DEFAULT_TRACE_COLOR = '#6ea8fe'
+const DEFAULT_GRPC_COLOR = '#b18cf2'
 const REPLICA_COLOR = '#3fb6a8'
 // Kafka "consume" edge (a consumer service → the cluster it reads from). Solid amber so it
 // reads as distinct from a solid-gray producer/dep edge that points the same way (into the cluster).
-const CONSUME_COLOR = '#e0a44f'
+const DEFAULT_CONSUME_COLOR = '#e0a44f'
 // Base dependency-edge color (matches `.edge` in styles.css) — reused for the arrowhead
 // on the collapsed websocket-fleet in/out edges.
 const EDGE_COLOR = '#5b6270'
@@ -67,7 +71,7 @@ const EDGE_COLOR = '#5b6270'
 // cyan, distinct from the brighter trace blue / gRPC purple / replica teal; drawn faint +
 // dashed (see `.etcd-edge`) so the always-on discovery topology stays subordinate to the
 // bright click-trace that lights the same relationship.
-const ETCD_COLOR = '#5aa0c0'
+const DEFAULT_ETCD_COLOR = '#5aa0c0'
 // When A→B and B→A both exist, each line is nudged this many px perpendicular to its
 // axis so the two opposing arrows render as separate parallel lines instead of overlapping.
 const EDGE_PARALLEL_OFFSET = 7
@@ -342,6 +346,9 @@ export default function SystemDiagram({
   nodeData,
   endpoints = [],
   systemId,
+  // User-configurable relationship-edge colors (Settings → prefix colors): { function, grpc,
+  // consumer, etcdEdge }. Fall back to the DEFAULT_* constants below so unset = original look.
+  colors = {},
   // Drag mode: when true, every node can be repositioned and the system boundary box can be
   // moved/resized; the normal click actions (trace/Edit/select) are suppressed. Drops are
   // persisted to the manifest via POST /api/layout.
@@ -421,6 +428,13 @@ export default function SystemDiagram({
   onSelectRpc,
   onClearRpcTrace,
 }) {
+  // Live relationship-edge colors from Settings, falling back to the module defaults so the
+  // diagram is unchanged until the user overrides a color. These re-tint the same edges +
+  // arrowheads whose badges the --badge-* CSS vars paint, keeping row and traced line in sync.
+  const TRACE_COLOR = colors?.function ?? DEFAULT_TRACE_COLOR
+  const GRPC_COLOR = colors?.grpc ?? DEFAULT_GRPC_COLOR
+  const CONSUME_COLOR = colors?.consumer ?? DEFAULT_CONSUME_COLOR
+  const ETCD_COLOR = colors?.etcdEdge ?? DEFAULT_ETCD_COLOR
   const [selectedKey, setSelectedKey] = useState(null)
   // Index of the trace hop whose description popup is open (or null). Reset whenever the active
   // trace changes so a stale index can't point at the wrong hop of a different trace.
