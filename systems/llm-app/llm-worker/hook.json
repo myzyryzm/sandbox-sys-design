@@ -1,7 +1,13 @@
 {
-  "description": "",
+  "description": "call this llm worker's paired consumer (if it has been set by UpdateConsumer) OnChatEvict grpc with the chat_id that of the item that has been evicted",
   "implemented": false,
-  "conversationId": "",
+  "conversationId": "0964dc95-aaaf-42c6-9cf0-315951aa7093",
   "createdAt": "2026-07-08T03:21:42.039Z",
-  "history": []
+  "updatedAt": "2026-07-10T21:50:09.887Z",
+  "history": [
+    {
+      "at": "2026-07-10T21:50:09.887Z",
+      "description": "call this llm worker's paired consumer (if it has been set by UpdateConsumer) OnChatEvict grpc with the chat_id that of the item that has been evicted"
+    }
+  ]
 }

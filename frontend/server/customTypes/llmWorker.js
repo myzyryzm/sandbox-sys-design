@@ -260,6 +260,22 @@ async function onAdd({ system, name, manifest }) {
     grpc: { servers: ['Worker'], clients: [], overrides: [] },
     llm: { stream: streamName },
   })
+  // The worker's redis contract is fixed (runs:started announcements + per-run
+  // tokens:<id> streams), so the stream node is born with those keyspaces declared —
+  // typed KEY rows on the diagram, managed afterwards in its Keyspaces tab. Readers
+  // (e.g. a persistence reader group) are declared/scanned in later, not known here.
+  const ksNow = new Date().toISOString()
+  const streamKeyspace = (ks) => ({
+    ...ks,
+    writers: [name],
+    readers: [],
+    verified: true,
+    origin: 'user',
+    suggestedWriters: [],
+    suggestedReaders: [],
+    createdAt: ksNow,
+    updatedAt: ksNow,
+  })
   addManifestNode(system, manifest, {
     id: streamName,
     label: streamName,
@@ -269,6 +285,10 @@ async function onAdd({ system, name, manifest }) {
     position: { x: position.x + 300, y: position.y },
     metrics: redisMetrics(streamName),
     health: { query: `redis_up{job="${streamName}"}`, rules: HEALTH_RULES },
+    keyspaces: [
+      streamKeyspace({ name: 'runs:started', match: 'exact', type: 'stream', shorthand: 'announce' }),
+      streamKeyspace({ name: 'tokens:', match: 'prefix', type: 'stream' }),
+    ],
   })
   addManifestNode(system, manifest, {
     id: scalerId,

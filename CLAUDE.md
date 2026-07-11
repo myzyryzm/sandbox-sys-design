@@ -80,7 +80,14 @@ generic renderer of it — **to change what the user sees, edit the manifest, no
   `create-client` / …), `external:true` (clients + external services, drawn outside the boundary),
   `schemaModels:[]` (model-bank names backing a database's schema), the ownership links `replicaOf`
   / `cdcOf` / `instanceOf` (+ the entry's `svcLb:{algorithm,instances}`), and the `grpc` /
-  `resilience` blocks.
+  `resilience` blocks. A redis node also carries its live-edited `keyspaces[]` (typed key
+  namespaces + per-keyspace writers/readers and per-writer `writeModes` — async vs WAIT pseudo-sync
+  — managed by `/api/redis`, no rebuild) and, when the Topology tab reshaped it, a
+  `sentinel:{size,quorum,masterName,members}` block (primary + `replicaOf` replicas + 3 real
+  sentinel containers) or a `redisCluster:{shards,replicasPerShard,members}` block (a real Redis
+  Cluster of `<name>-1..M` member containers behind the one node; no bare `<name>` container) —
+  mutually exclusive, reconciled mechanically by `POST /api/redis/topology`
+  (`frontend/server/redisTopology.js`), with member dots drawn etcd-style (cluster masters ringed).
 - `edges[]`: `{ from, to }` node ids, plus an optional `origin` (e.g. `consumer-fn` for a Kafka
   consumer-function edge).
 - `boundary:{x,y,w,h}` is the dotted system-boundary rectangle; drag mode persists it (and node
@@ -194,6 +201,7 @@ skill in `.claude/skills/` — it has the canonical procedure and `Verify` steps
 | --- | --- |
 | Add/edit/delete an HTTP route on a service | `sandbox-endpoint` |
 | Add/update/delete a datastore (postgres/mongo/redis/MinIO) **or a read replica** | `sandbox-database` |
+| Retrofit redis writers/readers after a **Topology** change (Sentinel/Cluster + WAIT modes) | `sandbox-redis-topology` |
 | Build a database's CDC worker (capture changes → Kafka) | `sandbox-database-cdc` |
 | Add/update a Kafka cluster, topics, and per-service **consumer functions** | `sandbox-event-stream` |
 | Wire **etcd service discovery** (leased-key registration + watch listeners) | `sandbox-etcd` |
@@ -224,7 +232,8 @@ button + `EditQueuePanel.jsx`) that runs pending sessions sequentially in the on
   test process). A service template lives at `frontend/server/templates/service/` ("Add service" clones
   it); `templates/client/` and `templates/download-coordinator/` back the client + coordinator flows.
 - `frontend/server/<feature>.js` — one plugin per `/api/<feature>` route, all wired in `vite.config.js`:
-  `services`, `databases` (+ `dbschema`, `dbseed`, `cdc`, `replicas`), `endpoints`, `models`,
+  `services`, `databases` (+ `dbschema`, `dbseed`, `cdc`, `replicas`, `redisKeyspaces`,
+  `redisTopology`), `endpoints`, `models`,
   `eventstreams` + `consumers`, `etcd`, `grpc` (+ `grpcInstall`), `resilience`, `serviceLb`, `outage`, `externalServices`,
   `clients` + `scenarios` (+ `clientScript` helper), `customServices` (+ `customTypes/` recipes),
   `endtoend`, `layout`, `skills`, `remove`, `terminal`. Shared primitives live in

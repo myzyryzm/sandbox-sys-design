@@ -119,6 +119,18 @@ function ownedServices(id, kind, node) {
   // An etcd cluster is one node owning N member containers (<id>-1..N, no exporter —
   // etcd serves /metrics natively).
   if (kind === 'etcd') return node?.etcd?.members?.length ? [...node.etcd.members] : [id]
+  // A clustered redis (Topology tab) owns its member containers + their exporters +
+  // the one-shot cluster former — there is no bare `<id>` container in cluster mode.
+  if (kind === 'database' && node?.redisCluster?.members?.length) {
+    const m = node.redisCluster.members
+    return [`${id}-init`, `${id}-cluster-init`, ...m, ...m.map((x) => `${x}-exporter`)]
+  }
+  // A sentinel-replicated redis also owns its sentinels (+ exporters); its read
+  // replicas are separate nodes cascaded via cascadeChildIds like any primary's.
+  if (kind === 'database' && node?.sentinel?.members?.length) {
+    const s = node.sentinel.members
+    return [id, `${id}-exporter`, `${id}-init`, ...s, ...s.map((x) => `${x}-exporter`)]
+  }
   return kind === 'database' || kind === 'event-stream'
     ? [id, `${id}-exporter`, `${id}-init`]
     : [id]
@@ -298,6 +310,26 @@ function pruneEtcd(system, removedIds) {
       listeners: (Array.isArray(ks.listeners) ? ks.listeners : []).filter((l) => l && !removedIds.has(l.service)),
     }))
   if (JSON.stringify(data.keyspaces) !== before) fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n')
+}
+
+// Strip removed node ids from every redis node's keyspace writers/readers (declared
+// AND scan-suggested) — in-memory, the caller's writeManifest persists it. Soft
+// references by design: a keyspace declaration never blocks deleting a service (the
+// diagram also filters missing ids at trace time, so a stale id can't draw an arrow).
+function scrubRedisKeyspaceRoles(manifest, removedIds) {
+  for (const node of manifest.nodes) {
+    if (node.type !== 'redis' || !Array.isArray(node.keyspaces)) continue
+    for (const ks of node.keyspaces) {
+      for (const key of ['writers', 'readers', 'suggestedWriters', 'suggestedReaders']) {
+        if (Array.isArray(ks[key])) ks[key] = ks[key].filter((s) => !removedIds.has(s))
+      }
+      // Per-writer WAIT write modes are keyed by writer id — scrub those too.
+      if (ks.writeModes) {
+        for (const rid of removedIds) delete ks.writeModes[rid]
+        if (!Object.keys(ks.writeModes).length) delete ks.writeModes
+      }
+    }
+  }
 }
 
 // The owned children a delete cascades to — read replicas (replicaOf) and the CDC
@@ -566,6 +598,8 @@ export async function handleDelete(body) {
       removeClientScript(system, rid)
     }
     removeScrapeJob(system, rid)
+    // A sentinel-replicated redis also owns the shared `<id>-sentinel` scrape job.
+    if (rnode?.sentinel) removeScrapeJob(system, `${rid}-sentinel`)
     scrubManifestNode(manifest, rid)
     fs.rmSync(path.join(systemDir(system), rid), { recursive: true, force: true })
   }
@@ -578,6 +612,10 @@ export async function handleDelete(body) {
   if (node?.type === 'service-lb') {
     fs.rmSync(path.join(systemDir(system), `${id}-lb`), { recursive: true, force: true })
   }
+  // A deleted sentinel-replicated redis also owns its sentinel config folder.
+  if (node?.sentinel) {
+    fs.rmSync(path.join(systemDir(system), `${id}-sentinel`), { recursive: true, force: true })
+  }
   // A deleted etcd cluster also owns the top-level discovery registry (etcd.json —
   // fixed name, one cluster per system; the node has no folder of its own).
   if (kind === 'etcd') {
@@ -589,6 +627,8 @@ export async function handleDelete(body) {
   pruneReaders(system, removedIds)
   // Drop etcd keyspaces/listeners that referenced any removed service.
   pruneEtcd(system, removedIds)
+  // Strip removed services from every redis keyspace's writers/readers.
+  scrubRedisKeyspaceRoles(manifest, removedIds)
   writeManifest(system, manifest)
 
   const log = await rebuild(system, kind)

@@ -7,7 +7,7 @@ import {
 } from './prefixColors.js'
 
 // Order the color roles are shown in the modal.
-const ROLE_ORDER = ['http', 'function', 'consumer', 'grpc', 'etcdKey', 'etcdEdge']
+const ROLE_ORDER = ['http', 'function', 'consumer', 'grpc', 'etcdKey', 'redisKey', 'etcdEdge']
 
 /**
  * Global app settings (repo-root settings.json via /api/settings). The first two:

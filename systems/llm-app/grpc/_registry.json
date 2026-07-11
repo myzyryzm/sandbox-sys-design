@@ -10,7 +10,16 @@
           "requestType": "AddPromptRequest",
           "responseType": "AddPromptReply",
           "requestStreaming": false,
-          "responseStreaming": false
+          "responseStreaming": false,
+          "description": "Admits a user prompt into the continuous-batching engine. Tokenizes the lowercased a-z content; on a chat cache-hit it reuses the cached prefix/KV state (continue_with), otherwise it starts a fresh sequence (loading prior chat history from the chat DB). Returns accepted + seq_id, or accepted=false with reason 'worker full' (batch at max_active) or 'empty prompt'. On accept it announces {run_id} on the redis runs:started stream and streams typed token entries to tokens:<message_id>. Mid-run: a prompt added while a batch is running joins at the next ~0.25s step - it never blocks the in-flight step, never waits for the current batch to drain, and is never dropped (the only non-join outcome is the 'worker full' reject). The worker steps a snapshot of the active set taken at the start of each tick and does all inference outside the lock, so add_prompt holds the lock only for an O(1) append; calling AddPrompt while the worker is mid-inference (partway through a token's layer passes) is safe and the new sequence is picked up on the following tick.",
+          "conversationId": null,
+          "history": [
+            {
+              "at": "2026-07-10T00:00:00.000Z",
+              "change": "Admits a user prompt into the continuous-batching engine. Tokenizes the lowercased a-z content; on a chat cache-hit it reuses the cached prefix/KV state (continue_with), otherwise it starts a fresh sequence (loading prior chat history from the chat DB). Returns accepted + seq_id, or accepted=false with reason 'worker full' (batch at max_active) or 'empty prompt'. On accept it announces {run_id} on the redis runs:started stream and streams typed token entries to tokens:<message_id>. Mid-run: a prompt added while a batch is running joins at the next ~0.25s step - it never blocks the in-flight step, never waits for the current batch to drain, and is never dropped (the only non-join outcome is the 'worker full' reject). The worker steps a snapshot of the active set taken at the start of each tick and does all inference outside the lock, so add_prompt holds the lock only for an O(1) append; calling AddPrompt while the worker is mid-inference (partway through a token's layer passes) is safe and the new sequence is picked up on the following tick.",
+              "conversationId": null
+            }
+          ]
         },
         {
           "name": "GetStatus",
@@ -19,7 +28,16 @@
           "requestType": "StatusRequest",
           "responseType": "StatusReply",
           "requestStreaming": false,
-          "responseStreaming": false
+          "responseStreaming": false,
+          "description": "Reports the worker's live batch capacity: has_space (room for another prompt), active_count (sequences currently decoding), cached_count (idle prefix-cached sequences), and max_active (the configured cap, read live from worker.json). Callers/schedulers use it to decide whether to route a prompt to this worker.",
+          "conversationId": null,
+          "history": [
+            {
+              "at": "2026-07-10T00:00:00.000Z",
+              "change": "Reports the worker's live batch capacity: has_space (room for another prompt), active_count (sequences currently decoding), cached_count (idle prefix-cached sequences), and max_active (the configured cap, read live from worker.json). Callers/schedulers use it to decide whether to route a prompt to this worker.",
+              "conversationId": null
+            }
+          ]
         },
         {
           "name": "UpdateConsumer",
@@ -33,10 +51,19 @@
           "requestType": "UpdateConsumerRequest",
           "responseType": "UpdateConsumerReply",
           "requestStreaming": false,
-          "responseStreaming": false
+          "responseStreaming": false,
+          "description": "Records the paired feeding consumer's host:port on the engine (engine.source) so the worker can call back into it - e.g. the on_cache_evict hook invoking Consumer.OnChatEvict when a chat's prefix cache is evicted. Returns ok.",
+          "conversationId": null,
+          "history": [
+            {
+              "at": "2026-07-10T00:00:00.000Z",
+              "change": "Records the paired feeding consumer's host:port on the engine (engine.source) so the worker can call back into it - e.g. the on_cache_evict hook invoking Consumer.OnChatEvict when a chat's prefix cache is evicted. Returns ok.",
+              "conversationId": null
+            }
+          ]
         }
       ],
-      "conversationId": "589c781b-e513-4539-b6c2-447180c1a257",
+      "conversationId": "noop",
       "createdAt": "2026-07-08T03:21:38.162Z",
       "source": "llm_worker"
     },
@@ -74,7 +101,7 @@
           "conversationId": "67b8cb91-ab1e-4fbf-ac78-1aaa34bcb79f"
         }
       ],
-      "conversationId": "67b8cb91-ab1e-4fbf-ac78-1aaa34bcb79f",
+      "conversationId": "test-verify-0001",
       "createdAt": "2026-07-09T20:04:47.343Z"
     }
   }

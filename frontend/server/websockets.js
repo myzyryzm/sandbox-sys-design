@@ -451,6 +451,11 @@ function tierNodes(manifest, ids) {
     metrics: redisMetrics(ids.bus),
     health: { query: `redis_up{job="${ids.bus}"}`, rules: HEALTH_RULES },
   })
+  // The presence cache's key contract is fixed (`presence:<clientId>` -> serverId,
+  // TTL'd strings, every relay both writes and reads), so the node is born with that
+  // keyspace declared — a typed KEY row on the diagram whose click-trace draws
+  // server → presence → server. The bus gets none: pub/sub channels aren't keys.
+  const ksNow = new Date().toISOString()
   nodes.push({
     id: ids.presence,
     label: ids.presence,
@@ -461,6 +466,20 @@ function tierNodes(manifest, ids) {
     position: { x: 680, y: baseY + 180 },
     metrics: redisMetrics(ids.presence),
     health: { query: `redis_up{job="${ids.presence}"}`, rules: HEALTH_RULES },
+    keyspaces: [{
+      name: 'presence:',
+      match: 'prefix',
+      type: 'string',
+      shorthand: 'presence',
+      writers: [...ids.servers],
+      readers: [...ids.servers],
+      verified: true,
+      origin: 'user',
+      suggestedWriters: [],
+      suggestedReaders: [],
+      createdAt: ksNow,
+      updatedAt: ksNow,
+    }],
   })
   nodes.push({
     id: ids.client,

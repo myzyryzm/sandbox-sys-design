@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
 import { referencedModels, buildDbSchemaPrompt } from './modelBank.js'
+import { REDIS_KS_TYPES, REDIS_BADGE } from './redisKeyspaceMeta.js'
 
 /**
  * Modal form for "Add database". Lets the user pick a database engine and
@@ -28,6 +29,9 @@ const TYPE_META = {
     label: 'Redis (key-value)',
     entityWord: 'Key namespace',
     hasFields: false,
+    // Redis entities are KEYSPACES: name + prefix/exact match + expected redis type +
+    // optional shorthand. They persist onto the manifest node as its `keyspaces` block.
+    isRedis: true,
     defaultName: 'app-cache',
   },
   blob: {
@@ -55,6 +59,7 @@ const TYPE_META = {
 const MODEL_ENGINES = ['postgres', 'mongodb', 'dynamodb', 'cassandra']
 
 function blankEntity(meta) {
+  if (meta.isRedis) return { name: '', match: 'prefix', ksType: 'string', shorthand: '', fields: [] }
   return { name: '', fields: meta.hasFields ? [{ name: '', type: meta.fieldTypes[0] }] : [] }
 }
 
@@ -148,11 +153,14 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
       }
 
       // Manual entities: drop blank rows; only send fields for engines that use them.
+      // Redis rows carry the keyspace shape instead: { name, match, type, shorthand }.
       const payloadEntities = entities
         .filter((en) => en.name.trim())
-        .map((en) => meta.hasFields
-          ? { name: en.name.trim(), fields: en.fields.filter((f) => f.name.trim()).map((f) => ({ name: f.name.trim(), type: f.type })) }
-          : { name: en.name.trim() })
+        .map((en) => meta.isRedis
+          ? { name: en.name.trim(), match: en.match, type: en.ksType, shorthand: (en.shorthand || '').trim() }
+          : meta.hasFields
+            ? { name: en.name.trim(), fields: en.fields.filter((f) => f.name.trim()).map((f) => ({ name: f.name.trim(), type: f.type })) }
+            : { name: en.name.trim() })
       const res = await fetch('/api/databases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -250,9 +258,39 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
                   <input
                     value={en.name}
                     onChange={(e) => updateEntity(ei, { name: e.target.value })}
-                    placeholder={`${meta.entityWord.toLowerCase()} name`}
+                    placeholder={meta.isRedis ? 'match:  ·  matchmaking_pool' : `${meta.entityWord.toLowerCase()} name`}
                     disabled={busy}
                   />
+                  {meta.isRedis && (
+                    <>
+                      <select
+                        value={en.match}
+                        title="prefix: every key starting with the name · exact: the one key itself"
+                        onChange={(e) => updateEntity(ei, { match: e.target.value })}
+                        disabled={busy}
+                      >
+                        <option value="prefix">prefix</option>
+                        <option value="exact">exact</option>
+                      </select>
+                      <select
+                        value={en.ksType}
+                        title="Expected redis type — the badge shown on the diagram row"
+                        onChange={(e) => updateEntity(ei, { ksType: e.target.value })}
+                        disabled={busy}
+                      >
+                        {REDIS_KS_TYPES.map((t) => (
+                          <option key={t} value={t}>{t} ({REDIS_BADGE[t]})</option>
+                        ))}
+                      </select>
+                      <input
+                        value={en.shorthand}
+                        onChange={(e) => updateEntity(ei, { shorthand: e.target.value })}
+                        placeholder="shorthand (optional)"
+                        title="Displayed on the diagram instead of the key name; what services reference"
+                        disabled={busy}
+                      />
+                    </>
+                  )}
                   {entities.length > 1 && (
                     <button type="button" className="link-danger" onClick={() => removeEntity(ei)} disabled={busy}>remove</button>
                   )}
