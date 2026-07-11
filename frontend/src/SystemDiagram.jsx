@@ -19,6 +19,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { customTypeOf, CUSTOM_TYPES } from './customTypes/index.js'
 import { isExternalEndpoint, endpointPolicy, localPathOf } from './endpointPolicy.js'
 import { deriveFunctionTrace } from './scenarioBank.js'
+import { REDIS_BADGE, keyspaceLabel, keyspaceEdgeLabel } from './redisKeyspaceMeta.js'
 
 const NODE_W = 190
 const HEADER_H = 30
@@ -215,9 +216,11 @@ function svcOrdinal(id) {
 // Controllable nodes carry a bottom "Edit" button (which opens the tabbed edit modal);
 // the LB, other infra, websocket servers, and load-balanced instances do not. A scaler
 // sidecar DOES carry one: it sits at the top of its group's stack and hosts the GROUP's
-// Edit button (the click opens its base's modal — see the Edit onClick).
+// Edit button (the click opens its base's modal — see the Edit onClick). EVERY redis
+// node gets one regardless of origin — even a custom-type-owned stream (e.g. an LLM
+// worker's) needs its Keyspaces tab, though its Shutdown/Delete stay with the owner.
 function hasEditButton(node) {
-  return isDeletable(node) && !isWsServer(node) && !isSvcInstance(node)
+  return (isDeletable(node) || node.type === 'redis') && !isWsServer(node) && !isSvcInstance(node)
 }
 
 // The BASE node of a WORKER GROUP — any custom type whose frontend module declares a
@@ -427,6 +430,13 @@ export default function SystemDiagram({
   rpcTrace = null,
   onSelectRpc,
   onClearRpcTrace,
+  // A selected redis keyspace (a `keyspaces` entry on a type:"redis" manifest node, rendered
+  // as a typed KEY row), traced each declared writer → redis and redis → each declared reader.
+  // Mutually exclusive with the other traces. Set via onSelectRedisKeyspace, cleared via
+  // onClearRedisTrace.
+  redisTrace = null,
+  onSelectRedisKeyspace,
+  onClearRedisTrace,
 }) {
   // Live relationship-edge colors from Settings, falling back to the module defaults so the
   // diagram is unchanged until the user overrides a color. These re-tint the same edges +
@@ -631,6 +641,8 @@ export default function SystemDiagram({
       ...keyspacesOf(node.id).map((ks) => ({ kind: 'ks', ks })),
       // A service's etcd subscriptions (SUB rows), anchored on the real node like CONS rows.
       ...subscriptionsOf(node.groupVirtual ? node.stateKey : node.id).map((s) => ({ kind: 'sub', ...s })),
+      // A redis node's declared keyspaces (typed KEY rows), straight off the manifest node.
+      ...(node.type === 'redis' ? node.keyspaces || [] : []).map((ks) => ({ kind: 'redisks', ks })),
       ...wsStatRowsOf(node.id),
     ]
   }
@@ -1022,6 +1034,9 @@ export default function SystemDiagram({
   // A served-RPC trace lights the server and every caller → server gRPC edge. The server node
   // it points at must still exist. Mutually exclusive with the other traces (App nulls the rest).
   const rpct = rpcTrace && byId[rpcTrace.service] ? rpcTrace : null
+  // A redis-keyspace trace lights the redis node plus its declared writers/readers. The redis
+  // node must still exist; deleted writers/readers are filtered at edge-build time below.
+  const rkt = redisTrace && byId[redisTrace.redis] ? redisTrace : null
   if (ft && ft.wsBuiltin) {
     // A ws pool client's builtin method has no authored steps — trace the TIER path
     // instead: client → its L4 lb → each relay server → the bus + presence redis.
@@ -1155,6 +1170,16 @@ export default function SystemDiagram({
       traceEdges.push([kt.service, kt.etcd, `lease-put ${kt.prefix}<worker> · TTL keepalive`])
     }
     for (const l of listeners) traceEdges.push([kt.etcd, l, `watch ${kt.prefix} (pushed)`])
+  } else if (rkt) {
+    // A redis keyspace: each declared writer → redis, then redis → each declared reader,
+    // labeled with the type's canonical verbs (`XADD tokens:*` / `GET presence:*`). The
+    // arrows exist only while the KEY row is selected — no permanent manifest edges. With
+    // nothing declared yet, the redis node alone is lit (still shows where the keys live).
+    const writers = (rkt.writers || []).filter((w) => byId[w])
+    const readers = (rkt.readers || []).filter((r) => byId[r])
+    traceNodes = new Set([rkt.redis, ...writers, ...readers])
+    for (const w of writers) traceEdges.push([w, rkt.redis, keyspaceEdgeLabel(rkt, 'write')])
+    for (const r of readers) traceEdges.push([rkt.redis, r, keyspaceEdgeLabel(rkt, 'read')])
   } else if (rpct) {
     // A served gRPC method: light the server and draw each caller → server edge — every service
     // whose manifest `grpc.clients` dials this contract with this server in its `targets`. gRPC
@@ -1600,6 +1625,8 @@ export default function SystemDiagram({
               onClearFunctionTrace?.()
               onClearConsumerTrace?.()
               onClearKeyspaceTrace?.()
+              onClearRpcTrace?.()
+              onClearRedisTrace?.()
             }
       }
       onPointerMove={dragMode ? onPointerMove : undefined}
@@ -2342,6 +2369,46 @@ export default function SystemDiagram({
                     <text x={PAD} y={y + 12} className="endpoint-row">
                       <tspan className="endpoint-method endpoint-method-etcd">SUB</tspan> {onName(ident)}
                     </text>
+                  </g>
+                )
+              }
+              if (row.kind === 'redisks') {
+                // A redis keyspace (the node's manifest `keyspaces` entry): the declared TYPE
+                // stands in for the method badge (STREAM → STRM, STRING → STR), the label is the
+                // shorthand when set, else the raw key name. Clicking traces each declared
+                // writer → redis and redis → each declared reader. A scan-discovered entry the
+                // user hasn't confirmed yet carries an amber "verify" marker (the Verify button
+                // lives in the node's Keyspaces tab).
+                const ks = row.ks
+                const active =
+                  !!redisTrace && redisTrace.redis === node.id && redisTrace.name === ks.name
+                return (
+                  <g
+                    key={`redisks-${ks.name}`}
+                    className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      // A redis-keyspace trace is exclusive with the LB / method / function /
+                      // consumer / etcd-keyspace selections.
+                      setSelectedKey(null)
+                      onClearMethodTrace?.()
+                      onClearFunctionTrace?.()
+                      onClearConsumerTrace?.()
+                      onClearKeyspaceTrace?.()
+                      if (active) onClearRedisTrace?.()
+                      else onSelectRedisKeyspace?.(ks, node.id)
+                    }}
+                  >
+                    <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={y + 12} className="endpoint-row">
+                      <tspan className="endpoint-method endpoint-method-redis">{REDIS_BADGE[ks.type] || 'KEY'}</tspan> {keyspaceLabel(ks)}
+                    </text>
+                    {ks.verified === false && (
+                      <text x={NODE_W - PAD} y={y + 12} className="keyspace-unverified">
+                        <title>unverified — confirm it in the node's Keyspaces tab</title>
+                        verify
+                      </text>
+                    )}
                   </g>
                 )
               }

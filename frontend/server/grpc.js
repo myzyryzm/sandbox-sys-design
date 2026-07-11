@@ -139,6 +139,9 @@ function publicMethod(m) {
     formAuthored: inferFormAuthored(m),
     description: typeof m.description === 'string' ? m.description : '',
     conversationId: m.conversationId || null,
+    // Append-only changelog of description updates (oldest-first); the UI shows
+    // it newest-first under each method. Missing on legacy records → [].
+    history: Array.isArray(m.history) ? m.history : [],
   }
 }
 
@@ -159,6 +162,7 @@ function normalizeUpsert(u) {
     formAuthored: true,
     description: '',
     conversationId: null,
+    history: [],
   }
 }
 
@@ -263,7 +267,7 @@ async function createContract(body) {
     await generateInto(system, new Map([[contract, body.protoFile]]))
     registry.contracts[contract] = {
       source: 'upload',
-      methods: methods.map((m) => ({ ...m, formAuthored: false, description: '', conversationId: null })),
+      methods: methods.map((m) => ({ ...m, formAuthored: false, description: '', conversationId: null, history: [] })),
       conversationId: null,
       createdAt: new Date().toISOString(),
     }
@@ -339,6 +343,7 @@ async function applyChanges(body) {
         formAuthored: false,
         description: prevByName.get(m.name)?.description || '',
         conversationId: prevByName.get(m.name)?.conversationId || null,
+        history: prevByName.get(m.name)?.history || [],
       })))
       protoTexts.set(name, ch.protoFile)
       becameUpload.add(name)
@@ -358,9 +363,10 @@ async function applyChanges(body) {
       if (!inferFormAuthored(old)) {
         throw bad(`method "${u.name}" of ${name} came from an uploaded .proto — delete it or re-upload the contract to reshape it`)
       }
-      // An edit keeps the method's behavior text, session and message names.
+      // An edit keeps the method's behavior text, changelog, session and message names.
       u.description = typeof old.description === 'string' ? old.description : ''
       u.conversationId = old.conversationId || null
+      u.history = Array.isArray(old.history) ? old.history : []
       if (old.requestType) u.requestType = old.requestType
       if (old.responseType) u.responseType = old.responseType
     }
@@ -517,9 +523,20 @@ function attachContract(body) {
   writeManifest(system, manifest)
 
   entry.server = service
-  entry.methods = (entry.methods || []).map((m) =>
-    typeof descriptions[m.name] === 'string' ? { ...m, description: descriptions[m.name] } : m,
-  )
+  const now = new Date().toISOString()
+  entry.methods = (entry.methods || []).map((m) => {
+    if (typeof descriptions[m.name] !== 'string') return m
+    const text = descriptions[m.name]
+    const history = Array.isArray(m.history) ? m.history : []
+    // A seeded description becomes the method's first changelog entry.
+    return {
+      ...m,
+      description: text,
+      history: text.trim()
+        ? [...history, { at: now, change: text, conversationId: body.conversationId || null }]
+        : history,
+    }
+  })
   if (typeof body.conversationId === 'string' && body.conversationId) entry.conversationId = body.conversationId
   writeRegistry(system, registry)
   return { ok: true, service, grpc: node.grpc }
@@ -571,6 +588,26 @@ function upsertDescription(body) {
   if (!method) throw bad(`method "${body.method}" does not exist on ${contract}`)
   const description = body.description
   if (typeof description !== 'string' || description.length > 8000) throw bad('description is invalid or too long')
+  const change = typeof body.change === 'string' ? body.change : ''
+  if (change.length > 8000) throw bad('change is too long')
+
+  // Append-only changelog: each entry is the raw delta the user typed in one
+  // update (mirrors endpoints.js / consumers.js). Capture the prior description
+  // BEFORE overwriting so a record that already had a description but no history
+  // (e.g. a legacy attach) gets a sensible baseline "created" entry first.
+  const prev = typeof method.description === 'string' ? method.description : ''
+  if (!Array.isArray(method.history)) method.history = []
+  if (method.history.length === 0 && prev.trim()) {
+    method.history.push({ at: new Date().toISOString(), change: prev, conversationId: method.conversationId || null })
+  }
+  // Prefer the explicit delta; fall back to diffing (older clients that only
+  // send the joined `description`).
+  const derived =
+    description !== prev ? (description.startsWith(prev) ? description.slice(prev.length) : description) : ''
+  const effectiveChange = (change.trim() || derived).trim()
+  if (effectiveChange) {
+    method.history.push({ at: new Date().toISOString(), change: effectiveChange, conversationId: body.conversationId || null })
+  }
 
   method.description = description
   if (typeof body.conversationId === 'string' && body.conversationId) {

@@ -7,6 +7,53 @@ import {
   methodSig,
 } from './grpcBank.js'
 
+// A history entry's ISO timestamp -> a short, local, human label (best-effort).
+function fmtAt(at) {
+  if (!at) return ''
+  const d = new Date(at)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
+}
+
+// Collapsible, read-only changelog of a served method's description updates.
+// Entries are stored oldest-first; shown newest-first (the first-ever entry is
+// tagged "created"). Reuses the endpoint/consumer changelog styling.
+function MethodChangelog({ history }) {
+  const [open, setOpen] = useState(false)
+  if (!history?.length) return null
+  return (
+    <>
+      <button
+        type="button"
+        className="skill-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`skill-caret${open ? ' open' : ''}`}>▶</span>
+        Changelog ({history.length})
+      </button>
+      {open && (
+        <div className="endpoint-history">
+          <ol className="endpoint-history-list">
+            {history
+              .map((h, i) => ({ h, i }))
+              .reverse()
+              .map(({ h, i }) => (
+                <li key={i} className="endpoint-history-row">
+                  <div className="endpoint-history-meta">
+                    <span className="endpoint-history-num">#{i + 1}</span>
+                    {i === 0 && <span className="endpoint-history-initial">created</span>}
+                    {fmtAt(h.at) && <span className="endpoint-history-at">{fmtAt(h.at)}</span>}
+                  </div>
+                  {h.change && <div className="endpoint-history-desc">{h.change}</div>}
+                </li>
+              ))}
+          </ol>
+        </div>
+      )}
+    </>
+  )
+}
+
 /**
  * Per-service gRPC tab (Part B) — SERVER-only, endpoint-style.
  *
@@ -113,6 +160,7 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
           contract: c.name,
           method: m.name,
           description: joinDescription(m.description, change),
+          change, // the raw delta — recorded as one changelog entry
           conversationId,
         })
       }
@@ -183,6 +231,7 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
                               <span className="grpc-sig">{methodSig(m)}</span>
                             </div>
                             {m.description && <p className="grpc-instruction"><span className="grpc-label">does</span> {m.description}</p>}
+                            {m.history?.length > 0 && <MethodChangelog history={m.history} />}
                             <textarea
                               className="desc-input"
                               value={descEdits[key] || ''}

@@ -16,6 +16,7 @@ export const DEFAULT_PREFIX_COLORS = {
   grpc: '#b18cf2', // RPC badge + the gRPC edge
   etcdKey: '#ff9eed', // etcd KEY / SUB badges
   etcdEdge: '#5aa0c0', // etcd discovery-wiring edge (edge-only, no badge)
+  redisKey: '#ff6b5e', // redis keyspace type badges (STR / LIST / SET / HSET / ZSET / STRM / GEO)
 }
 
 // Role -> the CSS custom property styles.css reads for that role's badge(s). Roles
@@ -26,6 +27,7 @@ export const BADGE_VARS = {
   consumer: '--badge-consume',
   grpc: '--badge-rpc',
   etcdKey: '--badge-etcd',
+  redisKey: '--badge-redis',
 }
 
 // Human labels for the Settings UI: which prefixes each role paints.
@@ -36,6 +38,7 @@ export const PREFIX_ROLE_LABELS = {
   grpc: 'RPC (gRPC)',
   etcdKey: 'KEY / SUB (etcd)',
   etcdEdge: 'etcd discovery edge',
+  redisKey: 'STR / STRM / … (redis keyspace)',
 }
 
 // A #rrggbb string, the only shape the backend accepts (mirrors the server regex).

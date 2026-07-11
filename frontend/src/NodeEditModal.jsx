@@ -13,6 +13,7 @@ import WsClientMethodsTab from './WsClientMethodsTab.jsx'
 import ConsumerTab from './ConsumerTab.jsx'
 import EtcdClusterTab from './EtcdClusterTab.jsx'
 import EtcdKeyspacesTab from './EtcdKeyspacesTab.jsx'
+import RedisKeyspacesTab from './RedisKeyspacesTab.jsx'
 import ServiceSubscribersTab from './ServiceSubscribersTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
 import ServiceLbTab from './ServiceLbTab.jsx'
@@ -117,15 +118,26 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     tabs.push({ id: 'cluster', label: 'Cluster', Component: EtcdClusterTab })
     tabs.push({ id: 'keyspaces', label: 'Keyspaces', Component: EtcdKeyspacesTab })
   }
+  // EVERY redis primary gets the Keyspaces tab, whatever created it (create-database,
+  // an LLM worker's token stream, a websocket tier's bus/presence) — the keyspaces
+  // block lives on the manifest node, not in a per-origin registry. Replicas mirror
+  // the primary's data, so their keyspaces are managed on the primary.
+  if (node.type === 'redis' && !node.replicaOf) {
+    tabs.push({ id: 'redis-keyspaces', label: 'Keyspaces', Component: RedisKeyspacesTab })
+  }
   // Custom service types inject their own tab(s) (e.g. a Download Coordinator's
   // Distribution tab) between the kind tabs and the universal Shutdown/Delete.
   for (const t of customTypeOf(node)?.editTabs?.(node) || []) {
     tabs.push({ id: `custom:${t.id}`, label: t.label, Component: t.Component })
   }
+  // A custom-type-owned redis (e.g. an LLM worker's token stream, streamOf/origin
+  // create-custom-service) opens this modal ONLY for its Keyspaces tab — its container
+  // lifecycle (shutdown, delete) is owned and cascaded by the worker that created it.
+  const isCustomOwnedRedis = node.type === 'redis' && node.origin === 'create-custom-service'
   // A client has no container, so there's nothing to shut down; Prometheus is shared infra
   // that must never be shut down from here.
-  if (!isClient && !isPrometheus) tabs.push({ id: 'shutdown', label: 'Shutdown' })
-  tabs.push({ id: 'delete', label: 'Delete', danger: true })
+  if (!isClient && !isPrometheus && !isCustomOwnedRedis) tabs.push({ id: 'shutdown', label: 'Shutdown' })
+  if (!isCustomOwnedRedis) tabs.push({ id: 'delete', label: 'Delete', danger: true })
 
   const [active, setActive] = useState(tabs[0].id)
   const [busy, setBusy] = useState(false)

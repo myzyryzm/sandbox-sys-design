@@ -32,6 +32,7 @@ const DEFAULT_PREFIX_COLORS = {
   grpc: '#b18cf2',
   etcdKey: '#ff9eed',
   etcdEdge: '#5aa0c0',
+  redisKey: '#ff6b5e',
 }
 const COLOR_ROLES = Object.keys(DEFAULT_PREFIX_COLORS)
 const HEX_RE = /^#[0-9a-fA-F]{6}$/

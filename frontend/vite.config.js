@@ -30,6 +30,7 @@ import websockets from './server/websockets.js'
 import serviceLb from './server/serviceLb.js'
 import prometheusNodePlugin from './server/prometheus.js'
 import etcdPlugin from './server/etcd.js'
+import redisKeyspaces from './server/redisKeyspaces.js'
 import settings from './server/settings.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -70,7 +71,7 @@ function serveSystems() {
 }
 
 export default defineConfig({
-  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin(), settings()],
+  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin(), redisKeyspaces(), settings()],
   server: {
     proxy: {
       // Browser -> /api/prometheus/api/v1/query?...  proxied to Prometheus.

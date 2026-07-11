@@ -390,7 +390,56 @@
             "when": "value >= 1"
           }
         ]
-      }
+      },
+      "keyspaces": [
+        {
+          "name": "runs:started",
+          "match": "exact",
+          "type": "stream",
+          "shorthand": "announce",
+          "writers": [
+            "llm-worker"
+          ],
+          "readers": [
+            "db-writers"
+          ],
+          "verified": true,
+          "origin": "user",
+          "suggestedWriters": [
+            "db-writers"
+          ],
+          "suggestedReaders": [
+            "llm-worker"
+          ],
+          "createdAt": "2026-07-11T16:53:37.079Z",
+          "updatedAt": "2026-07-11T16:53:37.079Z",
+          "observedType": "stream",
+          "lastScanAt": "2026-07-11T16:54:22.979Z"
+        },
+        {
+          "name": "tokens:",
+          "match": "prefix",
+          "type": "stream",
+          "writers": [
+            "llm-worker"
+          ],
+          "readers": [
+            "db-writers",
+            "chat-service"
+          ],
+          "verified": true,
+          "origin": "user",
+          "suggestedWriters": [
+            "db-writers"
+          ],
+          "suggestedReaders": [
+            "llm-worker"
+          ],
+          "createdAt": "2026-07-11T16:53:37.207Z",
+          "updatedAt": "2026-07-11T17:29:13.266Z",
+          "lastScanAt": "2026-07-11T16:54:22.979Z"
+        }
+      ]
     },
     {
       "id": "llm-worker-scaler",

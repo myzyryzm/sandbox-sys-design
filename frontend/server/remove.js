@@ -300,6 +300,21 @@ function pruneEtcd(system, removedIds) {
   if (JSON.stringify(data.keyspaces) !== before) fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n')
 }
 
+// Strip removed node ids from every redis node's keyspace writers/readers (declared
+// AND scan-suggested) — in-memory, the caller's writeManifest persists it. Soft
+// references by design: a keyspace declaration never blocks deleting a service (the
+// diagram also filters missing ids at trace time, so a stale id can't draw an arrow).
+function scrubRedisKeyspaceRoles(manifest, removedIds) {
+  for (const node of manifest.nodes) {
+    if (node.type !== 'redis' || !Array.isArray(node.keyspaces)) continue
+    for (const ks of node.keyspaces) {
+      for (const key of ['writers', 'readers', 'suggestedWriters', 'suggestedReaders']) {
+        if (Array.isArray(ks[key])) ks[key] = ks[key].filter((s) => !removedIds.has(s))
+      }
+    }
+  }
+}
+
 // The owned children a delete cascades to — read replicas (replicaOf) and the CDC
 // worker (cdcOf) of a database. They are torn down alongside the target, so they are
 // never themselves "dependents" that should block the delete.
@@ -589,6 +604,8 @@ export async function handleDelete(body) {
   pruneReaders(system, removedIds)
   // Drop etcd keyspaces/listeners that referenced any removed service.
   pruneEtcd(system, removedIds)
+  // Strip removed services from every redis keyspace's writers/readers.
+  scrubRedisKeyspaceRoles(manifest, removedIds)
   writeManifest(system, manifest)
 
   const log = await rebuild(system, kind)

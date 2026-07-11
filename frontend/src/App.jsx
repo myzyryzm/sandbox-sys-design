@@ -215,6 +215,10 @@ export default function App() {
   // A served RPC method selected on a server service, traced each caller → this server.
   // Mutually exclusive with the other traces.
   const [rpcTrace, setRpcTrace] = useState(null)
+  // A redis keyspace row selected on a redis node (the node's manifest `keyspaces`
+  // block), traced each declared writer → redis and redis → each declared reader.
+  // Mutually exclusive with the other traces.
+  const [redisTrace, setRedisTrace] = useState(null)
   // Live runtime state for custom service types (e.g. Download Coordinator worker
   // bitmaps / distribution progress), keyed by node id. Filled by the poll below.
   const [customState, setCustomState] = useState({})
@@ -776,7 +780,7 @@ export default function App() {
         <button className="header-btn no-auto" onClick={() => setShowSkills(true)}>
           📖 Skills
         </button>
-        <button className="header-btn no-auto" onClick={() => setShowSettings(true)}>
+        <button className="header-btn no-auto icon-btn" onClick={() => setShowSettings(true)}>
           <GearIcon /> Settings
         </button>
         <AddMenu
@@ -847,7 +851,7 @@ export default function App() {
         pausedConsumers={pausedConsumers}
         customState={customState}
         methodTrace={methodTrace}
-        onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setKeyspaceTrace(null); setRpcTrace(null); setMethodTrace(ep) }}
+        onSelectMethod={(ep) => { setFunctionTrace(null); setConsumerTrace(null); setKeyspaceTrace(null); setRpcTrace(null); setRedisTrace(null); setMethodTrace(ep) }}
         onClearMethodTrace={() => setMethodTrace(null)}
         clientFunctions={clientFunctions}
         wsStats={wsStats}
@@ -860,6 +864,7 @@ export default function App() {
           setConsumerTrace(null)
           setKeyspaceTrace(null)
           setRpcTrace(null)
+          setRedisTrace(null)
           // A ws builtin has no authored steps — the diagram traces the tier path itself.
           setFunctionTrace(fn.wsBuiltin
             ? { client: clientId, name: fn.name, wsBuiltin: true, methods: [] }
@@ -868,7 +873,7 @@ export default function App() {
         onClearFunctionTrace={() => setFunctionTrace(null)}
         consumerFunctions={consumerFunctions}
         consumerTrace={consumerTrace}
-        onSelectConsumer={(c, serviceId) => { setMethodTrace(null); setFunctionTrace(null); setKeyspaceTrace(null); setRpcTrace(null); setConsumerTrace({ cluster: c.cluster, service: serviceId, topic: c.topic, name: c.name, downstream: c.downstream || [], downstreamDescriptions: c.downstreamDescriptions || {} }) }}
+        onSelectConsumer={(c, serviceId) => { setMethodTrace(null); setFunctionTrace(null); setKeyspaceTrace(null); setRpcTrace(null); setRedisTrace(null); setConsumerTrace({ cluster: c.cluster, service: serviceId, topic: c.topic, name: c.name, downstream: c.downstream || [], downstreamDescriptions: c.downstreamDescriptions || {} }) }}
         onClearConsumerTrace={() => setConsumerTrace(null)}
         etcdKeyspaces={etcdKeyspaces}
         keyspaceTrace={keyspaceTrace}
@@ -877,6 +882,7 @@ export default function App() {
           setFunctionTrace(null)
           setConsumerTrace(null)
           setRpcTrace(null)
+          setRedisTrace(null)
           setKeyspaceTrace({
             etcd: etcdId,
             type: ks.type || 'discovery',
@@ -892,6 +898,7 @@ export default function App() {
           setFunctionTrace(null)
           setConsumerTrace(null)
           setRpcTrace(null)
+          setRedisTrace(null)
           // Same keyspaceTrace shape as onSelectKeyspace, but focused on ONE listener: the
           // `kt` branch draws registrant → etcd → this listener only (config: etcd → listener).
           // `focus` lets the diagram mark the service's SUB row active without lighting the
@@ -913,9 +920,28 @@ export default function App() {
           setFunctionTrace(null)
           setConsumerTrace(null)
           setKeyspaceTrace(null)
+          setRedisTrace(null)
           setRpcTrace({ service: serviceId, contract: r.contract, method: r.method })
         }}
         onClearRpcTrace={() => setRpcTrace(null)}
+        redisTrace={redisTrace}
+        onSelectRedisKeyspace={(ks, redisId) => {
+          setMethodTrace(null)
+          setFunctionTrace(null)
+          setConsumerTrace(null)
+          setKeyspaceTrace(null)
+          setRpcTrace(null)
+          setRedisTrace({
+            redis: redisId,
+            name: ks.name,
+            match: ks.match,
+            type: ks.type,
+            shorthand: ks.shorthand,
+            writers: ks.writers || [],
+            readers: ks.readers || [],
+          })
+        }}
+        onClearRedisTrace={() => setRedisTrace(null)}
       />
       </div>
       {showTerminal && (

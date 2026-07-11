@@ -42,6 +42,14 @@ const DB_NAME_RE = /^[a-z][a-z0-9-]*$/ // also a valid compose service name
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/ // SQL/Mongo identifier-ish
 const BUCKET_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/ // S3-ish bucket name
 
+// Redis keyspaces (key namespaces). Unlike IDENT_RE this allows ':' — the redis
+// namespacing convention (`tokens:<id>`) — while excluding whitespace, quotes and
+// shell metacharacters so a name is safe inside the generated seed script and in
+// execFile arg arrays. Shared with the /api/redis plugin (redisKeyspaces.js).
+export const REDIS_KS_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
+export const REDIS_SHORTHAND_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/
+export const REDIS_KS_TYPES = new Set(['string', 'list', 'set', 'hash', 'zset', 'stream', 'geo'])
+
 const SQL_FIELD_TYPES = new Set([
   'text', 'varchar', 'integer', 'bigint', 'numeric', 'boolean',
   'timestamp', 'timestamptz', 'date', 'uuid', 'jsonb', 'serial', 'bigserial',
@@ -183,16 +191,52 @@ function buildMongo({ name, dbName, entities }) {
   }
 }
 
+// One type-appropriate seed command per keyspace, so the seeded key's live TYPE
+// matches the declaration (a prefix keyspace seeds `<name>sample`, an exact one the
+// key itself). Names are validated by REDIS_KS_RE, so they are safe in the quotes.
+function redisSeedCommand(host, e) {
+  const key = e.match === 'prefix' ? `${e.name}sample` : e.name
+  const cli = `redis-cli -h ${host}`
+  switch (e.type) {
+    case 'list': return `${cli} RPUSH "${key}" "seed"`
+    case 'set': return `${cli} SADD "${key}" "seed"`
+    case 'hash': return `${cli} HSET "${key}" sample "seed"`
+    case 'zset': return `${cli} ZADD "${key}" 0 "seed"`
+    case 'stream': return `${cli} XADD "${key}" '*' sample "seed"`
+    case 'geo': return `${cli} GEOADD "${key}" 0 0 "seed"`
+    default: return `${cli} SET "${key}" "seed"`
+  }
+}
+
 function buildRedis({ name, entities }) {
   // Redis has no init-dir mechanism, so a one-shot sidecar seeds one sample key
-  // per namespace once the server answers PING.
+  // per keyspace once the server answers PING.
   const seed = [
     'set -e',
     `until redis-cli -h ${name} ping | grep -q PONG; do sleep 1; done`,
-    ...entities.map((e) => `redis-cli -h ${name} SET "${e.name}:sample" "seed"`),
+    ...entities.map((e) => redisSeedCommand(name, e)),
   ].join('\n')
 
+  // The declared keyspaces persist onto the manifest node (verified: the user just
+  // typed them) so the diagram renders typed KEY rows and /api/redis can manage them.
+  const ts = new Date().toISOString()
+  const keyspaces = entities.map((e) => ({
+    name: e.name,
+    match: e.match,
+    type: e.type,
+    ...(e.shorthand ? { shorthand: e.shorthand } : {}),
+    writers: [],
+    readers: [],
+    verified: true,
+    origin: 'user',
+    suggestedWriters: [],
+    suggestedReaders: [],
+    createdAt: ts,
+    updatedAt: ts,
+  }))
+
   return {
+    keyspaces,
     nodeType: 'redis',
     services: {
       [name]: { image: 'redis:7-alpine' },
@@ -554,6 +598,40 @@ function validate(body) {
 
   const rawEntities = Array.isArray(body.entities) ? body.entities : []
   if (rawEntities.length === 0) throw bad('add at least one entity')
+
+  // Redis entities are keyspaces: { name, match, type, shorthand } instead of the
+  // name+fields shape. Legacy name-only rows (scripted callers) normalize to the
+  // old seeding semantics: a `<name>:` string prefix.
+  if (type === 'redis') {
+    const seen = new Set()
+    const shorthands = new Set()
+    const entities = rawEntities.map((raw) => {
+      const legacy = raw && raw.match === undefined && raw.type === undefined
+      const e = legacy
+        ? { name: `${raw?.name || ''}:`, match: 'prefix', type: 'string', shorthand: '' }
+        : {
+            name: typeof raw?.name === 'string' ? raw.name.trim() : '',
+            match: raw?.match,
+            type: raw?.type,
+            shorthand: typeof raw?.shorthand === 'string' ? raw.shorthand.trim() : '',
+          }
+      if (!REDIS_KS_RE.test(e.name)) throw bad(`invalid keyspace name "${raw && raw.name}"`)
+      if (e.match !== 'prefix' && e.match !== 'exact') throw bad('match must be "prefix" or "exact"')
+      if (!REDIS_KS_TYPES.has(e.type)) throw bad(`invalid keyspace type "${raw && raw.type}"`)
+      if (e.shorthand && !REDIS_SHORTHAND_RE.test(e.shorthand)) {
+        throw bad(`invalid shorthand "${e.shorthand}"`)
+      }
+      if (seen.has(e.name)) throw bad(`duplicate keyspace "${e.name}"`)
+      seen.add(e.name)
+      if (e.shorthand) {
+        if (shorthands.has(e.shorthand)) throw bad(`duplicate shorthand "${e.shorthand}"`)
+        shorthands.add(e.shorthand)
+      }
+      return e
+    })
+    return { system, type, spec, name, manifest, entities, models: null }
+  }
+
   const entities = rawEntities.map((e) => {
     if (!e || !spec.entityRe.test(e.name || '')) {
       throw bad(`invalid entity name "${e && e.name}" for ${spec.label}`)
@@ -615,6 +693,8 @@ function addManifestNode(system, manifest, built, name, schemaModels) {
   // Model mode records which bank models were turned into tables/collections, so the
   // Schema tab can show them and additive updates can extend the set.
   if (schemaModels && schemaModels.length) node.schemaModels = schemaModels
+  // Redis: the declared keyspaces (typed KEY rows on the diagram, managed by /api/redis).
+  if (built.keyspaces && built.keyspaces.length) node.keyspaces = built.keyspaces
   manifest.nodes.push(node)
   fs.writeFileSync(
     path.join(systemDir(system), 'manifest.json'),

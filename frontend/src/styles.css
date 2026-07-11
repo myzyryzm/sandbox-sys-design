@@ -53,7 +53,11 @@ header {
    .diagram-scroll, which scrolls the (pan/zoomable) SVG. overflow:hidden so the rounded corners
    clip the scrolling content. */
 .canvas {
-  flex: 1 1 auto;
+  /* basis 0 (not auto): the canvas GROWS into free space rather than letting the tall diagram
+     SVG set its basis. Otherwise the column sits permanently in flex-shrink mode and steals
+     height from the (now shrinkable) terminal panel even on a tall window. It yields its space
+     to the terminal first on short windows so the Claude TUI never gets clipped. */
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
   background: var(--panel);
@@ -220,9 +224,13 @@ header {
   overflow: auto;
 }
 
-/* The terminal panel keeps its natural height below the canvas (canvas flexes to fit). */
+/* The terminal panel prefers 420px below the canvas, but may SHRINK when the viewport is
+   short. Without the shrink, a short window pushed the fixed-height panel below the fold and
+   the Claude TUI's bottom rows (input box / mode line) got clipped. The canvas (a much larger
+   flex-basis) gives up its space first, so on a tall window the terminal still sits at 420px. */
 .terminal-panel {
-  flex: 0 0 auto;
+  flex: 0 1 420px;
+  min-height: 160px;
 }
 
 h1 {
@@ -792,6 +800,21 @@ h1 {
   fill: var(--badge-etcd, #ff9eed);
 }
 
+/* Redis keyspace TYPE badges (STR / LIST / SET / HSET / ZSET / STRM / GEO). */
+.endpoint-method-redis {
+  fill: var(--badge-redis, #ff6b5e);
+}
+
+/* Right-aligned amber marker on a scan-discovered redis keyspace row the user hasn't
+   confirmed yet (the Verify button itself lives in the node's Keyspaces tab). */
+.keyspace-unverified {
+  fill: #d8a657;
+  font-size: 10px;
+  text-anchor: end;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .endpoint-empty {
   fill: var(--muted);
   font-size: 11px;
@@ -848,6 +871,14 @@ h1 {
 .header-btn:hover,
 .term-toggle:hover {
   background: #2a2f3c;
+}
+
+/* Header buttons that pair an inline SVG icon with a text label: center the
+   icon on the label instead of letting it sit on the text baseline. */
+.header-btn.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* Drag-mode toggle: the move icon + "Drag" label; turns green while active. */
@@ -929,7 +960,10 @@ h1 {
 .terminal-wrap {
   display: flex;
   flex-direction: column;
-  height: 420px;
+  /* Fill whatever height the (now shrinkable) .terminal-panel was given, instead of a hard
+     420px — this is what lets the panel contract on a short viewport. FitAddon re-fits xterm
+     to the resulting host size via the ResizeObserver in Terminal.jsx. */
+  height: 100%;
 }
 
 .terminal-status {
@@ -962,7 +996,17 @@ h1 {
 .terminal-host {
   flex: 1;
   min-height: 0;
-  padding: 8px;
+  /* No padding here: FitAddon sizes xterm to the host's FULL box (it doesn't subtract this
+     container's own padding), so an inner pad made the last row overflow the host and get
+     clipped by the panel's overflow:hidden — the "manual mode" line was cut in half. Breathing
+     room around the screen is provided by .xterm's own 4px/8px inset below instead. */
+  padding: 0;
+}
+
+/* Small inset between the panel border and the terminal screen, applied to xterm's own root so
+   it's inside the area FitAddon measures (unlike padding on .terminal-host, which it ignores). */
+.terminal-host .xterm {
+  padding: 4px 8px;
 }
 
 /* Create-database modal */
@@ -1288,6 +1332,11 @@ h1 {
 /* etcd keyspace "KEY" / subscription "SUB" badges in the list, matching their diagram rows. */
 .endpoint-list-method-etcd {
   color: var(--badge-etcd, #ff9eed);
+}
+
+/* Redis keyspace type badges in the list (Keyspaces tab), matching their diagram rows. */
+.endpoint-list-method-redis {
+  color: var(--badge-redis, #ff6b5e);
 }
 
 .endpoint-list-path {
