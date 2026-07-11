@@ -119,6 +119,18 @@ function ownedServices(id, kind, node) {
   // An etcd cluster is one node owning N member containers (<id>-1..N, no exporter —
   // etcd serves /metrics natively).
   if (kind === 'etcd') return node?.etcd?.members?.length ? [...node.etcd.members] : [id]
+  // A clustered redis (Topology tab) owns its member containers + their exporters +
+  // the one-shot cluster former — there is no bare `<id>` container in cluster mode.
+  if (kind === 'database' && node?.redisCluster?.members?.length) {
+    const m = node.redisCluster.members
+    return [`${id}-init`, `${id}-cluster-init`, ...m, ...m.map((x) => `${x}-exporter`)]
+  }
+  // A sentinel-replicated redis also owns its sentinels (+ exporters); its read
+  // replicas are separate nodes cascaded via cascadeChildIds like any primary's.
+  if (kind === 'database' && node?.sentinel?.members?.length) {
+    const s = node.sentinel.members
+    return [id, `${id}-exporter`, `${id}-init`, ...s, ...s.map((x) => `${x}-exporter`)]
+  }
   return kind === 'database' || kind === 'event-stream'
     ? [id, `${id}-exporter`, `${id}-init`]
     : [id]
@@ -310,6 +322,11 @@ function scrubRedisKeyspaceRoles(manifest, removedIds) {
     for (const ks of node.keyspaces) {
       for (const key of ['writers', 'readers', 'suggestedWriters', 'suggestedReaders']) {
         if (Array.isArray(ks[key])) ks[key] = ks[key].filter((s) => !removedIds.has(s))
+      }
+      // Per-writer WAIT write modes are keyed by writer id — scrub those too.
+      if (ks.writeModes) {
+        for (const rid of removedIds) delete ks.writeModes[rid]
+        if (!Object.keys(ks.writeModes).length) delete ks.writeModes
       }
     }
   }
@@ -581,6 +598,8 @@ export async function handleDelete(body) {
       removeClientScript(system, rid)
     }
     removeScrapeJob(system, rid)
+    // A sentinel-replicated redis also owns the shared `<id>-sentinel` scrape job.
+    if (rnode?.sentinel) removeScrapeJob(system, `${rid}-sentinel`)
     scrubManifestNode(manifest, rid)
     fs.rmSync(path.join(systemDir(system), rid), { recursive: true, force: true })
   }
@@ -592,6 +611,10 @@ export async function handleDelete(body) {
   // A deleted load-balanced service also owns its haproxy config folder (<name>-lb/).
   if (node?.type === 'service-lb') {
     fs.rmSync(path.join(systemDir(system), `${id}-lb`), { recursive: true, force: true })
+  }
+  // A deleted sentinel-replicated redis also owns its sentinel config folder.
+  if (node?.sentinel) {
+    fs.rmSync(path.join(systemDir(system), `${id}-sentinel`), { recursive: true, force: true })
   }
   // A deleted etcd cluster also owns the top-level discovery registry (etcd.json —
   // fixed name, one cluster per system; the node has no folder of its own).

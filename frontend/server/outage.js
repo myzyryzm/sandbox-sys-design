@@ -95,6 +95,10 @@ function containersOf(system, node) {
     const manifest = JSON.parse(fs.readFileSync(path.join(systemDir(system), 'manifest.json'), 'utf8'))
     const target = manifest.nodes.find((n) => n.id === node)
     if (target?.origin === 'create-etcd' && target.etcd?.members?.length) return [...target.etcd.members]
+    // A clustered redis maps to its member containers (etcd semantics: total outage).
+    // A sentinel-replicated primary stays 1:1 ON PURPOSE — killing only the primary
+    // container is the failover demo (the sentinels detect it and promote a replica).
+    if (target?.redisCluster?.members?.length) return [...target.redisCluster.members]
   } catch {
     /* fall through to the 1:1 default */
   }

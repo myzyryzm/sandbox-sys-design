@@ -6,8 +6,15 @@
 // display/reference shorthand, and the services that write/read it:
 //   { name, match: 'prefix'|'exact', type: string|list|set|hash|zset|stream|geo,
 //     shorthand?, writers: [nodeIds], readers: [nodeIds],
+//     writeModes?: { [writerId]: { mode:'wait', numreplicas, timeoutMs, implemented, updatedAt } },
 //     verified, origin: 'user'|'scan', suggestedWriters: [], suggestedReaders: [],
 //     observedType?, lastScanAt?, createdAt, updatedAt }
+//
+// writeModes is the per-WRITER write acknowledgement mode: absent = async (fire and
+// forget — the default, never stored); 'wait' = pseudo-synchronous replication via
+// the WAIT command (`r.wait(numreplicas, timeoutMs)` after each write, blocking
+// until numreplicas replicas ack or the timeout elapses). `implemented` is owned by
+// the scan, which greps the writer's source for an actual WAIT call.
 //
 // Entries live ON the manifest node (`node.keyspaces`) like the grpc/resilience
 // blocks: the 3s manifest poll already delivers them to the diagram (typed KEY rows
@@ -91,7 +98,26 @@ function normalizeKeyspace(raw, manifest) {
     }
     roles[role] = [...seen]
   }
-  return { name, match, type: raw.type, shorthand, ...roles }
+  // Per-writer write modes: only 'wait' entries are kept (async is the unstored
+  // default), and only for declared writers — a key whose writer was just removed
+  // is silently dropped rather than rejected (the tab re-submits the full map).
+  const writeModes = {}
+  if (raw.writeModes && typeof raw.writeModes === 'object' && !Array.isArray(raw.writeModes)) {
+    for (const [svc, wm] of Object.entries(raw.writeModes)) {
+      if (!roles.writers.includes(svc) || !wm || typeof wm !== 'object') continue
+      if (wm.mode !== 'wait') continue
+      const numreplicas = Number(wm.numreplicas)
+      const timeoutMs = Number(wm.timeoutMs)
+      if (!Number.isInteger(numreplicas) || numreplicas < 1 || numreplicas > 9) {
+        throw bad(`WAIT numreplicas for "${svc}" must be an integer 1-9`)
+      }
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60000) {
+        throw bad(`WAIT timeout for "${svc}" must be an integer 0-60000 ms`)
+      }
+      writeModes[svc] = { mode: 'wait', numreplicas, timeoutMs }
+    }
+  }
+  return { name, match, type: raw.type, shorthand, ...roles, writeModes }
 }
 
 // --- registry mutations (upsert / delete / verify / suggestion) ---------------
@@ -113,6 +139,18 @@ function upsertKeyspace(body) {
   }
   const prev = idx >= 0 ? list[idx] : null
   const ts = now()
+  // The submitted writeModes map is authoritative (the tab always re-submits the
+  // full map; an absent writer = back to async). An unchanged wait entry keeps its
+  // scan-owned `implemented`; a parameter change resets it — the writer's code no
+  // longer matches what's declared.
+  const writeModes = {}
+  for (const [svc, wm] of Object.entries(ks.writeModes)) {
+    const prevWm = prev?.writeModes?.[svc]
+    writeModes[svc] =
+      prevWm && prevWm.numreplicas === wm.numreplicas && prevWm.timeoutMs === wm.timeoutMs
+        ? prevWm
+        : { ...wm, implemented: false, updatedAt: ts }
+  }
   const entry = {
     name: ks.name,
     match: ks.match,
@@ -120,6 +158,7 @@ function upsertKeyspace(body) {
     ...(ks.shorthand ? { shorthand: ks.shorthand } : {}),
     writers: ks.writers,
     readers: ks.readers,
+    ...(Object.keys(writeModes).length ? { writeModes } : {}),
     // Verification is separate state — an edit must not flip it either way. A
     // brand-new user-declared keyspace IS the declaration, so it starts verified;
     // only scan-discovered entries wait for the explicit Verify click.
@@ -197,32 +236,46 @@ const SCAN_LUA =
   "for i=1,#r[2] do local k=r[2][i] out[#out+1]=k..'\\t'..redis.call('TYPE',k)['ok'] end " +
   "until cur=='0' return out"
 
-async function scanLiveKeys(system, id) {
-  try {
-    const ping = await composeExec(system, id, { envFlags: [], argv: ['redis-cli', 'PING'] })
-    if (!/PONG/.test(ping.stdout)) throw new Error(ping.stdout.trim() || 'no PONG')
-  } catch (err) {
-    const detail = `${err.stdout || ''}${err.stderr || ''}`.trim() || err.message
+async function scanLiveKeys(system, node) {
+  // In cluster mode (Topology tab) there is no `<node.id>` container — the keys
+  // live sharded across the member containers, so every reachable member is
+  // scanned and the lines merged (replicas mirror their shard master's keys; the
+  // by-key dedupe collapses them). Standalone/replicated scans the primary alone.
+  const targets = node.redisCluster?.members?.length ? node.redisCluster.members : [node.id]
+  const reachable = []
+  let detail = ''
+  for (const target of targets) {
+    try {
+      const ping = await composeExec(system, target, { envFlags: [], argv: ['redis-cli', 'PING'] })
+      if (!/PONG/.test(ping.stdout)) throw new Error(ping.stdout.trim() || 'no PONG')
+      reachable.push(target)
+    } catch (err) {
+      detail = `${err.stdout || ''}${err.stderr || ''}`.trim() || err.message
+    }
+  }
+  if (!reachable.length) {
     throw new HttpError(
       409,
-      `redis container "${id}" is not reachable (${detail}). Start it with ` +
-        `docker compose -f systems/${system}/docker-compose.yml up -d ${id} — verifying ` +
+      `redis container "${targets[0]}" is not reachable (${detail}). Start it with ` +
+        `docker compose -f systems/${system}/docker-compose.yml up -d ${targets[0]} — verifying ` +
         'needs the system running (an empty keyspace may just mean no writer has run yet).',
     )
   }
-  const { stdout } = await composeExec(system, id, {
-    envFlags: [],
-    argv: ['redis-cli', 'EVAL', SCAN_LUA, '0'],
-  })
-  const keys = []
-  for (const line of stdout.split('\n')) {
-    const t = line.indexOf('\t')
-    if (t < 0) continue
-    const key = line.slice(0, t)
-    const liveType = line.slice(t + 1).trim()
-    if (key && liveType) keys.push({ key, liveType })
+  const byKey = new Map()
+  for (const target of reachable) {
+    const { stdout } = await composeExec(system, target, {
+      envFlags: [],
+      argv: ['redis-cli', 'EVAL', SCAN_LUA, '0'],
+    })
+    for (const line of stdout.split('\n')) {
+      const t = line.indexOf('\t')
+      if (t < 0) continue
+      const key = line.slice(0, t)
+      const liveType = line.slice(t + 1).trim()
+      if (key && liveType && !byKey.has(key)) byKey.set(key, { key, liveType })
+    }
   }
-  return keys
+  return [...byKey.values()]
 }
 
 // Exact match beats any prefix; among prefixes the longest declared name wins
@@ -269,6 +322,11 @@ const WRITE_CALL_RE =
   /\.\s*(getset|setnx|setex|psetex|mset|set|append|incrbyfloat|incrby|incr|decrby|decr|hsetnx|hmset|hset|hdel|hincrbyfloat|hincrby|zadd|zincrby|zrem|sadd|srem|smove|lpushx|rpushx|lpush|rpush|lset|linsert|xadd|geoadd|del|unlink|expire|pexpire|publish)\s*\(/i
 const READ_CALL_RE =
   /\.\s*(mget|getrange|get|strlen|hgetall|hmget|hget|hkeys|hvals|hlen|zrangebyscore|zrevrange|zrange|zscore|zcard|zrank|smembers|sismember|scard|srandmember|lrange|lindex|llen|blpop|brpop|lpop|rpop|xreadgroup|xread|xrevrange|xrange|xlen|georadius|geosearch|geopos|geodist|subscribe|psubscribe)\s*\(/i
+// A WAIT call: redis-py `r.wait(n, t)` / node-redis `client.wait(n, t)`, or the
+// generic escape hatch `execute_command('WAIT', ...)`. `.wait(<digit>` keeps
+// `threading.Event().wait(timeout=5)`-style false positives rare; like the verb
+// regexes above, this only drives a BADGE, so a miss costs one wrong pill.
+const WAIT_CALL_RE = /\.\s*wait\s*\(\s*\d|execute_command\(\s*['"]wait['"]/i
 
 // A node's greppable source: *.py / *.js / *.mjs directly under systems/<sys>/<id>/
 // (dir name == node id — the repo invariant), plus ws-shared/ for websocket relays
@@ -332,7 +390,7 @@ function suggestRoles(system, manifest, list) {
 async function handleScan(body) {
   const { file, manifest } = loadManifest(body.system)
   const node = redisNodeOf(manifest, body.id)
-  const live = await scanLiveKeys(body.system, body.id)
+  const live = await scanLiveKeys(body.system, node)
 
   const list = node.keyspaces || []
   const notes = []
@@ -401,6 +459,29 @@ async function handleScan(body) {
 
   const suggestions = suggestRoles(body.system, manifest, list)
 
+  // Verify each wait-mode writer actually implements the WAIT call it declares:
+  // same source-grep the suggestions use, but demanding BOTH the keyspace name and
+  // a WAIT invocation somewhere in the writer's code.
+  const waitChecks = []
+  for (const ks of list) {
+    for (const [svc, wm] of Object.entries(ks.writeModes || {})) {
+      if (wm.mode !== 'wait') continue
+      const writerNode = manifest.nodes.find((n) => n.id === svc)
+      if (!writerNode) continue
+      const files = sourceFilesFor(body.system, writerNode)
+      const implemented =
+        files.some((t) => t.includes(ks.name)) && files.some((t) => WAIT_CALL_RE.test(t))
+      if (wm.implemented !== implemented) {
+        wm.implemented = implemented
+        wm.updatedAt = ts
+      }
+      waitChecks.push({ name: ks.name, writer: svc, implemented })
+      if (!implemented) {
+        notes.push(`writer "${svc}" declares WAIT on "${ks.name}" but no WAIT call was found in its source`)
+      }
+    }
+  }
+
   if (live.length === 0) {
     notes.push(
       '0 live keys — writers may not have run yet, and pub/sub channels never appear in SCAN (a pure message bus scans empty).',
@@ -411,7 +492,7 @@ async function handleScan(body) {
   saveManifest(file, manifest)
   return {
     ok: true,
-    report: { scannedKeys: live.length, matched, unseen, added, suggestions, notes },
+    report: { scannedKeys: live.length, matched, unseen, added, suggestions, waitChecks, notes },
     keyspaces: list,
   }
 }

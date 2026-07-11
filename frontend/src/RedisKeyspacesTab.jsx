@@ -19,6 +19,11 @@ import {
  *     to exist (a pub/sub bus legitimately scans empty: channels aren't keys).
  *   - An unverified entry's Verify button just flips the flag (no Claude session,
  *     no rebuild — every action here is a live registry edit).
+ *   - Each declared WRITER carries a write mode: async (default) or WAIT — a
+ *     pseudo-synchronous write that blocks until `numreplicas` replicas acknowledge
+ *     or `timeoutMs` elapses. Only selectable when the topology has replicas (the
+ *     Topology tab manages those); the scan greps the writer's source for an actual
+ *     WAIT call and badges each wait writer implemented / not implemented.
  */
 
 export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, embedded = false, onBusyChange }) {
@@ -40,6 +45,8 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
   // Per-keyspace "add a writer/reader" picks: `${name}:writer` -> service id.
   const [rolePick, setRolePick] = useState({})
   const [confirmKey, setConfirmKey] = useState(null) // keyspace name pending delete
+  // In-progress WAIT param edits, keyed `${ks.name}:${writer}` (committed on blur).
+  const [waitEdit, setWaitEdit] = useState({})
 
   useEffect(() => onBusyChange?.(busy || scanning), [busy, scanning, onBusyChange])
 
@@ -49,6 +56,13 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
     .filter((n) => (n.type === 'service' && !n.instanceOf) || n.type === 'service-lb' || n.type === 'websocket-server')
     .map((n) => n.id)
   const nodeExists = (id) => (manifest?.nodes || []).some((n) => n.id === id)
+
+  // How many replicas could acknowledge a WAIT: the replicaOf secondaries in
+  // replicated mode, or replicas-per-shard in cluster mode (WAIT on a shard master
+  // acks its local replicas). 0 = WAIT would always time out, so it's not offered.
+  const replicaCount =
+    (manifest?.nodes || []).filter((n) => n.replicaOf === node.id).length ||
+    (node.redisCluster?.replicasPerShard ?? 0)
 
   const load = useCallback(async () => {
     try {
@@ -147,13 +161,15 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
         shorthand: fShorthand.trim(),
         writers: prev?.writers || [],
         readers: prev?.readers || [],
+        writeModes: prev?.writeModes || {},
       },
     })
     if (data) setFormOpen(false)
   }
 
   // Add/remove a declared writer/reader: re-upsert the entry with the role list
-  // changed (the backend preserves verified/origin/suggestions on edit).
+  // changed (the backend preserves verified/origin/suggestions on edit, and drops
+  // writeModes keys whose writer is no longer declared).
   async function setRole(ks, role, ids) {
     await call('POST', '/api/redis/keyspace', {
       system: systemId,
@@ -166,8 +182,49 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
         shorthand: ks.shorthand || '',
         writers: role === 'writers' ? ids : ks.writers || [],
         readers: role === 'readers' ? ids : ks.readers || [],
+        writeModes: ks.writeModes || {},
       },
     })
+  }
+
+  // Set one writer's write mode: `wm` is { mode:'wait', numreplicas, timeoutMs } or
+  // null for async (the unstored default) — a full-map re-upsert like setRole.
+  async function setWriteMode(ks, svc, wm) {
+    const writeModes = { ...(ks.writeModes || {}) }
+    if (wm) writeModes[svc] = wm
+    else delete writeModes[svc]
+    await call('POST', '/api/redis/keyspace', {
+      system: systemId,
+      id: redisId,
+      prevName: ks.name,
+      keyspace: {
+        name: ks.name,
+        match: ks.match,
+        type: ks.type,
+        shorthand: ks.shorthand || '',
+        writers: ks.writers || [],
+        readers: ks.readers || [],
+        writeModes,
+      },
+    })
+  }
+
+  // Commit an in-progress WAIT param edit (on blur): only POSTs a valid change.
+  function commitWaitEdit(ks, svc, wm) {
+    const editKey = `${ks.name}:${svc}`
+    const draft = waitEdit[editKey]
+    if (!draft) return
+    setWaitEdit((p) => {
+      const next = { ...p }
+      delete next[editKey]
+      return next
+    })
+    const numreplicas = Number(draft.numreplicas ?? wm.numreplicas)
+    const timeoutMs = Number(draft.timeoutMs ?? wm.timeoutMs)
+    if (!Number.isInteger(numreplicas) || numreplicas < 1 || numreplicas > 9) return setError('WAIT numreplicas must be 1-9')
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60000) return setError('WAIT timeout must be 0-60000 ms')
+    if (numreplicas === wm.numreplicas && timeoutMs === wm.timeoutMs) return
+    setWriteMode(ks, svc, { mode: 'wait', numreplicas, timeoutMs })
   }
 
   async function runScan() {
@@ -205,12 +262,70 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
     return (
       <>
         <ul className="endpoint-list">
-          {declared.map((svc) => (
+          {declared.map((svc) => {
+            const wm = role === 'writers' ? (ks.writeModes || {})[svc] : null
+            const editKey = `${ks.name}:${svc}`
+            const draft = waitEdit[editKey]
+            return (
             <li key={svc} className="endpoint-list-row">
               <span className={badgeClass}>{singular.toUpperCase()}</span>
               <code className="endpoint-alias">
                 {nodeExists(svc) ? svc : <s title="This node no longer exists">{svc}</s>}
               </code>
+              {role === 'writers' && (
+                <span className="endpoint-list-actions">
+                  <select
+                    value={wm ? 'wait' : 'async'}
+                    disabled={busy || (!wm && replicaCount === 0)}
+                    title={
+                      replicaCount === 0 && !wm
+                        ? 'WAIT is meaningless with 0 replicas — add replicas in the Topology tab first'
+                        : 'How this writer’s writes are acknowledged: async (fire and forget) or WAIT (block until N replicas ack)'
+                    }
+                    onChange={(e) =>
+                      setWriteMode(
+                        ks, svc,
+                        e.target.value === 'wait'
+                          ? { mode: 'wait', numreplicas: Math.max(1, Math.min(replicaCount, 9)) || 1, timeoutMs: 1000 }
+                          : null,
+                      )
+                    }
+                  >
+                    <option value="async">async</option>
+                    <option value="wait">WAIT</option>
+                  </select>
+                  {wm && (
+                    <>
+                      <label title="numreplicas — how many replicas must acknowledge the write">
+                        n=
+                        <input
+                          type="number" min={1} max={9} style={{ width: 40 }} disabled={busy}
+                          value={draft?.numreplicas ?? wm.numreplicas}
+                          onChange={(e) => setWaitEdit((p) => ({ ...p, [editKey]: { ...(p[editKey] || {}), numreplicas: e.target.value } }))}
+                          onBlur={() => commitWaitEdit(ks, svc, wm)}
+                        />
+                      </label>
+                      <label title="timeout (ms) — how long the write blocks waiting for acks; 0 = forever">
+                        t=
+                        <input
+                          type="number" min={0} max={60000} step={100} style={{ width: 62 }} disabled={busy}
+                          value={draft?.timeoutMs ?? wm.timeoutMs}
+                          onChange={(e) => setWaitEdit((p) => ({ ...p, [editKey]: { ...(p[editKey] || {}), timeoutMs: e.target.value } }))}
+                          onBlur={() => commitWaitEdit(ks, svc, wm)}
+                        />
+                      </label>
+                      <span
+                        className={wm.implemented ? 'llm-implemented' : 'scenario-pending'}
+                        title={wm.implemented
+                          ? 'The last scan found a WAIT call in this writer’s source'
+                          : 'No WAIT call found in this writer’s source yet — the retrofit session (or the next endpoint edit) wires it; re-scan to re-check'}
+                      >
+                        {wm.implemented ? 'wait ✓' : 'wait ✗'}
+                      </span>
+                    </>
+                  )}
+                </span>
+              )}
               <span className="endpoint-list-actions">
                 <button
                   className="link-danger" disabled={busy}
@@ -220,7 +335,8 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
                 </button>
               </span>
             </li>
-          ))}
+            )
+          })}
           {suggested.map((svc) => (
             <li key={`sug-${svc}`} className="endpoint-list-row">
               <span className={badgeClass}>{singular.toUpperCase()}</span>
@@ -320,6 +436,11 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
                 {s.suggestedReaders.length ? ` readers: ${s.suggestedReaders.join(', ')}` : ''}
               </small>
             ))}
+            {(report.waitChecks || []).map((w) => (
+              <small className="form-hint" key={`w-${w.name}-${w.writer}`}>
+                <code>{w.name}</code> writer {w.writer}: WAIT {w.implemented ? 'call detected in source ✓' : 'call NOT found in source ✗'}
+              </small>
+            ))}
             {report.notes.map((n, i) => (
               <small className="form-hint" key={`n-${i}`}>{n}</small>
             ))}
@@ -381,6 +502,12 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
               </div>
               {roleRows(ks, 'writers')}
               {roleRows(ks, 'readers')}
+              {replicaCount === 0 && Object.values(ks.writeModes || {}).some((wm) => wm.mode === 'wait') && (
+                <small className="form-hint" style={{ color: '#d8a657' }}>
+                  ⚠ WAIT writer(s) declared but the topology has no replicas — every WAIT will time out.
+                  Add replicas in the Topology tab (the settings are kept meanwhile).
+                </small>
+              )}
             </div>
           )
         })

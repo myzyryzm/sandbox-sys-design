@@ -91,17 +91,26 @@ async function introspectMongo(system, id) {
   return entities
 }
 
-async function introspectRedis(system, id) {
-  const { stdout } = await composeExec(system, id, {
-    envFlags: [],
-    argv: ['redis-cli', '--scan'],
-  })
+async function introspectRedis(system, id, node) {
+  // In cluster mode (Topology tab) there is no `<id>` container — the keys are
+  // sharded across the member containers, so scan each and merge (a replica holds
+  // copies of its shard master's keys; the Set dedupes them).
+  const targets = node?.redisCluster?.members?.length ? node.redisCluster.members : [id]
+  const seen = new Set()
+  for (const target of targets) {
+    const { stdout } = await composeExec(system, target, {
+      envFlags: [],
+      argv: ['redis-cli', '--scan'],
+    })
+    for (const raw of stdout.split('\n')) {
+      const key = raw.trim()
+      if (key) seen.add(key)
+    }
+  }
   // Group keys by the namespace before the first ':'. Keys without one go under
   // "(no namespace)". Fields are the concrete keys in that namespace.
   const byNs = new Map()
-  for (const raw of stdout.split('\n')) {
-    const key = raw.trim()
-    if (!key) continue
+  for (const key of seen) {
     const ns = key.includes(':') ? key.slice(0, key.indexOf(':')) : '(no namespace)'
     if (!byNs.has(ns)) byNs.set(ns, [])
     byNs.get(ns).push({ name: key, type: 'key' })
@@ -200,7 +209,7 @@ export async function getSchema(system, id) {
   if (!introspect) throw new HttpError(400, `no schema introspection for type "${node.type}"`)
 
   try {
-    const entities = await introspect(system, id)
+    const entities = await introspect(system, id, node)
     return { ok: true, type: node.type, label: node.label, entities }
   } catch (err) {
     const detail = `${err.stdout || ''}${err.stderr || ''}`.trim() || err.message

@@ -75,7 +75,9 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
   }, [systemId, modelCapable])
 
   const words = WORDS[engine] || { entity: 'Entity', empty: 'Empty.' }
-  const replicaCapable = REPLICA_ENGINES.includes(engine) && !isSecondary
+  // Redis replicas are count-managed by the Topology tab (with Sentinel/Cluster) —
+  // this panel would be a second competing writer of the same replicaOf nodes.
+  const replicaCapable = REPLICA_ENGINES.includes(engine) && !isSecondary && engine !== 'redis'
   const supportsSync = engine === 'postgres'
   // The replica nodes that stream from this primary (re-read every poll).
   const secondaries = (manifest?.nodes || []).filter((n) => n.replicaOf === node.id)
@@ -232,6 +234,18 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
                 </div>
               </>
             )}
+          </div>
+        )}
+
+        {engine === 'redis' && !isSecondary && (
+          <div className="form-section replica-panel">
+            <div className="form-section-head">
+              <span>Replication &amp; sharding</span>
+            </div>
+            <p className="sim-desc">
+              Managed in the <strong>Topology</strong> tab: a replica <em>count</em> (with a real
+              3-node Redis Sentinel for failover) or Redis Cluster sharding.
+            </p>
           </div>
         )}
 

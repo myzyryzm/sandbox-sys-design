@@ -14,6 +14,7 @@ import ConsumerTab from './ConsumerTab.jsx'
 import EtcdClusterTab from './EtcdClusterTab.jsx'
 import EtcdKeyspacesTab from './EtcdKeyspacesTab.jsx'
 import RedisKeyspacesTab from './RedisKeyspacesTab.jsx'
+import RedisTopologyTab from './RedisTopologyTab.jsx'
 import ServiceSubscribersTab from './ServiceSubscribersTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
 import ServiceLbTab from './ServiceLbTab.jsx'
@@ -124,6 +125,12 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   // the primary's data, so their keyspaces are managed on the primary.
   if (node.type === 'redis' && !node.replicaOf) {
     tabs.push({ id: 'redis-keyspaces', label: 'Keyspaces', Component: RedisKeyspacesTab })
+    // Topology (replica count + Sentinel, or Cluster sharding) only for "Add database"
+    // redis — a custom-owned redis (LLM token stream) or a websocket tier's bus/presence
+    // has its lifecycle owned by the feature that created it. Backend enforces the same.
+    if (node.origin === 'create-database') {
+      tabs.push({ id: 'redis-topology', label: 'Topology', Component: RedisTopologyTab })
+    }
   }
   // Custom service types inject their own tab(s) (e.g. a Download Coordinator's
   // Distribution tab) between the kind tabs and the universal Shutdown/Delete.

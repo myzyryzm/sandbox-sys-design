@@ -1178,7 +1178,8 @@ export default function SystemDiagram({
     const writers = (rkt.writers || []).filter((w) => byId[w])
     const readers = (rkt.readers || []).filter((r) => byId[r])
     traceNodes = new Set([rkt.redis, ...writers, ...readers])
-    for (const w of writers) traceEdges.push([w, rkt.redis, keyspaceEdgeLabel(rkt, 'write')])
+    // A wait-mode writer's arrow also carries its WAIT contract (+WAIT(n,Tms)).
+    for (const w of writers) traceEdges.push([w, rkt.redis, keyspaceEdgeLabel(rkt, 'write', w)])
     for (const r of readers) traceEdges.push([rkt.redis, r, keyspaceEdgeLabel(rkt, 'read')])
   } else if (rpct) {
     // A served gRPC method: light the server and draw each caller → server edge — every service
@@ -1740,7 +1741,14 @@ export default function SystemDiagram({
           groups), labelled with the service name; sits behind the nodes it groups.
           Non-interactive. */}
       {[...svcLbBoxes, ...workerGroupBoxes].map((b) => (
-        <g key={`svclb-${b.entryId}`} style={{ pointerEvents: 'none' }}>
+        <g
+          key={`svclb-${b.entryId}`}
+          style={{ pointerEvents: 'none' }}
+          // Dim the whole group (dotted box + its top-left title) when an active trace doesn't
+          // touch this group's base — matching the member cards inside it (dimmedNode resolves
+          // them to this same base id), so an unrelated group fades outline, label, and all.
+          className={dimmed(b.entryId) ? 'dim' : undefined}
+        >
           <rect x={b.x} y={b.y} width={b.w} height={b.h} rx="14" className="ws-fleet-box" />
           <text x={b.x + 12} y={b.y + (b.group ? 20 : 16)} className={b.group ? 'llm-group-label' : 'ws-fleet-label'}>
             {b.label}
@@ -1752,7 +1760,13 @@ export default function SystemDiagram({
           sits behind the nodes it groups, with the group id (server base name) in its upper-left.
           Non-interactive so it never intercepts a drag meant for the move-target/cards below. */}
       {wsFleetBoxes.map((b) => (
-        <g key={`ws-fleet-${b.tier}`} style={{ pointerEvents: 'none' }}>
+        <g
+          key={`ws-fleet-${b.tier}`}
+          style={{ pointerEvents: 'none' }}
+          // Dim the fleet box + its title when a trace doesn't collapse onto this tier, matching
+          // the servers inside it and the shared-methods panel below (both keyed on the tier id).
+          className={dimmed(b.tier) ? 'dim' : undefined}
+        >
           <rect x={b.x} y={b.y} width={b.w} height={b.h} rx="14" className="ws-fleet-box" />
           <text x={b.x + 12} y={b.y + 16} className="ws-fleet-label">
             {b.groupLabel}
@@ -2568,6 +2582,41 @@ export default function SystemDiagram({
                   })}
                   <text x={NODE_W / 2} y={yDots + 18} className="node-pause-label">
                     {size} nodes · quorum {quorum} · tolerates {size - quorum}
+                  </text>
+                </g>
+              )
+            })()}
+            {/* Redis topology caption (Topology tab): per-member health dots + the shape
+                math, same pattern as the etcd strip. Cluster mode dots are the member
+                containers with shard MASTERS ringed (redis_instance_info role="master");
+                sentinel mode dots are the 3 sentinels watching the primary. */}
+            {node.type === 'redis' && (node.sentinel || node.redisCluster) && (() => {
+              const members = node.redisCluster?.members || node.sentinel.members || []
+              const live = data?.members || {}
+              const yDots = h + (inOutage ? 26 : 12)
+              const dotGap = Math.min(16, members.length > 1 ? (NODE_W - 24) / (members.length - 1) : 16)
+              const x0 = NODE_W / 2 - ((members.length - 1) * dotGap) / 2
+              const caption = node.redisCluster
+                ? `${node.redisCluster.shards} shards · ${node.redisCluster.replicasPerShard}/shard · 16384 slots`
+                : `${node.sentinel.size} sentinels · quorum ${node.sentinel.quorum} · ${
+                    nodes.filter((n) => n.replicaOf === node.id).length} replica(s)`
+              return (
+                <g style={{ pointerEvents: 'none' }}>
+                  {members.map((m, mi) => {
+                    const st = live[m]
+                    const fill = st ? (st.up ? COLOR_HEX.green : COLOR_HEX.red) : COLOR_HEX.gray
+                    return (
+                      <g key={m}>
+                        <circle cx={x0 + mi * dotGap} cy={yDots} r={4.5} fill={fill} />
+                        {st?.leader && (
+                          <circle cx={x0 + mi * dotGap} cy={yDots} r={7} fill="none"
+                            stroke={fill} strokeWidth="1.5" />
+                        )}
+                      </g>
+                    )
+                  })}
+                  <text x={NODE_W / 2} y={yDots + 18} className="node-pause-label">
+                    {caption}
                   </text>
                 </g>
               )

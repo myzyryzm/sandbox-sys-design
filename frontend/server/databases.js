@@ -194,9 +194,10 @@ function buildMongo({ name, dbName, entities }) {
 // One type-appropriate seed command per keyspace, so the seeded key's live TYPE
 // matches the declaration (a prefix keyspace seeds `<name>sample`, an exact one the
 // key itself). Names are validated by REDIS_KS_RE, so they are safe in the quotes.
-function redisSeedCommand(host, e) {
+// `cli` is the redis-cli invocation prefix — plain (`redis-cli -h cache`) or
+// cluster-aware (`redis-cli -c -h cache-1`, used by the Topology tab's cluster init).
+export function redisSeedCommand(cli, e) {
   const key = e.match === 'prefix' ? `${e.name}sample` : e.name
-  const cli = `redis-cli -h ${host}`
   switch (e.type) {
     case 'list': return `${cli} RPUSH "${key}" "seed"`
     case 'set': return `${cli} SADD "${key}" "seed"`
@@ -208,13 +209,15 @@ function redisSeedCommand(host, e) {
   }
 }
 
-function buildRedis({ name, entities }) {
+// Exported for the Topology tab (redisTopology.js), which rebuilds the standalone
+// base (services/metrics/health/seeder) when a cluster is converted back.
+export function buildRedis({ name, entities }) {
   // Redis has no init-dir mechanism, so a one-shot sidecar seeds one sample key
   // per keyspace once the server answers PING.
   const seed = [
     'set -e',
     `until redis-cli -h ${name} ping | grep -q PONG; do sleep 1; done`,
-    ...entities.map((e) => redisSeedCommand(name, e)),
+    ...entities.map((e) => redisSeedCommand(`redis-cli -h ${name}`, e)),
   ].join('\n')
 
   // The declared keyspaces persist onto the manifest node (verified: the user just

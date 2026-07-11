@@ -134,6 +134,40 @@ async function pollSystem(manifest) {
         }
       }
 
+      // A redis node with a Topology block reads per-member series the same way.
+      // Targets are exporter sidecars (`<member>-exporter:9121`), so the member name
+      // is the instance label minus that suffix. Cluster mode rings the shard
+      // masters (redis_instance_info role="master" — the etcd leader-ring analogue);
+      // sentinel mode has no leader among the sentinels themselves.
+      if (node.type === 'redis' && (node.sentinel || node.redisCluster)) {
+        const job = node.redisCluster ? node.id : `${node.id}-sentinel`
+        const memberOf = (s) => (s.labels.instance || '').split(':')[0].replace(/-exporter$/, '')
+        try {
+          const [ups, masters] = await Promise.all([
+            queryVector(base, `up{job="${job}"}`),
+            // last_over_time + max by(instance): redis_instance_info carries a
+            // run_id label that churns on every container recreate, and the stale
+            // pre-recreate series would ring demoted members for the full 5m
+            // lookback after a topology change — the 30s window (scrape is 5s)
+            // keeps only live role reports.
+            node.redisCluster
+              ? queryVector(base, `max by (instance) (last_over_time(redis_instance_info{job="${job}",role="master"}[30s]))`)
+              : Promise.resolve([]),
+          ])
+          members = {}
+          for (const s of ups) {
+            const m = memberOf(s)
+            if (m) members[m] = { up: s.value === 1, leader: false }
+          }
+          for (const s of masters) {
+            const m = memberOf(s)
+            if (members[m]) members[m].leader = s.value === 1
+          }
+        } catch (err) {
+          console.warn(`redis members on ${node.id} failed:`, err.message)
+        }
+      }
+
       state[node.id] = members ? { metrics, color, members } : { metrics, color }
     }),
   )
@@ -939,6 +973,7 @@ export default function App() {
             shorthand: ks.shorthand,
             writers: ks.writers || [],
             readers: ks.readers || [],
+            writeModes: ks.writeModes || {},
           })
         }}
         onClearRedisTrace={() => setRedisTrace(null)}

@@ -60,7 +60,7 @@ const execOpts = () => ({ cwd: repoRoot, timeout: 300_000, maxBuffer: 16 * 1024 
 
 // `<primary>-<N>` with N = (max existing ordinal for this primary) + 1, so ids
 // never collide even after a middle replica was deleted.
-function nextReplicaId(primary, manifest) {
+export function nextReplicaId(primary, manifest) {
   const re = new RegExp(`^${primary}-(\\d+)$`)
   let max = 0
   for (const n of manifest.nodes) {
@@ -73,7 +73,7 @@ function nextReplicaId(primary, manifest) {
 
 // Lay the secondary out adjacent to its primary (a row beneath it) so the arrow
 // stays short and the dotted box stays tight.
-function replicaPosition(primaryNode, ordinal) {
+export function replicaPosition(primaryNode, ordinal) {
   const px = primaryNode.position?.x ?? 80
   const py = primaryNode.position?.y ?? 80
   return { x: px + (ordinal - 1) * (NODE_W + 30), y: py + 170 }
@@ -154,14 +154,17 @@ function buildPostgresReplica({ secondaryId, primary, dbName }) {
   }
 }
 
-function buildRedisReplica({ secondaryId, primary }) {
+export function buildRedisReplica({ secondaryId, primary }) {
   return {
     services: {
       [secondaryId]: {
         image: 'redis:7-alpine',
         depends_on: [primary],
         // A replica is read-only by default; replicaof makes it follow the primary.
-        command: ['redis-server', '--replicaof', primary, '6379', '--replica-read-only', 'yes'],
+        // replica-announce-ip: advertise the compose-DNS hostname instead of the
+        // container IP, so a sentinel-promoted replica is discovered by name
+        // (sentinel runs `resolve-hostnames` — see redisTopology.js).
+        command: ['redis-server', '--replicaof', primary, '6379', '--replica-read-only', 'yes', '--replica-announce-ip', secondaryId],
       },
       [`${secondaryId}-exporter`]: {
         image: 'oliver006/redis_exporter:v1.62.0',
@@ -401,6 +404,8 @@ function validate(body) {
   if (!ENGINE_LABEL[engine]) throw bad(`${ENGINE_LABEL[engine] || engine} databases don't support read replicas`)
   if (mode !== 'async' && mode !== 'sync') throw bad('mode must be "async" or "sync"')
   if (mode === 'sync' && engine !== 'postgres') throw bad('sync replication is only supported for postgres')
+  // Redis replicas are reconciled (count-based, with Sentinel) by the Topology tab.
+  if (engine === 'redis') throw bad('redis replication is managed by the Topology tab (POST /api/redis/topology)')
   return { system, primaryNode, engine, mode, manifest }
 }
 

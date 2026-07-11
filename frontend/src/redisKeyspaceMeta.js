@@ -38,8 +38,16 @@ export const redisTypesCompatible = (declared, observed) =>
 // (a prefix keyspace reads naturally as `tokens:`).
 export const keyspaceLabel = (ks) => ks.shorthand || ks.name
 
+// A writer's declared write mode: `{ mode:'wait', numreplicas, timeoutMs, … }` for
+// pseudo-synchronous (WAIT) writers, null for the async default.
+export const writeModeOf = (ks, writerId) => (writerId && ks?.writeModes?.[writerId]) || null
+
 // The trace-edge label for one arrow, e.g. `XADD tokens:*` / `GET presence:*`.
-export const keyspaceEdgeLabel = (ks, direction) => {
+// A wait-mode writer's arrow also shows its WAIT contract:
+// `SET session:* +WAIT(1,500ms)` — the write blocks until 1 replica acks (≤500ms).
+export const keyspaceEdgeLabel = (ks, direction, writerId) => {
   const verb = (direction === 'write' ? REDIS_WRITE_VERB : REDIS_READ_VERB)[ks.type] || direction
-  return `${verb} ${ks.name}${ks.match === 'prefix' ? '*' : ''}`
+  const base = `${verb} ${ks.name}${ks.match === 'prefix' ? '*' : ''}`
+  const wm = direction === 'write' ? writeModeOf(ks, writerId) : null
+  return wm?.mode === 'wait' ? `${base} +WAIT(${wm.numreplicas},${wm.timeoutMs}ms)` : base
 }

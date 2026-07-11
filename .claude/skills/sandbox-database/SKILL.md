@@ -219,6 +219,14 @@ from-scratch rebuild the keyspace is recreated at RF=1, so re-add the node (or `
 `POST /api/db-replicas { system, primary, mode }` do all of the below automatically; reproduce the
 same shape by hand.
 
+**Redis replicas are NOT managed here anymore**: the redis node's **Topology** tab
+(`POST /api/redis/topology`, `frontend/server/redisTopology.js`) reconciles a replica COUNT —
+writing the exact same `replicaOf` node shape as below — and also provisions a real 3-node Redis
+Sentinel (quorum 2) alongside them, or converts the node to a sharded Redis Cluster
+(`<name>-1..M` member containers behind the one node, `redisCluster` block). `POST /api/db-replicas`
+rejects `engine === "redis"`. Retrofitting the attached services (Sentinel discovery, cluster
+clients, per-keyspace WAIT write modes) is the **sandbox-redis-topology** skill.
+
 ### Conventions
 - **Secondary id = `<primary>-<N>`** (`catalog-db-1`, `catalog-db-2`, …), `N` = max existing
   ordinal + 1. It is a normal db node (`origin:"create-database"`) with its **own** exporter and a
@@ -252,7 +260,8 @@ same shape by hand.
   priority:0})`. Members are read-only secondaries; point each exporter at its own member with
   `--mongodb.uri=mongodb://<id>:27017/?directConnection=true`.
 - **redis** — the secondary runs `redis-server --replicaof <primary> 6379 --replica-read-only yes`
-  (`replica-read-only` is the default). No primary change.
+  (`replica-read-only` is the default). No primary change. (Count-managed by the Topology tab —
+  see the note above; the per-replica shape is identical.)
 - **cassandra** — the second node runs `cassandra:5` with `CASSANDRA_SEEDS=<primary>` and the same
   `CASSANDRA_CLUSTER_NAME=sandbox`; it bootstraps into the ring automatically (no primary recreate).
   Reuse the primary's exporter build (`build: ./<primary>/exporter`, `CASSANDRA_HOST=<secondaryId>`).
