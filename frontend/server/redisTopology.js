@@ -36,6 +36,7 @@ import {
 } from './scaffold.js'
 import {
   HttpError, bad, readJsonBody, HEALTH_RULES, buildRedis, redisSeedCommand,
+  redisPersistenceFlags,
 } from './databases.js'
 import { buildRedisReplica, nextReplicaId, replicaPosition } from './replicas.js'
 
@@ -150,7 +151,8 @@ function sentinelServices(id) {
 // Cluster members announce their compose-DNS hostname (redis >= 7.0) so MOVED
 // redirects and gossip survive container recreates; no data volume ON PURPOSE —
 // a recreate is a clean re-bootstrap re-formed by the init sidecar (etcd precedent).
-function clusterMemberService(m) {
+// Persistence flags come from the node's manifest block so a reshape keeps them.
+function clusterMemberService(m, persistence) {
   return {
     image: 'redis:7-alpine',
     command: [
@@ -160,6 +162,7 @@ function clusterMemberService(m) {
       '--cluster-node-timeout', '5000',
       '--cluster-announce-hostname', m,
       '--cluster-preferred-endpoint-type', 'hostname',
+      ...redisPersistenceFlags(persistence),
     ],
     restart: 'unless-stopped',
   }
@@ -206,7 +209,7 @@ function clusterInitScript(members, replicasPerShard, keyspaces) {
 function standaloneShapes(node) {
   // buildRedis is the single source of the standalone service/metric/health shapes;
   // its regenerated `keyspaces` field is ignored (the node keeps its live entries).
-  return buildRedis({ name: node.id, entities: node.keyspaces || [] })
+  return buildRedis({ name: node.id, entities: node.keyspaces || [], persistence: node.persistence })
 }
 
 function replicatedMetrics(id) {
@@ -318,7 +321,7 @@ function reconcileReplicas(doc, prom, manifest, node, count) {
   }
   while (current.length < count) {
     const { id: secondaryId, ordinal } = nextReplicaId(id, manifest)
-    const built = buildRedisReplica({ secondaryId, primary: id })
+    const built = buildRedisReplica({ secondaryId, primary: id, persistence: node.persistence })
     let first = true
     for (const [svc, def] of Object.entries(built.services)) {
       setComposeService(doc, svc, def, first ? ` Redis replica "${secondaryId}" — added by Redis topology` : undefined)
@@ -528,7 +531,7 @@ async function handleSet(body) {
     }
     let first = true
     for (const m of members) {
-      setComposeService(doc, m, clusterMemberService(m), first ? ` Redis cluster "${id}" (${target.shards} shards × ${1 + target.replicasPerShard}) — added by Redis topology` : undefined)
+      setComposeService(doc, m, clusterMemberService(m, node.persistence), first ? ` Redis cluster "${id}" (${target.shards} shards × ${1 + target.replicasPerShard}) — added by Redis topology` : undefined)
       setComposeService(doc, `${m}-exporter`, {
         image: EXPORTER_IMAGE,
         environment: { REDIS_ADDR: `redis://${m}:6379` },

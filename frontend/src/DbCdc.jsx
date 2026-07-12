@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { CDC_OPS as OPS } from './cdcMeta.js'
 
 /**
  * Per-database "CDC" (Change Data Capture) tab. Manages a flat list of rules — each
@@ -13,7 +14,6 @@ import { useEffect, useState } from 'react'
  * skill; later edits are pure registry changes + a worker restart (no session).
  */
 
-const OPS = ['INSERT', 'UPDATE', 'DELETE']
 const NEW_TOPIC = '__new__'
 
 // Prompt for the spawned session that authors + builds the CDC worker. The mechanical

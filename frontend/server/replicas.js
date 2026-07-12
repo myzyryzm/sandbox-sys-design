@@ -28,6 +28,7 @@ import {
   HEALTH_RULES,
   addComposeServices,
   addScrapeJob,
+  redisPersistenceFlags,
 } from './databases.js'
 
 const pexec = promisify(execFile)
@@ -154,7 +155,7 @@ function buildPostgresReplica({ secondaryId, primary, dbName }) {
   }
 }
 
-export function buildRedisReplica({ secondaryId, primary }) {
+export function buildRedisReplica({ secondaryId, primary, persistence }) {
   return {
     services: {
       [secondaryId]: {
@@ -163,8 +164,9 @@ export function buildRedisReplica({ secondaryId, primary }) {
         // A replica is read-only by default; replicaof makes it follow the primary.
         // replica-announce-ip: advertise the compose-DNS hostname instead of the
         // container IP, so a sentinel-promoted replica is discovered by name
-        // (sentinel runs `resolve-hostnames` — see redisTopology.js).
-        command: ['redis-server', '--replicaof', primary, '6379', '--replica-read-only', 'yes', '--replica-announce-ip', secondaryId],
+        // (sentinel runs `resolve-hostnames` — see redisTopology.js). Persistence
+        // flags mirror the primary's block so a promoted replica keeps the policy.
+        command: ['redis-server', '--replicaof', primary, '6379', '--replica-read-only', 'yes', '--replica-announce-ip', secondaryId, ...redisPersistenceFlags(persistence)],
       },
       [`${secondaryId}-exporter`]: {
         image: 'oliver006/redis_exporter:v1.62.0',

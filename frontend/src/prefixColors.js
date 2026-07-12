@@ -17,6 +17,12 @@ export const DEFAULT_PREFIX_COLORS = {
   etcdKey: '#ff9eed', // etcd KEY / SUB badges
   etcdEdge: '#5aa0c0', // etcd discovery-wiring edge (edge-only, no badge)
   redisKey: '#ff6b5e', // redis keyspace type badges (STR / LIST / SET / HSET / ZSET / STRM / GEO)
+  // A CDC rule row badges the OPERATIONS that fire it — one badge per op, so a rule can show
+  // several. They get a color each (rather than one shared "CDC" color like redisKey) because
+  // create / modify / remove is the distinction you actually read off the node at a glance.
+  cdcInsert: '#4ec9a0', // CDC INS badge
+  cdcUpdate: '#d9a441', // CDC UPD badge
+  cdcDelete: '#e0574f', // CDC DEL badge
 }
 
 // Role -> the CSS custom property styles.css reads for that role's badge(s). Roles
@@ -28,6 +34,9 @@ export const BADGE_VARS = {
   grpc: '--badge-rpc',
   etcdKey: '--badge-etcd',
   redisKey: '--badge-redis',
+  cdcInsert: '--badge-cdc-ins',
+  cdcUpdate: '--badge-cdc-upd',
+  cdcDelete: '--badge-cdc-del',
 }
 
 // Human labels for the Settings UI: which prefixes each role paints.
@@ -39,6 +48,9 @@ export const PREFIX_ROLE_LABELS = {
   etcdKey: 'KEY / SUB (etcd)',
   etcdEdge: 'etcd discovery edge',
   redisKey: 'STR / STRM / … (redis keyspace)',
+  cdcInsert: 'INS (CDC insert)',
+  cdcUpdate: 'UPD (CDC update)',
+  cdcDelete: 'DEL (CDC delete)',
 }
 
 // A #rrggbb string, the only shape the backend accepts (mirrors the server regex).

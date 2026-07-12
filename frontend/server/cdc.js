@@ -348,9 +348,14 @@ async function ensureTopic(system, cluster, topic) {
 // Request handlers
 // ---------------------------------------------------------------------------
 
-async function handleGet(system, id) {
+// `live` (default true) probes the database container for its schema — the CDC tab needs the
+// entity list to offer as rule targets. The diagram POLLS this route (for the worker node's rule
+// rows), and there the probe is both wasted work and fatal: getSchema throws 502 whenever the
+// container is down, which would blank the rows on a stopped DB. `?live=0` returns the registry
+// alone (entities: []), exactly as GET /api/etcd?live=0 does for its keyspaces.
+async function handleGet(system, id, live = true) {
   const { node, manifest } = resolve(system, id)
-  const schema = await getSchema(system, id) // throws 502 if the container is down
+  const schema = live ? await getSchema(system, id) : { entities: [] } // getSchema throws 502 if the container is down
   const streams = (manifest.nodes || [])
     .filter((n) => n.origin === 'create-event-stream')
     .map((n) => ({ id: n.id, topics: readStreams(system, n.id).topics.map((t) => t.id) }))
@@ -523,7 +528,15 @@ export default function cdc() {
         try {
           if (req.method === 'GET') {
             const url = new URL(req.url, 'http://localhost')
-            return send(res, 200, await handleGet(url.searchParams.get('system'), url.searchParams.get('id')))
+            return send(
+              res,
+              200,
+              await handleGet(
+                url.searchParams.get('system'),
+                url.searchParams.get('id'),
+                url.searchParams.get('live') !== '0',
+              ),
+            )
           }
           if (req.method === 'POST') return send(res, 200, await handleAdd(await readJsonBody(req)))
           return next()
