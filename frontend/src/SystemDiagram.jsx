@@ -2621,6 +2621,25 @@ export default function SystemDiagram({
                 </g>
               )
             })()}
+            {/* Redis persistence caption (Persistence tab): only when the node carries an
+                explicit RDB/AOF block (absent = image defaults, nothing to say). Sits below
+                the topology strip when one is drawn, else in the first caption slot.
+                NOTE: persistence_reader custom nodes reuse the `persistence` key with a
+                different shape — the type gate here is load-bearing. */}
+            {node.type === 'redis' && node.persistence && (() => {
+              const p = node.persistence
+              const yTopo = (node.sentinel || node.redisCluster) ? h + (inOutage ? 26 : 12) + 32 : null
+              const y = yTopo ?? (h + (inOutage ? 28 : 14))
+              const rdb = p.rdb.enabled
+                ? `RDB ${p.rdb.rules.length} rule${p.rdb.rules.length === 1 ? '' : 's'}`
+                : 'RDB off'
+              const aof = p.aof.enabled ? `AOF ${p.aof.fsync}` : 'AOF off'
+              return (
+                <text x={NODE_W / 2} y={y} className="node-pause-label" style={{ pointerEvents: 'none' }}>
+                  💾 {rdb} · {aof}
+                </text>
+              )
+            })()}
           </g>
         )
       })}

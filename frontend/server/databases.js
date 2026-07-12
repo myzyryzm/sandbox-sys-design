@@ -50,6 +50,48 @@ export const REDIS_KS_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
 export const REDIS_SHORTHAND_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/
 export const REDIS_KS_TYPES = new Set(['string', 'list', 'set', 'hash', 'zset', 'stream', 'geo'])
 
+// Redis persistence (RDB + AOF). A redis node with no `persistence` manifest block
+// runs the image defaults below; the block is written by /api/redis/persistence
+// (redisPersistence.js) and read back here so EVERY builder that (re)generates a
+// redis data container — standalone, replica, cluster member — bakes the same
+// flags into its compose command. Shared with redisTopology.js / replicas.js.
+export const REDIS_PERSISTENCE_DEFAULTS = {
+  rdb: {
+    enabled: true,
+    rules: [
+      { seconds: 3600, changes: 1 },
+      { seconds: 300, changes: 100 },
+      { seconds: 60, changes: 10000 },
+    ],
+  },
+  aof: { enabled: false, fsync: 'everysec', rewritePercent: 100, rewriteMinMb: 64 },
+}
+export const REDIS_PERSISTENCE_LIMITS = {
+  maxRules: 4,
+  secondsMin: 1, secondsMax: 86400,
+  changesMin: 1, changesMax: 1000000,
+  rewritePercentMin: 0, rewritePercentMax: 1000, // 0 disables auto-rewrite
+  rewriteMinMbMin: 1, rewriteMinMbMax: 1024,
+  fsync: ['always', 'everysec', 'no'],
+}
+
+// Compose `command:` flags for a persistence block; [] when the node has none
+// (bare image defaults). The multi-pair save value is ONE argv token — redis 7
+// accepts `save "3600 1 300 100"` as a single directive; "" clears all save points.
+export function redisPersistenceFlags(p) {
+  if (!p) return []
+  const save = p.rdb.enabled ? p.rdb.rules.map((r) => `${r.seconds} ${r.changes}`).join(' ') : ''
+  const flags = ['--save', save, '--appendonly', p.aof.enabled ? 'yes' : 'no']
+  if (p.aof.enabled) {
+    flags.push(
+      '--appendfsync', p.aof.fsync,
+      '--auto-aof-rewrite-percentage', String(p.aof.rewritePercent),
+      '--auto-aof-rewrite-min-size', `${p.aof.rewriteMinMb}mb`,
+    )
+  }
+  return flags
+}
+
 const SQL_FIELD_TYPES = new Set([
   'text', 'varchar', 'integer', 'bigint', 'numeric', 'boolean',
   'timestamp', 'timestamptz', 'date', 'uuid', 'jsonb', 'serial', 'bigserial',
@@ -210,8 +252,9 @@ export function redisSeedCommand(cli, e) {
 }
 
 // Exported for the Topology tab (redisTopology.js), which rebuilds the standalone
-// base (services/metrics/health/seeder) when a cluster is converted back.
-export function buildRedis({ name, entities }) {
+// base (services/metrics/health/seeder) when a cluster is converted back —
+// `persistence` is the node's manifest block so a rebuild keeps its RDB/AOF flags.
+export function buildRedis({ name, entities, persistence }) {
   // Redis has no init-dir mechanism, so a one-shot sidecar seeds one sample key
   // per keyspace once the server answers PING.
   const seed = [
@@ -238,11 +281,15 @@ export function buildRedis({ name, entities }) {
     updatedAt: ts,
   }))
 
+  const persistFlags = redisPersistenceFlags(persistence)
   return {
     keyspaces,
     nodeType: 'redis',
     services: {
-      [name]: { image: 'redis:7-alpine' },
+      [name]: {
+        image: 'redis:7-alpine',
+        ...(persistFlags.length ? { command: ['redis-server', ...persistFlags] } : {}),
+      },
       [`${name}-init`]: {
         image: 'redis:7-alpine',
         depends_on: [name],

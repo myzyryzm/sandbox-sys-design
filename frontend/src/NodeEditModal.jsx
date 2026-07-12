@@ -15,6 +15,7 @@ import EtcdClusterTab from './EtcdClusterTab.jsx'
 import EtcdKeyspacesTab from './EtcdKeyspacesTab.jsx'
 import RedisKeyspacesTab from './RedisKeyspacesTab.jsx'
 import RedisTopologyTab from './RedisTopologyTab.jsx'
+import RedisPersistenceTab from './RedisPersistenceTab.jsx'
 import ServiceSubscribersTab from './ServiceSubscribersTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
 import ServiceLbTab from './ServiceLbTab.jsx'
@@ -130,6 +131,9 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     // has its lifecycle owned by the feature that created it. Backend enforces the same.
     if (node.origin === 'create-database') {
       tabs.push({ id: 'redis-topology', label: 'Topology', Component: RedisTopologyTab })
+      // RDB/AOF settings share Topology's gate: they rewrite the same data
+      // containers' compose commands, so feature-owned redis is off limits too.
+      tabs.push({ id: 'redis-persistence', label: 'Persistence', Component: RedisPersistenceTab })
     }
   }
   // Custom service types inject their own tab(s) (e.g. a Download Coordinator's
