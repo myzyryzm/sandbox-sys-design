@@ -38,9 +38,3 @@ class WorkerServicer(pb2_grpc.WorkerServicer):
             cached_count=s["cached_count"],
             max_active=s["max_active"],
         )
-
-    async def UpdateConsumer(self, request, context):
-        # Point the worker at the consumer (source) feeding it — store the
-        # source's host:port as the engine's local `source`.
-        self.engine.update_consumer(request.host, request.port)
-        return pb2.UpdateConsumerReply(ok=True)

@@ -5,50 +5,36 @@ import {
   HEX_RE,
   applyBadgeColors,
 } from './prefixColors.js'
+import { DEFAULT_NODE_COLORS, NODE_ROLE_LABELS } from './nodeColors.js'
 
-// Order the color roles are shown in the modal.
-const ROLE_ORDER = ['http', 'function', 'consumer', 'grpc', 'etcdKey', 'redisKey', 'etcdEdge']
+// Order the color roles are shown in the modal, per section.
+const PREFIX_ORDER = [
+  'http', 'function', 'consumer', 'grpc', 'etcdKey', 'redisKey',
+  'cdcInsert', 'cdcUpdate', 'cdcDelete',
+  'etcdEdge', // edge-only (no badge) — kept last
+]
+const NODE_ORDER = ['load_balancer']
 
 /**
- * Global app settings (repo-root settings.json via /api/settings). The first two:
+ * Global app settings (repo-root settings.json via /api/settings). Three today:
  *  - Prefix colors: the diagram's row-prefix badge colors (HTTP verbs, ƒ, PULL,
  *    KEY/SUB, WATCH, RPC) plus the matching edges they trace. Applied live to the
  *    --badge-* CSS vars + passed to SystemDiagram as edge colors on save.
+ *  - Node colors: the color of a node no health rule paints — today just the nginx
+ *    load balancer. Passed to SystemDiagram, which paints its header + outline.
  *  - Dangerously skip permissions: adds --dangerously-skip-permissions to every
  *    Claude session the app launches.
  * More settings will slot in here later.
  */
 export default function SettingsModal({ settings, onSave, onClose }) {
-  // Live, validated colors (always full #rrggbb). Merge over defaults so a settings
-  // object missing a role still renders every picker.
-  const [colors, setColors] = useState(() => ({
-    ...DEFAULT_PREFIX_COLORS,
-    ...(settings?.prefixColors || {}),
-  }))
-  // Per-role text buffer, so a mid-edit invalid hex ("#12") doesn't clobber `colors`.
-  const [drafts, setDrafts] = useState(() => ({
-    ...DEFAULT_PREFIX_COLORS,
-    ...(settings?.prefixColors || {}),
-  }))
+  const prefix = useColorMap(DEFAULT_PREFIX_COLORS, settings?.prefixColors)
+  const nodes = useColorMap(DEFAULT_NODE_COLORS, settings?.nodeColors)
   const [skipPerms, setSkipPerms] = useState(!!settings?.dangerouslySkipPermissions)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
 
-  const setColor = (role, value) => {
-    setDrafts((d) => ({ ...d, [role]: value }))
-    if (HEX_RE.test(value)) setColors((c) => ({ ...c, [role]: value }))
-  }
-  const resetRole = (role) => {
-    setColors((c) => ({ ...c, [role]: DEFAULT_PREFIX_COLORS[role] }))
-    setDrafts((d) => ({ ...d, [role]: DEFAULT_PREFIX_COLORS[role] }))
-  }
-  const resetAll = () => {
-    setColors({ ...DEFAULT_PREFIX_COLORS })
-    setDrafts({ ...DEFAULT_PREFIX_COLORS })
-  }
-
-  // Block Save while any hex field is mid-edit / invalid.
-  const hasInvalid = ROLE_ORDER.some((r) => !HEX_RE.test(drafts[r]))
+  // Block Save while any hex field in either section is mid-edit / invalid.
+  const hasInvalid = prefix.hasInvalid || nodes.hasInvalid
 
   const save = async () => {
     setBusy(true)
@@ -57,12 +43,16 @@ export default function SettingsModal({ settings, onSave, onClose }) {
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prefixColors: colors, dangerouslySkipPermissions: skipPerms }),
+        body: JSON.stringify({
+          prefixColors: prefix.colors,
+          nodeColors: nodes.colors,
+          dangerouslySkipPermissions: skipPerms,
+        }),
       })
       const data = await res.json()
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       applyBadgeColors(data.settings.prefixColors) // re-tint badges immediately
-      onSave?.(data.settings) // lift into App state so the diagram edges re-render too
+      onSave?.(data.settings) // lift into App state so the diagram edges + nodes re-render too
       onClose?.()
     } catch (err) {
       setError(err.message)
@@ -78,56 +68,23 @@ export default function SettingsModal({ settings, onSave, onClose }) {
           <button className="modal-close" onClick={onClose} disabled={busy}>✕</button>
         </header>
 
-        <section className="settings-section">
-          <div className="settings-section-head">
-            <h3>Prefix colors</h3>
-            <button type="button" className="link" onClick={resetAll} disabled={busy}>
-              Reset all
-            </button>
-          </div>
-          <p className="sim-desc">
-            Colors of the diagram's row-prefix badges — and the matching edges they trace.
-          </p>
-          <div className="settings-colors">
-            {ROLE_ORDER.map((role) => {
-              const draft = drafts[role]
-              const valid = HEX_RE.test(draft)
-              const isDefault = colors[role] === DEFAULT_PREFIX_COLORS[role]
-              return (
-                <div className="settings-color-row" key={role}>
-                  <label className="settings-color-label">{PREFIX_ROLE_LABELS[role]}</label>
-                  <input
-                    type="color"
-                    className="settings-color-swatch"
-                    value={valid ? draft : colors[role]}
-                    onChange={(e) => setColor(role, e.target.value)}
-                    disabled={busy}
-                    aria-label={`${PREFIX_ROLE_LABELS[role]} color`}
-                  />
-                  <input
-                    type="text"
-                    className={`settings-color-hex${valid ? '' : ' invalid'}`}
-                    value={draft}
-                    onChange={(e) => setColor(role, e.target.value.trim())}
-                    disabled={busy}
-                    spellCheck={false}
-                    maxLength={7}
-                    aria-label={`${PREFIX_ROLE_LABELS[role]} hex`}
-                  />
-                  <button
-                    type="button"
-                    className="link settings-color-reset"
-                    onClick={() => resetRole(role)}
-                    disabled={busy || isDefault}
-                    title="Reset to default"
-                  >
-                    ↺
-                  </button>
-                </div>
-              )
-            })}
-          </div>
-        </section>
+        <ColorSection
+          title="Prefix colors"
+          hint="Colors of the diagram's row-prefix badges — and the matching edges they trace."
+          order={PREFIX_ORDER}
+          labels={PREFIX_ROLE_LABELS}
+          map={prefix}
+          busy={busy}
+        />
+
+        <ColorSection
+          title="Node colors"
+          hint="Color of a node nothing scrapes, so no health rule paints it."
+          order={NODE_ORDER}
+          labels={NODE_ROLE_LABELS}
+          map={nodes}
+          busy={busy}
+        />
 
         <section className="settings-section">
           <h3>Claude Code</h3>
@@ -163,5 +120,89 @@ export default function SettingsModal({ settings, onSave, onClose }) {
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * State for one editable color map: the live, always-valid `colors` (what Save posts) plus a
+ * per-role text `drafts` buffer, so a mid-edit invalid hex ("#12") doesn't clobber `colors`.
+ * Both start merged over the defaults, so a settings object missing a role still renders every
+ * picker.
+ */
+function useColorMap(defaults, initial) {
+  const [colors, setColors] = useState(() => ({ ...defaults, ...(initial || {}) }))
+  const [drafts, setDrafts] = useState(() => ({ ...defaults, ...(initial || {}) }))
+
+  return {
+    colors,
+    drafts,
+    defaults,
+    hasInvalid: Object.keys(defaults).some((role) => !HEX_RE.test(drafts[role])),
+    set(role, value) {
+      setDrafts((d) => ({ ...d, [role]: value }))
+      if (HEX_RE.test(value)) setColors((c) => ({ ...c, [role]: value }))
+    },
+    reset(role) {
+      setColors((c) => ({ ...c, [role]: defaults[role] }))
+      setDrafts((d) => ({ ...d, [role]: defaults[role] }))
+    },
+    resetAll() {
+      setColors({ ...defaults })
+      setDrafts({ ...defaults })
+    },
+  }
+}
+
+/** One section of swatch + hex + revert rows over a useColorMap. */
+function ColorSection({ title, hint, order, labels, map, busy }) {
+  return (
+    <section className="settings-section">
+      <div className="settings-section-head">
+        <h3>{title}</h3>
+        <button type="button" className="link" onClick={map.resetAll} disabled={busy}>
+          Reset all
+        </button>
+      </div>
+      <p className="sim-desc">{hint}</p>
+      <div className="settings-colors">
+        {order.map((role) => {
+          const draft = map.drafts[role]
+          const valid = HEX_RE.test(draft)
+          const isDefault = map.colors[role] === map.defaults[role]
+          return (
+            <div className="settings-color-row" key={role}>
+              <label className="settings-color-label">{labels[role]}</label>
+              <input
+                type="color"
+                className="settings-color-swatch"
+                value={valid ? draft : map.colors[role]}
+                onChange={(e) => map.set(role, e.target.value)}
+                disabled={busy}
+                aria-label={`${labels[role]} color`}
+              />
+              <input
+                type="text"
+                className={`settings-color-hex${valid ? '' : ' invalid'}`}
+                value={draft}
+                onChange={(e) => map.set(role, e.target.value.trim())}
+                disabled={busy}
+                spellCheck={false}
+                maxLength={7}
+                aria-label={`${labels[role]} hex`}
+              />
+              <button
+                type="button"
+                className="link settings-color-reset"
+                onClick={() => map.reset(role)}
+                disabled={busy || isDefault}
+                title="Reset to default"
+              >
+                ↺
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    </section>
   )
 }

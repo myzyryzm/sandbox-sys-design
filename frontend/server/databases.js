@@ -256,12 +256,16 @@ export function redisSeedCommand(cli, e) {
 // `persistence` is the node's manifest block so a rebuild keeps its RDB/AOF flags.
 export function buildRedis({ name, entities, persistence }) {
   // Redis has no init-dir mechanism, so a one-shot sidecar seeds one sample key
-  // per keyspace once the server answers PING.
-  const seed = [
-    'set -e',
-    `until redis-cli -h ${name} ping | grep -q PONG; do sleep 1; done`,
-    ...entities.map((e) => redisSeedCommand(`redis-cli -h ${name}`, e)),
-  ].join('\n')
+  // per keyspace once the server answers PING. With no keyspaces declared there is
+  // nothing to seed, so the sidecar is omitted entirely rather than started to do
+  // nothing (a later keyspace add is a live manifest edit anyway — no rebuild).
+  const seed = entities.length
+    ? [
+        'set -e',
+        `until redis-cli -h ${name} ping | grep -q PONG; do sleep 1; done`,
+        ...entities.map((e) => redisSeedCommand(`redis-cli -h ${name}`, e)),
+      ].join('\n')
+    : null
 
   // The declared keyspaces persist onto the manifest node (verified: the user just
   // typed them) so the diagram renders typed KEY rows and /api/redis can manage them.
@@ -290,12 +294,16 @@ export function buildRedis({ name, entities, persistence }) {
         image: 'redis:7-alpine',
         ...(persistFlags.length ? { command: ['redis-server', ...persistFlags] } : {}),
       },
-      [`${name}-init`]: {
-        image: 'redis:7-alpine',
-        depends_on: [name],
-        restart: 'no',
-        entrypoint: ['sh', '-c', seed],
-      },
+      ...(seed
+        ? {
+            [`${name}-init`]: {
+              image: 'redis:7-alpine',
+              depends_on: [name],
+              restart: 'no',
+              entrypoint: ['sh', '-c', seed],
+            },
+          }
+        : {}),
       [`${name}-exporter`]: {
         image: 'oliver006/redis_exporter:v1.62.0',
         environment: { REDIS_ADDR: `redis://${name}:6379` },
@@ -647,7 +655,10 @@ function validate(body) {
   }
 
   const rawEntities = Array.isArray(body.entities) ? body.entities : []
-  if (rawEntities.length === 0) throw bad('add at least one entity')
+  // Redis keyspaces are optional: a cache can be provisioned bare and get its typed
+  // key namespaces later from the node's Keyspaces tab (/api/redis, no rebuild), which
+  // is also the state a redis lands in once its last keyspace is deleted.
+  if (rawEntities.length === 0 && type !== 'redis') throw bad('add at least one entity')
 
   // Redis entities are keyspaces: { name, match, type, shorthand } instead of the
   // name+fields shape. Legacy name-only rows (scripted callers) normalize to the

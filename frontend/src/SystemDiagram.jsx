@@ -20,6 +20,8 @@ import { customTypeOf, CUSTOM_TYPES } from './customTypes/index.js'
 import { isExternalEndpoint, endpointPolicy, localPathOf } from './endpointPolicy.js'
 import { deriveFunctionTrace } from './scenarioBank.js'
 import { REDIS_BADGE, keyspaceLabel, keyspaceEdgeLabel } from './redisKeyspaceMeta.js'
+import { CDC_BADGE, CDC_BADGE_CLASS, cdcOpsOf, cdcRuleKey, cdcEdgeLabel } from './cdcMeta.js'
+import { DEFAULT_NODE_COLORS } from './nodeColors.js'
 
 const NODE_W = 190
 const HEADER_H = 30
@@ -44,6 +46,12 @@ const CUSTOM_GAP = 8
 // Gap above the on-node API method rows (services / external services list their own
 // callable methods below their metrics, like the LB lists its endpoints).
 const METHOD_GAP = 8
+
+// A row's text spans NODE_W - 2*PAD px in 11px monospace (.endpoint-row, ~6.6px/char), so about
+// this many characters fit before it spills past the card's right edge. Rows that can carry SEVERAL
+// badges (a CDC rule badges every operation that fires it) budget against it and truncate the name.
+const ROW_CHARS = Math.floor((NODE_W - 2 * PAD) / 6.6)
+const truncate = (s, max) => (s.length > max ? s.slice(0, Math.max(1, max - 1)) + '…' : s)
 
 const COLOR_HEX = {
   green: '#2e7d32',
@@ -352,6 +360,9 @@ export default function SystemDiagram({
   // User-configurable relationship-edge colors (Settings → prefix colors): { function, grpc,
   // consumer, etcdEdge }. Fall back to the DEFAULT_* constants below so unset = original look.
   colors = {},
+  // User-configurable colors for nodes no health rule paints (Settings → node colors):
+  // { load_balancer }. See nodeColors.js; unset falls back to the gray they've always been.
+  nodeColors = {},
   // Drag mode: when true, every node can be repositioned and the system boundary box can be
   // moved/resized; the normal click actions (trace/Edit/select) are suppressed. Drops are
   // persisted to the manifest via POST /api/layout.
@@ -437,6 +448,17 @@ export default function SystemDiagram({
   redisTrace = null,
   onSelectRedisKeyspace,
   onClearRedisTrace,
+  // Each CDC worker's capture rules (systems/<id>/<db>/cdc.json), keyed by the WORKER's node id
+  // — each { table, operations:[INSERT|UPDATE|DELETE], stream, topic }. Rendered as clickable
+  // rule rows on the worker node, badged with the operations that fire them.
+  cdcRules = {},
+  // A selected CDC rule, traced worker → its stream ("publishes <entity> to <topic>") and onward
+  // through every consumer function pulling that topic (its PULL row lights up and its own
+  // downstream hops are drawn). Mutually exclusive with the other traces. Set via
+  // onSelectCdcRule, cleared via onClearCdcTrace.
+  cdcTrace = null,
+  onSelectCdcRule,
+  onClearCdcTrace,
 }) {
   // Live relationship-edge colors from Settings, falling back to the module defaults so the
   // diagram is unchanged until the user overrides a color. These re-tint the same edges +
@@ -445,6 +467,9 @@ export default function SystemDiagram({
   const GRPC_COLOR = colors?.grpc ?? DEFAULT_GRPC_COLOR
   const CONSUME_COLOR = colors?.consumer ?? DEFAULT_CONSUME_COLOR
   const ETCD_COLOR = colors?.etcdEdge ?? DEFAULT_ETCD_COLOR
+  // The nginx LB carries no health rules, so it has always rendered in the "unknown" gray —
+  // that static color is the user's to pick (see LB_COLOR's use in the node loop below).
+  const LB_COLOR = nodeColors?.load_balancer ?? DEFAULT_NODE_COLORS.load_balancer
   const [selectedKey, setSelectedKey] = useState(null)
   // Index of the trace hop whose description popup is open (or null). Reset whenever the active
   // trace changes so a stale index can't point at the wrong hop of a different trace.
@@ -625,6 +650,11 @@ export default function SystemDiagram({
       (grpcMethodsByContract.get(contract) || []).map((m) => ({ contract, method: m.name })),
     )
   }
+  // A CDC worker's capture rules, dropping any whose target stream node no longer exists (so a
+  // deleted cluster can't leave a dangling rule row that traces to nothing) — the same guard
+  // consumersOf / keyspacesOf apply.
+  const cdcRulesOf = (node) =>
+    node.type === 'cdc' ? (cdcRules[node.id] || []).filter((r) => byId[r.stream]) : []
   const rowsOf = (node) => {
     if (!node) return []
     return [
@@ -643,6 +673,8 @@ export default function SystemDiagram({
       ...subscriptionsOf(node.groupVirtual ? node.stateKey : node.id).map((s) => ({ kind: 'sub', ...s })),
       // A redis node's declared keyspaces (typed KEY rows), straight off the manifest node.
       ...(node.type === 'redis' ? node.keyspaces || [] : []).map((ks) => ({ kind: 'redisks', ks })),
+      // A CDC worker's capture rules (one row per rule, badged with the ops that fire it).
+      ...cdcRulesOf(node).map((r) => ({ kind: 'cdcrule', r })),
       ...wsStatRowsOf(node.id),
     ]
   }
@@ -1037,6 +1069,9 @@ export default function SystemDiagram({
   // A redis-keyspace trace lights the redis node plus its declared writers/readers. The redis
   // node must still exist; deleted writers/readers are filtered at edge-build time below.
   const rkt = redisTrace && byId[redisTrace.redis] ? redisTrace : null
+  // A CDC-rule trace lights the capture worker, the stream it publishes the entity to, and every
+  // consumer function that pulls that topic. Both the worker and its stream must still exist.
+  const cdct = cdcTrace && byId[cdcTrace.cdc] && byId[cdcTrace.stream] ? cdcTrace : null
   if (ft && ft.wsBuiltin) {
     // A ws pool client's builtin method has no authored steps — trace the TIER path
     // instead: client → its L4 lb → each relay server → the bus + presence redis.
@@ -1181,6 +1216,37 @@ export default function SystemDiagram({
     // A wait-mode writer's arrow also carries its WAIT contract (+WAIT(n,Tms)).
     for (const w of writers) traceEdges.push([w, rkt.redis, keyspaceEdgeLabel(rkt, 'write', w)])
     for (const r of readers) traceEdges.push([rkt.redis, r, keyspaceEdgeLabel(rkt, 'read')])
+  } else if (cdct) {
+    // A CDC rule: the worker publishes the entity's changes to its topic, and every consumer
+    // function reading that same (cluster, topic) then pulls them — so the trace follows the
+    // change all the way OUT of the topic, not just into it. Each such consumer's PULL row lights
+    // up (see the `cons` row below) and its own downstream hops are drawn, exactly as clicking
+    // that PULL row directly would, making the full propagation path visible in one click.
+    // A consumer's arrow points service → cluster, matching the permanent consume edge.
+    const ids = new Set([cdct.cdc, cdct.stream])
+    // Two consumer functions on the same service and topic would otherwise stack a second
+    // sequence badge on the one line they share.
+    const seenEdge = new Set()
+    const addEdge = (from, to, label) => {
+      const k = `${from}->${to}`
+      if (from === to || seenEdge.has(k)) return
+      seenEdge.add(k)
+      traceEdges.push([from, to, label || ''])
+    }
+    addEdge(cdct.cdc, cdct.stream, cdcEdgeLabel(cdct))
+    for (const [svcId, fns] of Object.entries(consumerFunctions)) {
+      if (!byId[svcId]) continue
+      for (const c of fns) {
+        if (c.cluster !== cdct.stream || c.topic !== cdct.topic) continue
+        ids.add(svcId)
+        addEdge(svcId, cdct.stream, c.topic)
+        for (const d of (c.downstream || []).filter((x) => byId[x])) {
+          ids.add(d)
+          addEdge(svcId, d, (c.downstreamDescriptions || {})[d] || '')
+        }
+      }
+    }
+    traceNodes = ids
   } else if (rpct) {
     // A served gRPC method: light the server and draw each caller → server edge — every service
     // whose manifest `grpc.clients` dials this contract with this server in its `targets`. gRPC
@@ -1574,7 +1640,7 @@ export default function SystemDiagram({
   // endpoint / function / consumer), so a leftover popup index can't render against a new trace.
   useEffect(() => {
     setOpenInfo(null)
-  }, [methodTrace, functionTrace, consumerTrace, rpcTrace, selectedKey])
+  }, [methodTrace, functionTrace, consumerTrace, keyspaceTrace, redisTrace, rpcTrace, cdcTrace, selectedKey])
 
   // ctrl/cmd + wheel (and trackpad pinch, which browsers deliver as wheel+ctrlKey) zooms toward the
   // cursor; plain wheel falls through to native scroll (pan). React's onWheel is passive so its
@@ -1628,6 +1694,7 @@ export default function SystemDiagram({
               onClearKeyspaceTrace?.()
               onClearRpcTrace?.()
               onClearRedisTrace?.()
+              onClearCdcTrace?.()
             }
       }
       onPointerMove={dragMode ? onPointerMove : undefined}
@@ -2003,7 +2070,14 @@ export default function SystemDiagram({
         // health-derived color (a deliberate shutdown looks down — but intentionally).
         // A base outage paints both the llm header and its `<name>-1` card — same container.
         const inOutage = outages[dataKeyOf(node)]
-        const color = inOutage ? COLOR_HEX.orange : COLOR_HEX[data.color] || COLOR_HEX.gray
+        // Health paints most nodes. The load balancer has no health block (nothing scrapes it),
+        // so it takes the color configured in Settings instead — but an outage still wins, and an
+        // LB that someone DID give health rules stays health-colored.
+        const color = inOutage
+          ? COLOR_HEX.orange
+          : node.type === 'load_balancer' && !node.health
+            ? LB_COLOR
+            : COLOR_HEX[data.color] || COLOR_HEX.gray
         // Event-stream cluster with its consumers paused — badge it (amber, like an outage).
         const consumersPaused = pausedConsumers.has(node.id)
         // All per-node actions (schema/topics/endpoints/gRPC/shutdown/delete) now live
@@ -2166,11 +2240,18 @@ export default function SystemDiagram({
                           className={isSel ? 'endpoint-hit selected' : 'endpoint-hit'}
                           onClick={dragMode ? undefined : (ev) => {
                             ev.stopPropagation()
-                            // An LB selection and a method/function/consumer/keyspace trace never coexist.
+                            // An LB selection and any other trace never coexist. Unlike every other
+                            // row, this one selects into DIAGRAM-LOCAL state (selectedKey), so App
+                            // can't null the other traces for us — clearing them all here is what
+                            // keeps a live rpc/redis/cdc trace from out-ranking the LB selection in
+                            // the trace chain (and leaving the click with no visible effect).
                             onClearMethodTrace?.()
                             onClearFunctionTrace?.()
                             onClearConsumerTrace?.()
                             onClearKeyspaceTrace?.()
+                            onClearRpcTrace?.()
+                            onClearRedisTrace?.()
+                            onClearCdcTrace?.()
                             setSelectedKey(isSel ? null : key)
                           }}
                         >
@@ -2260,6 +2341,7 @@ export default function SystemDiagram({
                       onClearMethodTrace?.()
                       onClearConsumerTrace?.()
                       onClearKeyspaceTrace?.()
+                      onClearCdcTrace?.()
                       if (active) onClearFunctionTrace?.()
                       else onSelectFunction?.(fn, node.id)
                     }}
@@ -2293,20 +2375,29 @@ export default function SystemDiagram({
                 // must anchor on a real manifest node.
                 const c = row.c
                 const owner = node.stateKey || node.id
-                const active =
+                const selfActive =
                   !!consumerTrace && consumerTrace.service === owner && consumerTrace.name === c.name
+                // A CDC-rule trace lights this row too, when the loop pulls the very topic that
+                // rule publishes to — that's how a capture shows up as arriving HERE. The two flags
+                // stay separate: `active` only paints the row, while the click keeps toggling on
+                // THIS row's own trace. Folding them together would make a cdc-lit click take the
+                // `active` branch and clear a consumer trace that was never set, dropping the
+                // cdc trace (the click's clear-list above) and leaving the diagram blank.
+                const cdcLit = !!cdct && c.cluster === cdct.stream && c.topic === cdct.topic
+                const active = selfActive || cdcLit
                 return (
                   <g
                     key={`cons-${c.name}`}
                     className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
                     onClick={dragMode ? undefined : (ev) => {
                       ev.stopPropagation()
-                      // A consumer trace is exclusive with the LB / method / function / keyspace selections.
+                      // A consumer trace is exclusive with the LB / method / function / keyspace / cdc selections.
                       setSelectedKey(null)
                       onClearMethodTrace?.()
                       onClearFunctionTrace?.()
                       onClearKeyspaceTrace?.()
-                      if (active) onClearConsumerTrace?.()
+                      onClearCdcTrace?.()
+                      if (selfActive) onClearConsumerTrace?.()
                       else onSelectConsumer?.(c, owner)
                     }}
                   >
@@ -2340,6 +2431,7 @@ export default function SystemDiagram({
                       onClearMethodTrace?.()
                       onClearFunctionTrace?.()
                       onClearConsumerTrace?.()
+                      onClearCdcTrace?.()
                       if (active) onClearKeyspaceTrace?.()
                       else onSelectKeyspace?.(ks, node.id)
                     }}
@@ -2375,6 +2467,7 @@ export default function SystemDiagram({
                       onClearMethodTrace?.()
                       onClearFunctionTrace?.()
                       onClearConsumerTrace?.()
+                      onClearCdcTrace?.()
                       if (active) onClearKeyspaceTrace?.()
                       else onSelectSubscription?.(ks, etcdId, owner)
                     }}
@@ -2409,6 +2502,7 @@ export default function SystemDiagram({
                       onClearFunctionTrace?.()
                       onClearConsumerTrace?.()
                       onClearKeyspaceTrace?.()
+                      onClearCdcTrace?.()
                       if (active) onClearRedisTrace?.()
                       else onSelectRedisKeyspace?.(ks, node.id)
                     }}
@@ -2423,6 +2517,49 @@ export default function SystemDiagram({
                         verify
                       </text>
                     )}
+                  </g>
+                )
+              }
+              if (row.kind === 'cdcrule') {
+                // A CDC capture rule (systems/<id>/<db>/cdc.json). Instead of the ONE badge every
+                // other row carries, it badges each OPERATION that fires it — INS / UPD / DEL, a
+                // color each — followed by the entity being captured. Clicking it traces the publish
+                // edge worker → stream ("publishes <entity> to <topic>") and lights every consumer
+                // function that pulls that topic, so the change's whole path shows in one click.
+                const r = row.r
+                const ops = cdcOpsOf(r)
+                // Each badge spends 4 characters of the row ("INS "); the entity name gets the rest.
+                const label = truncate(r.table, ROW_CHARS - ops.length * 4)
+                const active = !!cdct && cdct.cdc === node.id && cdcRuleKey(cdct) === cdcRuleKey(r)
+                return (
+                  <g
+                    key={`cdcrule-${cdcRuleKey(r)}`}
+                    className={active ? 'endpoint-hit selected' : 'endpoint-hit'}
+                    onClick={dragMode ? undefined : (ev) => {
+                      ev.stopPropagation()
+                      // A cdc trace is exclusive with the LB / method / function / consumer /
+                      // etcd-keyspace / redis / rpc selections.
+                      setSelectedKey(null)
+                      onClearMethodTrace?.()
+                      onClearFunctionTrace?.()
+                      onClearConsumerTrace?.()
+                      onClearKeyspaceTrace?.()
+                      onClearRedisTrace?.()
+                      onClearRpcTrace?.()
+                      if (active) onClearCdcTrace?.()
+                      else onSelectCdcRule?.(r, node.id)
+                    }}
+                  >
+                    <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
+                    <text x={PAD} y={y + 12} className="endpoint-row">
+                      {ops.map((op) => (
+                        <tspan key={op} className={`endpoint-method ${CDC_BADGE_CLASS[op]}`}>
+                          {`${CDC_BADGE[op]} `}
+                        </tspan>
+                      ))}
+                      {label}
+                      {label !== r.table && <title>{r.table}</title>}
+                    </text>
                   </g>
                 )
               }
@@ -2448,6 +2585,7 @@ export default function SystemDiagram({
                       onClearFunctionTrace?.()
                       onClearConsumerTrace?.()
                       onClearKeyspaceTrace?.()
+                      onClearCdcTrace?.()
                       if (active) onClearRpcTrace?.()
                       else onSelectRpc?.(row, owner)
                     }}
@@ -2477,6 +2615,7 @@ export default function SystemDiagram({
                     onClearFunctionTrace?.()
                     onClearConsumerTrace?.()
                     onClearKeyspaceTrace?.()
+                    onClearCdcTrace?.()
                     if (isSel) onClearMethodTrace?.()
                     else onSelectMethod?.(e)
                   }}

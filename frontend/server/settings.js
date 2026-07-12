@@ -1,12 +1,14 @@
 // Vite dev-server plugin: GLOBAL (cross-system) app settings.
 //
 //   GET  /api/settings           -> { ok, settings }
-//   POST /api/settings  { prefixColors?, dangerouslySkipPermissions? } -> { ok, settings }
+//   POST /api/settings  { prefixColors?, nodeColors?, dangerouslySkipPermissions? } -> { ok, settings }
 //
 // Unlike the per-system registries under systems/<id>/, these are app-wide, so they live in
-// a single settings.json at the repo root (gitignored — machine-local config). Two settings
+// a single settings.json at the repo root (gitignored — machine-local config). Three settings
 // today, more later:
 //   - prefixColors: the diagram's row-prefix badge/edge colors (see frontend/src/prefixColors.js).
+//   - nodeColors: the color of a diagram node that isn't health-colored — today just the nginx
+//     load balancer (see frontend/src/nodeColors.js).
 //   - dangerouslySkipPermissions: when true, terminal.js adds --dangerously-skip-permissions to
 //     every launched `claude` session.
 //
@@ -33,12 +35,26 @@ const DEFAULT_PREFIX_COLORS = {
   etcdKey: '#ff9eed',
   etcdEdge: '#5aa0c0',
   redisKey: '#ff6b5e',
+  cdcInsert: '#4ec9a0',
+  cdcUpdate: '#d9a441',
+  cdcDelete: '#e0574f',
 }
-const COLOR_ROLES = Object.keys(DEFAULT_PREFIX_COLORS)
+const PREFIX_ROLES = Object.keys(DEFAULT_PREFIX_COLORS)
+
+// Colors of diagram NODES that no health rule paints. Keep in sync with DEFAULT_NODE_COLORS in
+// frontend/src/nodeColors.js and COLOR_HEX.gray in SystemDiagram.jsx.
+const DEFAULT_NODE_COLORS = {
+  load_balancer: '#9e9e9e',
+}
+const NODE_ROLES = Object.keys(DEFAULT_NODE_COLORS)
 const HEX_RE = /^#[0-9a-fA-F]{6}$/
 
 function defaults() {
-  return { prefixColors: { ...DEFAULT_PREFIX_COLORS }, dangerouslySkipPermissions: false }
+  return {
+    prefixColors: { ...DEFAULT_PREFIX_COLORS },
+    nodeColors: { ...DEFAULT_NODE_COLORS },
+    dangerouslySkipPermissions: false,
+  }
 }
 
 // Read settings.json, merged over defaults so a missing/partial/corrupt file still yields a full,
@@ -48,7 +64,8 @@ export function readSettings() {
   try {
     const raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'))
     return {
-      prefixColors: { ...base.prefixColors, ...normalizeColors(raw.prefixColors) },
+      prefixColors: { ...base.prefixColors, ...normalizeColors(raw.prefixColors, PREFIX_ROLES) },
+      nodeColors: { ...base.nodeColors, ...normalizeColors(raw.nodeColors, NODE_ROLES) },
       dangerouslySkipPermissions: raw.dangerouslySkipPermissions === true,
     }
   } catch {
@@ -57,10 +74,10 @@ export function readSettings() {
 }
 
 // Keep only known roles whose value is a valid #rrggbb hex; drop everything else.
-function normalizeColors(colors) {
+function normalizeColors(colors, roles) {
   const out = {}
   if (colors && typeof colors === 'object') {
-    for (const role of COLOR_ROLES) {
+    for (const role of roles) {
       if (HEX_RE.test(colors[role])) out[role] = colors[role].toLowerCase()
     }
   }
@@ -75,16 +92,25 @@ function writeSettings(next) {
 // values loudly (400) so a bad color can't silently no-op or reach the DOM/CLI unchecked.
 function applyPatch(body) {
   const current = readSettings()
-  const next = { prefixColors: { ...current.prefixColors }, dangerouslySkipPermissions: current.dangerouslySkipPermissions }
+  const next = {
+    prefixColors: { ...current.prefixColors },
+    nodeColors: { ...current.nodeColors },
+    dangerouslySkipPermissions: current.dangerouslySkipPermissions,
+  }
 
-  if (body.prefixColors !== undefined) {
-    if (!body.prefixColors || typeof body.prefixColors !== 'object') throw bad('prefixColors must be an object')
-    for (const [role, value] of Object.entries(body.prefixColors)) {
-      if (!COLOR_ROLES.includes(role)) throw bad(`unknown color role "${role}"`)
+  // Validate a posted color map against its known roles, merging onto `next[key]`.
+  const patchColors = (key, roles) => {
+    const posted = body[key]
+    if (posted === undefined) return
+    if (!posted || typeof posted !== 'object') throw bad(`${key} must be an object`)
+    for (const [role, value] of Object.entries(posted)) {
+      if (!roles.includes(role)) throw bad(`unknown ${key} role "${role}"`)
       if (!HEX_RE.test(value)) throw bad(`color "${role}" must be a #rrggbb hex`)
-      next.prefixColors[role] = value.toLowerCase()
+      next[key][role] = value.toLowerCase()
     }
   }
+  patchColors('prefixColors', PREFIX_ROLES)
+  patchColors('nodeColors', NODE_ROLES)
 
   if (body.dangerouslySkipPermissions !== undefined) {
     if (typeof body.dangerouslySkipPermissions !== 'boolean') throw bad('dangerouslySkipPermissions must be a boolean')

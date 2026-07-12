@@ -63,10 +63,17 @@ function blankEntity(meta) {
   return { name: '', fields: meta.hasFields ? [{ name: '', type: meta.fieldTypes[0] }] : [] }
 }
 
+// Redis keyspaces are optional (the cache can be provisioned bare and get its key
+// namespaces later from the node's Keyspaces tab), so it opens with no rows; every
+// other engine needs at least one entity, so it opens with one to fill in.
+function initialEntities(meta) {
+  return meta.isRedis ? [] : [blankEntity(meta)]
+}
+
 export default function CreateDatabase({ systemId, onClose, onLaunch }) {
   const [type, setType] = useState('postgres')
   const [name, setName] = useState(TYPE_META.postgres.defaultName)
-  const [entities, setEntities] = useState([blankEntity(TYPE_META.postgres)])
+  const [entities, setEntities] = useState(initialEntities(TYPE_META.postgres))
   const [status, setStatus] = useState('idle') // idle | submitting | error
   const [error, setError] = useState(null)
   // Schema-from-models (postgres/mongodb only): pick bank models instead of typing
@@ -92,7 +99,7 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
   function changeType(next) {
     setType(next)
     setName(TYPE_META[next].defaultName)
-    setEntities([blankEntity(TYPE_META[next])])
+    setEntities(initialEntities(TYPE_META[next]))
     setError(null)
     // Model-bank schemas aren't offered for every engine (e.g. redis/blob) — fall back to manual.
     if (!MODEL_ENGINES.includes(next)) setSchemaSource('manual')
@@ -248,9 +255,16 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
           ) : (
           <div className="form-section">
             <div className="form-section-head">
-              <span>{meta.entityWord}s</span>
+              <span>{meta.entityWord}s{meta.isRedis ? ' (optional)' : ''}</span>
               <button type="button" onClick={addEntity} disabled={busy}>+ {meta.entityWord}</button>
             </div>
+
+            {meta.isRedis && entities.length === 0 && (
+              <p className="form-hint">
+                None declared — the cache is created empty. You can add key namespaces any time
+                from the node's Keyspaces tab (no rebuild).
+              </p>
+            )}
 
             {entities.map((en, ei) => (
               <div className="entity" key={ei}>
@@ -291,7 +305,7 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
                       />
                     </>
                   )}
-                  {entities.length > 1 && (
+                  {(entities.length > 1 || meta.isRedis) && (
                     <button type="button" className="link-danger" onClick={() => removeEntity(ei)} disabled={busy}>remove</button>
                   )}
                 </div>

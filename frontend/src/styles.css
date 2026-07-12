@@ -805,6 +805,23 @@ h1 {
   fill: var(--badge-redis, #ff6b5e);
 }
 
+/* CDC rule OPERATION badges. A rule row carries one badge per operation that fires it
+   (INS / UPD / DEL), each its own color so create/modify/remove reads at a glance. */
+.endpoint-method-cdc-ins {
+  fill: var(--badge-cdc-ins, #4ec9a0);
+  color: var(--badge-cdc-ins, #4ec9a0);
+}
+
+.endpoint-method-cdc-upd {
+  fill: var(--badge-cdc-upd, #d9a441);
+  color: var(--badge-cdc-upd, #d9a441);
+}
+
+.endpoint-method-cdc-del {
+  fill: var(--badge-cdc-del, #e0574f);
+  color: var(--badge-cdc-del, #e0574f);
+}
+
 /* Right-aligned amber marker on a scan-discovered redis keyspace row the user hasn't
    confirmed yet (the Verify button itself lives in the node's Keyspaces tab). */
 .keyspace-unverified {

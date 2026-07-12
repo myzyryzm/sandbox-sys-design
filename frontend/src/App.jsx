@@ -21,6 +21,7 @@ import WsSharedMethodsModal from "./WsSharedMethodsModal.jsx";
 import { CUSTOM_RUNTIMES } from "./customTypes/index.js";
 import { pickColor } from "./health.js";
 import { DEFAULT_PREFIX_COLORS, applyBadgeColors } from "./prefixColors.js";
+import { DEFAULT_NODE_COLORS } from "./nodeColors.js";
 import { queryInstant, queryVector } from "./prometheus.js";
 import { deriveFunctionTrace } from "./scenarioBank.js";
 
@@ -212,9 +213,11 @@ export default function App() {
   const [showSkills, setShowSkills] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   // Global app settings (repo-root settings.json via /api/settings). Fetched once on mount;
-  // prefixColors re-tint the diagram's badges (via CSS vars) and edges (passed to SystemDiagram).
+  // prefixColors re-tint the diagram's badges (via CSS vars) and edges (passed to SystemDiagram),
+  // nodeColors paint the nodes no health rule colors (the nginx LB).
   const [settings, setSettings] = useState({
     prefixColors: DEFAULT_PREFIX_COLORS,
+    nodeColors: DEFAULT_NODE_COLORS,
     dangerouslySkipPermissions: false,
   });
   const [endpoints, setEndpoints] = useState([]);
@@ -262,6 +265,15 @@ export default function App() {
   // block), traced each declared writer → redis and redis → each declared reader.
   // Mutually exclusive with the other traces.
   const [redisTrace, setRedisTrace] = useState(null);
+  // The per-database CDC rule registry (systems/<id>/<db>/cdc.json via
+  // GET /api/db-cdc?live=0), keyed by the CDC WORKER's node id (not the database's) — the
+  // worker is the node that draws them. Rendered as clickable rule rows, badged with the
+  // operations that fire them.
+  const [cdcRules, setCdcRules] = useState({});
+  // A CDC rule row selected on a cdc worker node, traced worker → its stream ("publishes
+  // <entity> to <topic>") and onward through every consumer function that pulls that topic.
+  // Mutually exclusive with the other traces.
+  const [cdcTrace, setCdcTrace] = useState(null);
   // Live runtime state for custom service types (e.g. Download Coordinator worker
   // bitmaps / distribution progress), keyed by node id. Filled by the poll below.
   const [customState, setCustomState] = useState({});
@@ -478,6 +490,46 @@ export default function App() {
       clearInterval(id);
     };
   }, [etcdIds]);
+
+  // Poll each CDC worker's rule registry (registry-only, ?live=0 — the live read probes the
+  // database container for its schema and 502s when it's down, which would blank the rows on a
+  // stopped DB) so the worker node's rule rows and their traces update as rules are added /
+  // retargeted / removed. Gated on the manifest containing a cdc node. Rules are stored on the
+  // DATABASE (cdc.json lives under <db>/), so we fetch by `cdcOf` and key by the worker node id.
+  const cdcPairs = (manifest?.nodes || [])
+    .filter((n) => n.type === "cdc" && n.cdcOf)
+    .map((n) => `${n.id}:${n.cdcOf}`)
+    .join(",");
+  useEffect(() => {
+    if (!cdcPairs) {
+      setCdcRules({});
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      const entries = await Promise.all(
+        cdcPairs.split(",").map(async (pair) => {
+          const [nodeId, dbId] = pair.split(":");
+          try {
+            const res = await fetch(
+              `/api/db-cdc?system=${SYSTEM_ID}&id=${encodeURIComponent(dbId)}&live=0`,
+            );
+            const data = await res.json();
+            return data.ok ? [nodeId, data.rules || []] : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      if (!cancelled) setCdcRules(Object.fromEntries(entries.filter(Boolean)));
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [cdcPairs]);
 
   // Poll the gRPC contract registry so a server service's RPC rows (contract name in its manifest
   // `grpc.servers`) stay in sync as methods are added/removed. Gated on the manifest having any
@@ -952,6 +1004,7 @@ export default function App() {
           endpoints={endpoints}
           systemId={SYSTEM_ID}
           colors={settings.prefixColors}
+          nodeColors={settings.nodeColors}
           dragMode={dragMode}
           onRequestEdit={setEditTarget}
           onRequestConnectionResilience={setConnectionTarget}
@@ -967,6 +1020,7 @@ export default function App() {
             setKeyspaceTrace(null);
             setRpcTrace(null);
             setRedisTrace(null);
+            setCdcTrace(null);
             setMethodTrace(ep);
           }}
           onClearMethodTrace={() => setMethodTrace(null)}
@@ -982,6 +1036,7 @@ export default function App() {
             setKeyspaceTrace(null);
             setRpcTrace(null);
             setRedisTrace(null);
+            setCdcTrace(null);
             // A ws builtin has no authored steps — the diagram traces the tier path itself.
             setFunctionTrace(
               fn.wsBuiltin
@@ -1003,6 +1058,7 @@ export default function App() {
             setKeyspaceTrace(null);
             setRpcTrace(null);
             setRedisTrace(null);
+            setCdcTrace(null);
             setConsumerTrace({
               cluster: c.cluster,
               service: serviceId,
@@ -1021,6 +1077,7 @@ export default function App() {
             setConsumerTrace(null);
             setRpcTrace(null);
             setRedisTrace(null);
+            setCdcTrace(null);
             setKeyspaceTrace({
               etcd: etcdId,
               type: ks.type || "discovery",
@@ -1037,6 +1094,7 @@ export default function App() {
             setConsumerTrace(null);
             setRpcTrace(null);
             setRedisTrace(null);
+            setCdcTrace(null);
             // Same keyspaceTrace shape as onSelectKeyspace, but focused on ONE listener: the
             // `kt` branch draws registrant → etcd → this listener only (config: etcd → listener).
             // `focus` lets the diagram mark the service's SUB row active without lighting the
@@ -1059,6 +1117,7 @@ export default function App() {
             setConsumerTrace(null);
             setKeyspaceTrace(null);
             setRedisTrace(null);
+            setCdcTrace(null);
             setRpcTrace({
               service: serviceId,
               contract: r.contract,
@@ -1073,6 +1132,7 @@ export default function App() {
             setConsumerTrace(null);
             setKeyspaceTrace(null);
             setRpcTrace(null);
+            setCdcTrace(null);
             setRedisTrace({
               redis: redisId,
               name: ks.name,
@@ -1085,6 +1145,24 @@ export default function App() {
             });
           }}
           onClearRedisTrace={() => setRedisTrace(null)}
+          cdcRules={cdcRules}
+          cdcTrace={cdcTrace}
+          onSelectCdcRule={(rule, cdcId) => {
+            setMethodTrace(null);
+            setFunctionTrace(null);
+            setConsumerTrace(null);
+            setKeyspaceTrace(null);
+            setRpcTrace(null);
+            setRedisTrace(null);
+            setCdcTrace({
+              cdc: cdcId,
+              table: rule.table,
+              operations: rule.operations || [],
+              stream: rule.stream,
+              topic: rule.topic,
+            });
+          }}
+          onClearCdcTrace={() => setCdcTrace(null)}
         />
       </div>
       {showTerminal && (
