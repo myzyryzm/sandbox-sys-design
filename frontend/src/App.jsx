@@ -176,6 +176,38 @@ async function pollSystem(manifest) {
         }
       }
 
+      // A replicated postgres node reads its member roles from the failover WATCHER's own
+      // series (job `<id>-failover`, one `member` label per container). Nothing else can
+      // tell you this: the postgres exporter has no notion of who is primary, and after a
+      // failover the manifest does not either — the primary is whichever member the watcher
+      // promoted. `leader` rings the live primary; `fenced` marks a stale ex-primary that is
+      // up but read-only (so writers correctly skip it).
+      if (node.type === "postgres" && node.postgresHa) {
+        const job = node.postgresHa.watcher || `${node.id}-failover`;
+        try {
+          const [ups, primaries, fenced] = await Promise.all([
+            queryVector(base, `pg_ha_member_up{job="${job}"}`),
+            queryVector(base, `pg_ha_is_primary{job="${job}"}`),
+            queryVector(base, `pg_ha_is_fenced{job="${job}"}`),
+          ]);
+          members = {};
+          for (const s of ups) {
+            const m = s.labels.member;
+            if (m) members[m] = { up: s.value === 1, leader: false };
+          }
+          for (const s of primaries) {
+            const m = s.labels.member;
+            if (members[m]) members[m].leader = s.value === 1;
+          }
+          for (const s of fenced) {
+            const m = s.labels.member;
+            if (members[m]) members[m].fenced = s.value === 1;
+          }
+        } catch (err) {
+          console.warn(`postgres members on ${node.id} failed:`, err.message);
+        }
+      }
+
       state[node.id] = members
         ? { metrics, color, members }
         : { metrics, color };

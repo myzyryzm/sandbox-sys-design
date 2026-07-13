@@ -88,6 +88,20 @@ generic renderer of it — **to change what the user sees, edit the manifest, no
   Cluster of `<name>-1..M` member containers behind the one node; no bare `<name>` container) —
   mutually exclusive, reconciled mechanically by `POST /api/redis/topology`
   (`frontend/server/redisTopology.js`), with member dots drawn etcd-style (cluster masters ringed).
+  A **postgres** node reshaped by its own Topology tab carries the analogous
+  `postgresHa:{ enabled, autoDegrade, downAfterMs, primary, members, watcher, settings, dsn,
+  sync:{ method, quorum, commitLevel, standbys } }` block: N streaming standbys (`replicaOf` nodes,
+  each `replication:"sync"|"async"`) plus ONE real `<db>-failover` watcher container (a container,
+  not a node — the sentinel convention) that promotes the most caught-up standby when the primary
+  dies, maintains `synchronous_standby_names = ANY k (…)`, and FENCES a returning stale primary
+  read-only. Reconciled by `POST /api/postgres/topology` (`frontend/server/postgresTopology.js`),
+  with `/api/postgres/failover` (promote) + `/api/postgres/rejoin` (re-clone a stale member).
+  **Roles are runtime, membership is manifest**: after a failover the live primary is a `<db>-<n>`
+  container while `<db>` is still the cluster entry, so `replicaOf` means "member of this cluster",
+  NOT "currently a standby" — the primary is read from the watcher's `pg_ha_is_primary` series (what
+  rings the member dot), never from the manifest. Clients survive a failover purely via a multi-host
+  libpq DSN (`target_session_attrs=read-write`), which also skips a fenced node — see the
+  `sandbox-postgres-topology` skill.
 - `edges[]`: `{ from, to }` node ids, plus an optional `origin` (e.g. `consumer-fn` for a Kafka
   consumer-function edge).
 - `boundary:{x,y,w,h}` is the dotted system-boundary rectangle; drag mode persists it (and node
@@ -202,6 +216,7 @@ skill in `.claude/skills/` — it has the canonical procedure and `Verify` steps
 | Add/edit/delete an HTTP route on a service | `sandbox-endpoint` |
 | Add/update/delete a datastore (postgres/mongo/redis/MinIO) **or a read replica** | `sandbox-database` |
 | Retrofit redis writers/readers after a **Topology** change (Sentinel/Cluster + WAIT modes) | `sandbox-redis-topology` |
+| Retrofit postgres users after a **Topology** change (failover-safe multi-host DSN) | `sandbox-postgres-topology` |
 | Build a database's CDC worker (capture changes → Kafka) | `sandbox-database-cdc` |
 | Add/update a Kafka cluster, topics, and per-service **consumer functions** | `sandbox-event-stream` |
 | Wire **etcd service discovery** (leased-key registration + watch listeners) | `sandbox-etcd` |
@@ -233,7 +248,7 @@ button + `EditQueuePanel.jsx`) that runs pending sessions sequentially in the on
   it); `templates/client/` and `templates/download-coordinator/` back the client + coordinator flows.
 - `frontend/server/<feature>.js` — one plugin per `/api/<feature>` route, all wired in `vite.config.js`:
   `services`, `databases` (+ `dbschema`, `dbseed`, `cdc`, `replicas`, `redisKeyspaces`,
-  `redisTopology`), `endpoints`, `models`,
+  `redisTopology`, `postgresTopology`), `endpoints`, `models`,
   `eventstreams` + `consumers`, `etcd`, `grpc` (+ `grpcInstall`), `resilience`, `serviceLb`, `outage`, `externalServices`,
   `clients` + `scenarios` (+ `clientScript` helper), `customServices` (+ `customTypes/` recipes),
   `endtoend`, `layout`, `skills`, `remove`, `terminal`. Shared primitives live in

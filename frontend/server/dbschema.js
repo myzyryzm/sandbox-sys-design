@@ -3,11 +3,16 @@
 //   GET /api/db-schema?system=<id>&id=<dbNodeId>
 //     -> { ok, type, entities: [{ name, fields: [{ name, type }] }] }
 //
+// Postgres fields additionally carry key/index metadata (keys present only when
+// applicable — every other consumer reads just name/type, so the shape is additive):
+//   { name, type, pk: true, fk: { table, column },
+//     indexes: [{ name, method, primary, unique, constraint }] }
+//
 // Rather than echo back the init script the DB was created from, this reads the
 // live container so it reflects the database's actual current state (a service or
 // a Claude session may have altered it). Each engine is introspected with its own
 // client via `docker compose exec`:
-//   postgres     -> information_schema.columns  (tables + columns)
+//   postgres     -> information_schema.columns + pg_constraint/pg_index catalogs
 //   mongodb      -> getCollectionNames + a sampled doc  (collections + fields)
 //   redis        -> --scan keys grouped by `namespace:`  (key namespaces)
 //   object-store -> ls /data  (MinIO stores one directory per bucket)
@@ -42,19 +47,87 @@ export function composeExec(system, service, cmd) {
 
 async function introspectPostgres(system, id) {
   const dbName = id.replace(/-/g, '_')
-  const sql =
-    "SELECT table_name, column_name, data_type FROM information_schema.columns " +
+  // Four tagged queries in ONE psql invocation (one docker exec). psql runs the -c
+  // commands in order and each row leads with its tag, so the combined -t -A -F'|'
+  // output parses uniformly:
+  //   col|table|column|type
+  //   pk |table|column                          (one row per PK member column)
+  //   fk |table|column|ftable|fcolumn           (conkey/confkey paired by ordinality)
+  //   idx|table|column|index|method|primary|unique|constraint
+  const colsSql =
+    "SELECT 'col', table_name, column_name, data_type FROM information_schema.columns " +
     "WHERE table_schema='public' ORDER BY table_name, ordinal_position;"
+  const pkSql =
+    "SELECT 'pk', t.relname, a.attname " +
+    'FROM pg_constraint con ' +
+    'JOIN pg_class t ON t.oid = con.conrelid ' +
+    'JOIN pg_namespace n ON n.oid = t.relnamespace ' +
+    'JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true ' +
+    'JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum ' +
+    "WHERE con.contype = 'p' AND n.nspname = 'public';"
+  const fkSql =
+    "SELECT 'fk', t.relname, a.attname, ft.relname, fa.attname " +
+    'FROM pg_constraint con ' +
+    'JOIN pg_class t ON t.oid = con.conrelid ' +
+    'JOIN pg_namespace n ON n.oid = t.relnamespace ' +
+    'JOIN pg_class ft ON ft.oid = con.confrelid ' +
+    'JOIN unnest(con.conkey) WITH ORDINALITY AS src(attnum, ord) ON true ' +
+    'JOIN unnest(con.confkey) WITH ORDINALITY AS dst(attnum, ord) ON dst.ord = src.ord ' +
+    'JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = src.attnum ' +
+    'JOIN pg_attribute fa ON fa.attrelid = ft.oid AND fa.attnum = dst.attnum ' +
+    "WHERE con.contype = 'f' AND n.nspname = 'public';"
+  // k.attnum > 0 skips expression-index key entries (attnum 0 = expression), so a
+  // pure-expression index never shows per-column. The LEFT JOIN marks any index
+  // backing a constraint (PK / UNIQUE constraint / exclusion) — the "not droppable
+  // from the UI" signal (indisunique alone isn't: a plain CREATE UNIQUE INDEX is).
+  // The contype filter matters: an incoming FK also records the referenced table's
+  // unique index as its conindid and would duplicate every PK/unique row here.
+  const idxSql =
+    "SELECT 'idx', t.relname, a.attname, ic.relname, am.amname, " +
+    'ix.indisprimary::int, ix.indisunique::int, (con.oid IS NOT NULL)::int ' +
+    'FROM pg_index ix ' +
+    'JOIN pg_class t ON t.oid = ix.indrelid ' +
+    'JOIN pg_namespace n ON n.oid = t.relnamespace ' +
+    'JOIN pg_class ic ON ic.oid = ix.indexrelid ' +
+    'JOIN pg_am am ON am.oid = ic.relam ' +
+    'JOIN unnest(ix.indkey::smallint[]) WITH ORDINALITY AS k(attnum, ord) ON k.attnum > 0 ' +
+    'JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum ' +
+    "LEFT JOIN pg_constraint con ON con.conindid = ix.indexrelid AND con.contype IN ('p','u','x') " +
+    "WHERE n.nspname = 'public' ORDER BY t.relname, ic.relname, k.ord;"
   const { stdout } = await composeExec(system, id, {
     envFlags: ['-e', 'PGPASSWORD=sandbox'],
-    argv: ['psql', '-U', 'sandbox', '-d', dbName, '-w', '-t', '-A', '-F', '|', '-c', sql],
+    argv: ['psql', '-U', 'sandbox', '-d', dbName, '-w', '-t', '-A', '-F', '|',
+      '-c', colsSql, '-c', pkSql, '-c', fkSql, '-c', idxSql],
   })
   const byTable = new Map()
+  const fieldOf = (table, column) => (byTable.get(table) || []).find((f) => f.name === column)
   for (const line of stdout.split('\n')) {
-    const [table, column, type] = line.split('|')
-    if (!table || !column) continue
-    if (!byTable.has(table)) byTable.set(table, [])
-    byTable.get(table).push({ name: column, type })
+    const parts = line.split('|')
+    if (parts[0] === 'col') {
+      const [, table, column, type] = parts
+      if (!table || !column) continue
+      if (!byTable.has(table)) byTable.set(table, [])
+      byTable.get(table).push({ name: column, type })
+    } else if (parts[0] === 'pk') {
+      const f = fieldOf(parts[1], parts[2])
+      if (f) f.pk = true
+    } else if (parts[0] === 'fk') {
+      const f = fieldOf(parts[1], parts[2])
+      if (f && !f.fk) f.fk = { table: parts[3], column: parts[4] }
+    } else if (parts[0] === 'idx') {
+      const [, table, column, name, method, primary, unique, constraint] = parts
+      const f = fieldOf(table, column)
+      if (!f) continue
+      if (!f.indexes) f.indexes = []
+      // A multicolumn index intentionally lists under EACH member column.
+      f.indexes.push({
+        name,
+        method,
+        primary: primary === '1',
+        unique: unique === '1',
+        constraint: constraint === '1',
+      })
+    }
   }
   return [...byTable].map(([name, fields]) => ({ name, fields }))
 }

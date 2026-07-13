@@ -227,6 +227,16 @@ Sentinel (quorum 2) alongside them, or converts the node to a sharded Redis Clus
 rejects `engine === "redis"`. Retrofitting the attached services (Sentinel discovery, cluster
 clients, per-keyspace WAIT write modes) is the **sandbox-redis-topology** skill.
 
+**Postgres replicas are NOT managed here either**, for the same reason: the postgres node's
+**Topology** tab (`POST /api/postgres/topology`, `frontend/server/postgresTopology.js`) reconciles a
+standby COUNT — the same `replicaOf` node shape as below — and additionally owns **synchronous
+replication** (per-standby `replication:"sync"`, enforced as a real `synchronous_standby_names =
+ANY k (…)` quorum) and a real `<db>-failover` **watcher container** that promotes the most caught-up
+standby when the primary dies and fences a returning stale primary. `POST /api/db-replicas` rejects
+`engine === "postgres"`. Retrofitting the attached services (a multi-host libpq DSN with
+`target_session_attrs=read-write`, which is the ONLY code change a failover needs) is the
+**sandbox-postgres-topology** skill. So `/api/db-replicas` now serves **mongodb and cassandra only**.
+
 ### Conventions
 - **Secondary id = `<primary>-<N>`** (`catalog-db-1`, `catalog-db-2`, …), `N` = max existing
   ordinal + 1. It is a normal db node (`origin:"create-database"`) with its **own** exporter and a
@@ -241,7 +251,8 @@ clients, per-keyspace WAIT write modes) is the **sandbox-redis-topology** skill.
 - The diagram's **double-headed arrow** and **dotted cluster box** are derived from `replicaOf` —
   do **not** add manifest `edges` for replication.
 - `replication` is `"async"` or `"sync"`. **`sync` is postgres-only** (real
-  `synchronous_standby_names`); mongo/redis stream asynchronously by nature (`async`).
+  `synchronous_standby_names`) and is set from the postgres **Topology** tab, not from here;
+  mongo/redis/cassandra stream asynchronously by nature (`async`).
 
 ### Per-engine streaming (real replication)
 - **postgres** — make the primary replication-ready idempotently: allow replication in

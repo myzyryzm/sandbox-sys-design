@@ -23,10 +23,10 @@
     },
     {
       "name": "Transaction",
-      "ts": "// id => snowflake id; primary key; set when Transaction added to database\n// payment_order_id => add an index\n// idempotency_key => unique\n// created_at => datetime; the time when Transaction is created\n// unique constraint on (payment_order_id, step)\ninterface Transaction {\n  id: number;\n  payment_order_id: string;\n  step:\n    | \"step1_payin\"\n    | \"step2a_payin-complete\"\n    | \"step2b_fufilled\"\n    | \"refund\"\n    | \"step3_payout\"\n    | \"step4_payout-received\";\n  created_at: string;\n}",
+      "ts": "// id => snowflake id; primary key; set when Transaction added to database\n// payment_order_id => add an index\n// created_at => datetime; the time when Transaction is created\n// unique constraint on (payment_order_id, step)\ninterface Transaction {\n  id: number;\n  payment_order_id: string;\n  step:\n    | \"step1_payin\"\n    | \"step2a_payin-complete\"\n    | \"step2b_fufilled\"\n    | \"refund\"\n    | \"step3_payout\"\n    | \"step4_payout-received\";\n  created_at: string;\n}",
       "description": "",
       "createdAt": "2026-06-26T22:11:38.372Z",
-      "updatedAt": "2026-06-28T23:37:49.366Z"
+      "updatedAt": "2026-07-12T20:55:18.253Z"
     },
     {
       "name": "LedgerEntry",

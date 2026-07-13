@@ -17,11 +17,14 @@ CREATE TABLE IF NOT EXISTS transaction (
     id                  bigint      PRIMARY KEY,                 -- snowflake id, set by app on insert
     payment_order_id    text        NOT NULL,                    -- snowflake id (string-typed)
     step                text        NOT NULL,
-    idempotency_key     text        UNIQUE,                      -- model comment directive: idempotency_key => unique; kept nullable (not in interface body)
     created_at          timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT transaction_step_check CHECK (step IN ('step1_payin', 'step2a_payin-complete', 'step2b_fufilled', 'refund', 'step3_payout', 'step4_payout-received')),
     CONSTRAINT transaction_payment_order_step_unique UNIQUE (payment_order_id, step)
 );
+
+-- Idempotent migration for pre-existing volumes: idempotency_key is no longer part of the
+-- Transaction model (its "unique" directive was removed), so drop the column outright.
+ALTER TABLE transaction DROP COLUMN IF EXISTS idempotency_key;
 
 CREATE INDEX IF NOT EXISTS transaction_payment_order_id_idx ON transaction (payment_order_id);
 

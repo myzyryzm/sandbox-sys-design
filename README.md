@@ -323,6 +323,7 @@ to a spawned session whose prompt is built from the persisted metadata, followin
 | Add/edit/delete an HTTP route on a service | `sandbox-endpoint` |
 | Add/update/delete a datastore **or a read replica** | `sandbox-database` |
 | Retrofit redis writers/readers after a **Topology** change | `sandbox-redis-topology` |
+| Retrofit postgres users after a **Topology** change (failover-safe DSN) | `sandbox-postgres-topology` |
 | Build a database's CDC worker | `sandbox-database-cdc` |
 | Kafka clusters, topics, and per-service **consumer functions** | `sandbox-event-stream` |
 | Wire **etcd** discovery/config (leased keys + watch listeners) | `sandbox-etcd` |
@@ -632,6 +633,52 @@ Because the topology change is mechanical, the **service code doesn't follow aut
 keyspace has attached writers/readers, applying enqueues a `sandbox-redis-topology` session to
 retrofit them — Sentinel-based master discovery for writes, `RedisCluster` clients with MOVED
 handling and hash-tag awareness, and any `r.wait(...)` write modes.
+
+---
+
+## Postgres topology (replication · sync commits · failover)
+
+A postgres node has its own **Topology** tab (`POST /api/postgres/topology`,
+`frontend/server/postgresTopology.js`) with two shapes:
+
+- **Standalone** — the single container "Add database" created.
+- **Replicated** — 1–4 real streaming standbys (`<db>-1..N`, `replicaOf` nodes) plus one
+  `<db>-failover` **watcher container** — the postgres answer to Sentinel. It promotes the most
+  caught-up standby when the primary dies, repoints the survivors, and keeps
+  `synchronous_standby_names` honest. The primary carries a `postgresHa` block.
+
+Each standby is independently **async or synchronous**. Synchronous standbys are enforced as a real
+quorum — `synchronous_standby_names = ANY k ("<db>-1", …)` — with a `synchronous_commit` level
+(`on` waits for the standby to *flush* WAL; `remote_apply` waits for it to be *replayed*, giving
+read-your-writes on that standby). Async means the primary commits without waiting, so a crash can
+lose the last transactions; sync means a promoted standby has every committed row, at the cost of a
+round-trip per write.
+
+Enabling replication **does not touch the primary** — no recreate, no restart, no data loss: the
+`pg_hba` replication line goes in live, and the sync/WAL settings are runtime `ALTER SYSTEM`s.
+
+Three things make the failover actually survivable, and they're the interesting part:
+
+- **Writers follow the new primary with no code change.** Services connect with a *multi-host* libpq
+  DSN (`postgresql://…@<db>:5432,<db>-1:5432,<db>-2:5432/…?target_session_attrs=read-write`). libpq
+  tries each host and keeps the one that is actually writable — so a promoted standby is found
+  automatically. That one string is the whole client contract.
+- **A returning old primary is FENCED, not a split brain.** It comes back believing it is still
+  primary; the watcher sets `default_transaction_read_only = on`, which makes it answer
+  `transaction_read_only = on` — exactly what `target_session_attrs=read-write` skips. Writers keep
+  reaching the real primary even though the stale node is up and first in the host list.
+- **Rejoin** (a button per fenced member) discards its stale data dir and re-clones it from the live
+  primary, making it a healthy standby again.
+
+**Roles are runtime, membership is manifest**: after a failover the live primary is a `<db>-<n>`
+container while `<db>` is still the cluster entry. The diagram rings the *live* primary's member dot
+using the watcher's `pg_ha_is_primary` series — never the manifest.
+
+Applying enqueues a `sandbox-postgres-topology` session to retrofit the services that use the
+database (from their `endpoints.json` / `consumers.json` `downstream`) onto the multi-host DSN.
+
+To see it: kill the primary from its **Shutdown** tab and watch the ring jump to a standby while the
+write endpoint keeps working.
 
 ---
 

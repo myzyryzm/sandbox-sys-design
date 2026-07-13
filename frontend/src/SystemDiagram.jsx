@@ -1974,19 +1974,37 @@ export default function SystemDiagram({
       {replicaEdges.map((edge, i) => {
         const a = centerOf(edge.from)
         const b = centerOf(edge.to)
+        // A SYNCHRONOUS standby is labelled on its edge: the primary's commits block until
+        // this one acknowledges, which is the single most consequential thing about the
+        // link and is invisible otherwise (async is the default, so it goes unlabelled).
+        const sync = byId[edge.to]?.replication === 'sync'
         return (
-          <line
-            key={`replica-${i}`}
-            x1={a.x}
-            y1={a.y}
-            x2={b.x}
-            y2={b.y}
-            className="replica-edge"
-            markerStart="url(#replica-arrow)"
-            markerEnd="url(#replica-arrow)"
-          >
-            <title>{`replication · ${edge.from} ↔ ${edge.to}`}</title>
-          </line>
+          <g key={`replica-${i}`}>
+            <line
+              x1={a.x}
+              y1={a.y}
+              x2={b.x}
+              y2={b.y}
+              className="replica-edge"
+              markerStart="url(#replica-arrow)"
+              markerEnd="url(#replica-arrow)"
+            >
+              <title>{`replication · ${edge.from} ↔ ${edge.to}${sync ? ' · synchronous' : ''}`}</title>
+            </line>
+            {sync && (
+              // 70% of the way toward the STANDBY, not the midpoint: the primary end of this
+              // edge is where the member-dot caption sits, and a midpoint label lands on top
+              // of it.
+              <text
+                x={a.x + (b.x - a.x) * 0.7}
+                y={a.y + (b.y - a.y) * 0.7 - 4}
+                className="node-pause-label"
+                style={{ pointerEvents: 'none' }}
+              >
+                sync
+              </text>
+            )}
+          </g>
         )
       })}
 
@@ -2744,6 +2762,49 @@ export default function SystemDiagram({
                   {members.map((m, mi) => {
                     const st = live[m]
                     const fill = st ? (st.up ? COLOR_HEX.green : COLOR_HEX.red) : COLOR_HEX.gray
+                    return (
+                      <g key={m}>
+                        <circle cx={x0 + mi * dotGap} cy={yDots} r={4.5} fill={fill} />
+                        {st?.leader && (
+                          <circle cx={x0 + mi * dotGap} cy={yDots} r={7} fill="none"
+                            stroke={fill} strokeWidth="1.5" />
+                        )}
+                      </g>
+                    )
+                  })}
+                  <text x={NODE_W / 2} y={yDots + 18} className="node-pause-label">
+                    {caption}
+                  </text>
+                </g>
+              )
+            })()}
+            {/* Postgres topology caption (Topology tab): per-member dots with the LIVE PRIMARY
+                ringed — the etcd leader-ring convention. The roles come from the failover
+                watcher's pg_ha_* series (see App.jsx), not the manifest, because after a
+                failover the primary is a standby container and only the watcher knows which.
+                A stale FENCED ex-primary is drawn amber: it is up, but read-only, so writers
+                skip it. That is the whole failover story in one strip of dots. */}
+            {node.type === 'postgres' && node.postgresHa && (() => {
+              const members = node.postgresHa.members || []
+              const live = data?.members || {}
+              const yDots = h + (inOutage ? 26 : 12)
+              const dotGap = Math.min(16, members.length > 1 ? (NODE_W - 24) / (members.length - 1) : 16)
+              const x0 = NODE_W / 2 - ((members.length - 1) * dotGap) / 2
+              const syncCount = (node.postgresHa.sync?.standbys || []).length
+              const caption = syncCount
+                ? `${members.length} members · sync ANY ${node.postgresHa.sync?.quorum ?? 1}/${syncCount} · failover ${node.postgresHa.enabled === false ? 'off' : 'on'}`
+                : `${members.length} members · async · failover ${node.postgresHa.enabled === false ? 'off' : 'on'}`
+              return (
+                <g style={{ pointerEvents: 'none' }}>
+                  {members.map((m, mi) => {
+                    const st = live[m]
+                    const fill = !st
+                      ? COLOR_HEX.gray
+                      : !st.up
+                        ? COLOR_HEX.red
+                        : st.fenced
+                          ? COLOR_HEX.yellow
+                          : COLOR_HEX.green
                     return (
                       <g key={m}>
                         <circle cx={x0 + mi * dotGap} cy={yDots} r={4.5} fill={fill} />
