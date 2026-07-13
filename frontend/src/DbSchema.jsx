@@ -8,6 +8,12 @@ import { referencedModels, buildDbSchemaPrompt } from './modelBank.js'
  * read-only streaming secondary or remove one. The "entity"/"field" wording
  * adapts to the engine (table/column, collection/field, key namespace, bucket).
  *
+ * Each entity renders as a collapsed `▶ TABLE name` row. Postgres fields carry
+ * PK / FK badges from the enriched introspection, and (primaries only) a
+ * per-column index line: one chip per existing index (constraint-backed ones
+ * locked) plus a method picker that creates a real index live via
+ * POST /api/db-indexes — mechanical, no Claude session (dbseed precedent).
+ *
  * Replicas are provisioned directly by the backend (POST /api/db-replicas),
  * mirroring "Add database"; the diagram's primary↔secondary arrow and dotted
  * cluster box are derived from each secondary's manifest `replicaOf`.
@@ -29,9 +35,98 @@ const REPLICA_ENGINES = ['postgres', 'mongodb', 'redis', 'cassandra']
 // Engines whose schema can be (re)authored from the model bank.
 const MODEL_ENGINES = ['postgres', 'mongodb', 'dynamodb', 'cassandra']
 
+// Postgres index access methods (mirrors PG_INDEX_METHODS in server/dbindexes.js).
+const INDEX_METHODS = ['btree', 'hash', 'gin', 'brin', 'gist', 'spgist']
+
+/** Per-column "add index" control: a method picker + button. */
+function IndexAdd({ disabled, onAdd }) {
+  const [method, setMethod] = useState('btree')
+  return (
+    <span className="schema-index-add">
+      <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={disabled}>
+        {INDEX_METHODS.map((m) => (
+          <option key={m} value={m}>{m}</option>
+        ))}
+      </select>
+      <button type="button" onClick={() => onAdd(method)} disabled={disabled}>
+        + index
+      </button>
+    </span>
+  )
+}
+
+/**
+ * One entity (table/collection/…): collapsed to `▶ TABLE name` by default,
+ * expandable to its field list with PK/FK badges and — postgres primaries
+ * only — per-column index chips + the add control.
+ */
+function TableRow({ entity, words, showIndexUI, busy, onAddIndex, onDropIndex }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="schema-entity">
+      <button
+        type="button"
+        className="schema-entity-head schema-entity-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`skill-caret${open ? ' open' : ''}`}>▶</span>
+        <span className="schema-entity-kind">{words.entity}</span>
+        <span className="schema-entity-name">{entity.name}</span>
+        <span className="schema-entity-count">
+          {entity.fields.length} field{entity.fields.length === 1 ? '' : 's'}
+        </span>
+      </button>
+      {open && entity.fields.length > 0 && (
+        <ul className="schema-fields">
+          {entity.fields.map((f) => (
+            <li key={f.name} className="schema-field">
+              <span className="schema-field-left">
+                <span className="schema-field-name">{f.name}</span>
+                {f.pk && <span className="schema-badge schema-badge-pk">PK</span>}
+                {f.fk && (
+                  <span className="schema-badge schema-badge-fk">
+                    FK → {f.fk.table}.{f.fk.column}
+                  </span>
+                )}
+              </span>
+              {f.type && <span className="schema-field-type">{f.type}</span>}
+              {showIndexUI && (
+                <span className="schema-field-indexes">
+                  {(f.indexes || []).map((ix) => (
+                    <span
+                      key={ix.name}
+                      className={`schema-index-chip${ix.constraint ? ' schema-index-locked' : ''}`}
+                      title={ix.name}
+                    >
+                      {ix.method}
+                      {ix.unique && ' · unique'}
+                      {!ix.constraint && (
+                        <button
+                          type="button"
+                          className="schema-index-x"
+                          title={`drop ${ix.name}`}
+                          onClick={() => onDropIndex(entity.name, f.name, ix.name)}
+                          disabled={!!busy}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                  <IndexAdd disabled={!!busy} onAdd={(method) => onAddIndex(entity.name, f.name, method)} />
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
   const [state, setState] = useState({ status: 'loading' })
-  const [mode, setMode] = useState('async')
   const [busy, setBusy] = useState(null) // 'add' | `del:<id>` | 'models' | null
   const [opError, setOpError] = useState(null)
   // "Schema from models" picker (postgres/mongodb only).
@@ -75,10 +170,11 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
   }, [systemId, modelCapable])
 
   const words = WORDS[engine] || { entity: 'Entity', empty: 'Empty.' }
-  // Redis replicas are count-managed by the Topology tab (with Sentinel/Cluster) —
-  // this panel would be a second competing writer of the same replicaOf nodes.
-  const replicaCapable = REPLICA_ENGINES.includes(engine) && !isSecondary && engine !== 'redis'
-  const supportsSync = engine === 'postgres'
+  // Redis AND postgres replicas are count-managed by their Topology tab (with a real failure
+  // detector — Sentinel / the pg-failover watcher). This panel would be a second competing
+  // writer of the same replicaOf nodes, and it cannot keep the watcher's config in step.
+  const replicaCapable =
+    REPLICA_ENGINES.includes(engine) && !isSecondary && engine !== 'redis' && engine !== 'postgres'
   // The replica nodes that stream from this primary (re-read every poll).
   const secondaries = (manifest?.nodes || []).filter((n) => n.replicaOf === node.id)
 
@@ -100,8 +196,38 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
     }
   }
 
-  const addReplica = () => post('/api/db-replicas', { system: systemId, primary: node.id, mode }, 'add')
+  // Only mongo/cassandra reach this now (postgres + redis are Topology-managed), and both
+  // stream asynchronously — there is no mode to pick.
+  const addReplica = () => post('/api/db-replicas', { system: systemId, primary: node.id }, 'add')
   const removeReplica = (id) => post('/api/delete', { system: systemId, id }, `del:${id}`)
+
+  // Index add/drop is mechanical (live DDL + init.sql record) — the response carries
+  // the refreshed schema, so the field list updates in the same round trip.
+  const showIndexUI = engine === 'postgres' && !isSecondary
+
+  async function mutateIndex(payload, busyKey) {
+    setBusy(busyKey)
+    setOpError(null)
+    try {
+      const res = await fetch('/api/db-indexes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ system: systemId, id: node.id, ...payload }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      setState((s) => ({ ...s, entities: data.entities }))
+    } catch (err) {
+      setOpError(err.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const addIndex = (table, column, method) =>
+    mutateIndex({ action: 'add', table, column, method }, `idx:add:${table}.${column}`)
+  const dropIndex = (table, column, name) =>
+    mutateIndex({ action: 'drop', table, column, name }, `idx:drop:${name}`)
 
   const toggleModel = (n) =>
     setModelSel((s) => (s.includes(n) ? s.filter((x) => x !== n) : [...s, n]))
@@ -160,22 +286,15 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
           ) : (
             <div className="schema-list">
               {state.entities.map((ent) => (
-                <div key={ent.name} className="schema-entity">
-                  <div className="schema-entity-head">
-                    <span className="schema-entity-kind">{words.entity}</span>
-                    <span className="schema-entity-name">{ent.name}</span>
-                  </div>
-                  {ent.fields.length > 0 && (
-                    <ul className="schema-fields">
-                      {ent.fields.map((f) => (
-                        <li key={f.name} className="schema-field">
-                          <span className="schema-field-name">{f.name}</span>
-                          {f.type && <span className="schema-field-type">{f.type}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+                <TableRow
+                  key={ent.name}
+                  entity={ent}
+                  words={words}
+                  showIndexUI={showIndexUI}
+                  busy={busy}
+                  onAddIndex={addIndex}
+                  onDropIndex={dropIndex}
+                />
               ))}
             </div>
           ))}
@@ -249,6 +368,19 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
           </div>
         )}
 
+        {engine === 'postgres' && !isSecondary && (
+          <div className="form-section replica-panel">
+            <div className="form-section-head">
+              <span>Replication &amp; failover</span>
+            </div>
+            <p className="sim-desc">
+              Managed in the <strong>Topology</strong> tab: a standby <em>count</em>, per-standby
+              <em> synchronous</em> replication with a quorum, and a real failover watcher that promotes
+              a standby when the primary dies.
+            </p>
+          </div>
+        )}
+
         {replicaCapable && (
           <div className="form-section replica-panel">
             <div className="form-section-head">
@@ -277,14 +409,7 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
             )}
 
             <div className="replica-add">
-              {supportsSync ? (
-                <select value={mode} onChange={(e) => setMode(e.target.value)} disabled={!!busy}>
-                  <option value="async">async</option>
-                  <option value="sync">sync</option>
-                </select>
-              ) : (
-                <span className="replica-mode" title="mongo/redis replicas stream asynchronously">async</span>
-              )}
+              <span className="replica-mode" title="mongo/cassandra replicas stream asynchronously">async</span>
               <button type="button" className="primary" onClick={addReplica} disabled={!!busy}>
                 {busy === 'add' ? 'Provisioning… (can take a minute)' : '+ Add read replica'}
               </button>

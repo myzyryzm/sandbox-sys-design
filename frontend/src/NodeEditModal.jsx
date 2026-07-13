@@ -16,6 +16,7 @@ import EtcdKeyspacesTab from './EtcdKeyspacesTab.jsx'
 import RedisKeyspacesTab from './RedisKeyspacesTab.jsx'
 import RedisTopologyTab from './RedisTopologyTab.jsx'
 import RedisPersistenceTab from './RedisPersistenceTab.jsx'
+import PgTopologyTab from './PgTopologyTab.jsx'
 import ServiceSubscribersTab from './ServiceSubscribersTab.jsx'
 import ServiceCallsTab from './ServiceCallsTab.jsx'
 import ServiceLbTab from './ServiceLbTab.jsx'
@@ -105,6 +106,12 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     tabs.push({ id: 'state', label: 'State', Component: ClientStateTab })
   } else if (isDatabase) {
     tabs.push({ id: 'schema', label: isSecondary ? 'Replica' : 'Schema' })
+    // Streaming standbys + synchronous replication + the failover watcher, on "Add database"
+    // postgres primaries only (the redis gate below is the same shape). A standby's topology
+    // is configured from its primary — the cluster ENTRY node owns it.
+    if (node.type === 'postgres' && !isSecondary && node.origin === 'create-database') {
+      tabs.push({ id: 'pg-topology', label: 'Topology', Component: PgTopologyTab })
+    }
     // CDC + Seed on primaries only (replicas are read-only). Each has its own engine set.
     if (!isSecondary && CDC_ENGINES.includes(node.type)) tabs.push({ id: 'cdc', label: 'CDC' })
     if (!isSecondary && SEED_ENGINES.includes(node.type)) tabs.push({ id: 'seed', label: 'Seed' })

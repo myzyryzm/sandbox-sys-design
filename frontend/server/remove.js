@@ -16,6 +16,7 @@ import { repoRoot, systemsDir, systemDir, isValidSystem } from './systems.js'
 import { removeNginxRoute } from './scaffold.js'
 import { removeWsClientScript } from './websockets.js'
 import { removeClientScript } from './clientScript.js'
+import { syncHaMembers } from './postgresTopology.js'
 
 const pexec = promisify(execFile)
 
@@ -130,6 +131,12 @@ function ownedServices(id, kind, node) {
   if (kind === 'database' && node?.sentinel?.members?.length) {
     const s = node.sentinel.members
     return [id, `${id}-exporter`, `${id}-init`, ...s, ...s.map((x) => `${x}-exporter`)]
+  }
+  // A replicated postgres (Topology tab) also owns its failover watcher — the postgres
+  // analog of the sentinels above. Its standbys are separate nodes cascaded via
+  // cascadeChildIds like any primary's.
+  if (kind === 'database' && node?.postgresHa) {
+    return [id, `${id}-exporter`, `${id}-init`, node.postgresHa.watcher || `${id}-failover`]
   }
   return kind === 'database' || kind === 'event-stream'
     ? [id, `${id}-exporter`, `${id}-init`]
@@ -510,7 +517,14 @@ async function reconcileSecondaryRemoval(system, node, manifest) {
   const compose = path.join(systemsDir, system, 'docker-compose.yml')
   const opts = { cwd: repoRoot, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 }
   try {
-    if (primaryNode.type === 'postgres' && node.replication === 'sync') {
+    if (primaryNode.type === 'postgres' && primaryNode.postgresHa) {
+      // The watcher owns synchronous_standby_names (it degrades dead sync standbys out to
+      // keep the primary writable). Tell it a member is gone by rewriting its config — an
+      // ALTER SYSTEM here would just be overwritten on its next tick, and worse, could
+      // re-arm the standby we are deleting and stall every commit on the primary.
+      syncHaMembers(system, manifest, primaryNode, node.id)
+    } else if (primaryNode.type === 'postgres' && node.replication === 'sync') {
+      // Legacy: a sync standby on a postgres node with no HA block (no watcher to tell).
       const names = manifest.nodes
         .filter((n) => n.replicaOf === primaryNode.id && n.replication === 'sync' && n.id !== node.id)
         .map((n) => `"${n.id}"`)
@@ -600,6 +614,13 @@ export async function handleDelete(body) {
     removeScrapeJob(system, rid)
     // A sentinel-replicated redis also owns the shared `<id>-sentinel` scrape job.
     if (rnode?.sentinel) removeScrapeJob(system, `${rid}-sentinel`)
+    // A replicated postgres also owns its failover watcher's scrape job + build folder
+    // (the watcher is a container, not a node — like the redis sentinels).
+    if (rnode?.postgresHa) {
+      const wid = rnode.postgresHa.watcher || `${rid}-failover`
+      removeScrapeJob(system, wid)
+      fs.rmSync(path.join(systemDir(system), wid), { recursive: true, force: true })
+    }
     scrubManifestNode(manifest, rid)
     fs.rmSync(path.join(systemDir(system), rid), { recursive: true, force: true })
   }

@@ -106,9 +106,29 @@ function setServiceCommand(system, service, command) {
 // Per-engine secondary builders (compose services + scrape + node fields)
 // ---------------------------------------------------------------------------
 
-function buildPostgresReplica({ secondaryId, primary, dbName }) {
-  // A standby: wait for the primary, base-backup it once (which writes
+// `settings` are the primary's own `-c key=value` postgres flags (e.g. CDC's
+// wal_level=logical). Every member of a cluster MUST run with the same ones: a standby
+// base-backs up the primary's data dir, so if that dir carries a logical replication slot
+// but the standby boots without wal_level=logical, postgres refuses to start at all — and
+// a standby that IS able to start but lacks the flag silently breaks CDC the moment it is
+// promoted. Inheriting them keeps any member promotable without surprises.
+export function buildPostgresReplica({ secondaryId, primary, dbName, settings = [] }) {
+  const flags = ['hot_standby=on', ...settings.filter((s) => !s.startsWith('hot_standby='))]
+  const startPostgres = `exec postgres ${flags.map((f) => `-c ${f}`).join(' ')}`
+  // A standby: base-backup the primary ONCE into an empty data dir (which writes
   // standby.signal + recovery config), then run postgres — read-only by nature.
+  //
+  // The bootstrap is gated on the data dir being EMPTY (no PG_VERSION), not on the
+  // absence of standby.signal, so the entrypoint is role-agnostic and safe to re-run:
+  //   - fresh container      -> empty dir  -> wait for the primary, basebackup, stream
+  //   - existing standby     -> has data   -> start immediately (standby.signal is there)
+  //   - PROMOTED then restarted -> has data, and pg_promote() removed standby.signal
+  //                            -> start immediately AS A PRIMARY, keeping its data
+  // That last case is what makes a failover survivable: a promoted standby that gets
+  // restarted must not wait for — or re-clone from — the primary it replaced. Waiting
+  // for the primary is likewise inside the bootstrap branch: a node that already has
+  // data must never block on a host that may be gone forever.
+  //
   // NOTE: this string lands in docker-compose.yml, which performs ${VAR}/$VAR
   // interpolation — so `$PGDATA` MUST be written `$$PGDATA` to reach the
   // container shell literally (compose collapses `$$` → `$`).
@@ -117,16 +137,21 @@ function buildPostgresReplica({ secondaryId, primary, dbName }) {
     '-c',
     [
       'set -e',
-      `until pg_isready -h ${primary} -p 5432 -U sandbox; do echo "waiting for ${primary}"; sleep 2; done`,
-      'if [ ! -f "$$PGDATA/standby.signal" ]; then',
+      'if [ ! -s "$$PGDATA/PG_VERSION" ]; then',
+      `  until pg_isready -h ${primary} -p 5432 -U sandbox; do echo "waiting for ${primary}"; sleep 2; done`,
       '  rm -rf "$$PGDATA"/* || true',
       `  pg_basebackup -h ${primary} -p 5432 -U sandbox -D "$$PGDATA" -Fp -Xs -R -P`,
+      // pg_basebackup copies postgresql.auto.conf verbatim, so a clone of a node that the
+      // failover watcher had FENCED (default_transaction_read_only=on — see the pg-failover
+      // template) would come up read-only and stay that way even after being promoted. A
+      // fence belongs to one node at one moment; a fresh clone must never inherit it.
+      `  sed -i '/default_transaction_read_only/d' "$$PGDATA/postgresql.auto.conf"`,
       `  echo "primary_conninfo = 'host=${primary} port=5432 user=sandbox application_name=${secondaryId}'" >> "$$PGDATA/postgresql.auto.conf"`,
       'fi',
       // The docker volume mount point is 0755; postgres refuses anything looser
       // than 0700 for its data dir.
       'chmod 0700 "$$PGDATA"',
-      'exec postgres -c hot_standby=on',
+      startPostgres,
     ].join('\n'),
   ]
   return {
@@ -256,7 +281,7 @@ const PG_HBA_LINE = 'host replication all 0.0.0.0/0 trust'
 // Postgres: allow replication connections from the compose network. Persist it
 // as an initdb script (so a fresh rebuild reproduces it) AND apply it live to
 // the already-running primary so we don't have to recreate it now.
-async function prepPostgresPrimary(system, primary) {
+export async function prepPostgresPrimary(system, primary) {
   const dir = path.join(systemDir(system), primary)
   fs.mkdirSync(dir, { recursive: true })
   const script =
@@ -334,9 +359,6 @@ async function rebuildAndWire({ engine, system, primary, secondaryId, mode, mani
     if (engine === 'mongodb') {
       await wireMongo(compose, opts, primary, secondaryId).then((l) => (log += l))
     }
-    if (engine === 'postgres' && mode === 'sync') {
-      await setPostgresSyncStandbys(compose, opts, primary, manifest).then((l) => (log += l))
-    }
 
     await run(['restart', 'prometheus'])
   } catch (err) {
@@ -367,27 +389,12 @@ async function wireMongo(compose, opts, primary, secondaryId) {
   }
 }
 
-// Recompute the primary's synchronous_standby_names from the manifest (all of
-// its sync secondaries) and reload — so sync commits wait on those standbys.
-async function setPostgresSyncStandbys(compose, opts, primary, manifest) {
-  const names = manifest.nodes
-    .filter((n) => n.replicaOf === primary && n.replication === 'sync')
-    .map((n) => `"${n.id}"`)
-    .join(',')
-  // ALTER SYSTEM can't run inside a transaction block, so pass it and the reload
-  // as two separate `-c` commands (psql runs each in its own transaction).
-  const alter = `ALTER SYSTEM SET synchronous_standby_names = '${names}';`
-  try {
-    const r = await pexec(
-      'docker',
-      ['compose', '-f', compose, 'exec', '-T', primary, 'psql', '-U', 'sandbox', '-d', 'postgres', '-c', alter, '-c', 'SELECT pg_reload_conf();'],
-      opts,
-    )
-    return r.stdout + r.stderr
-  } catch (err) {
-    return `(warning: could not set synchronous_standby_names: ${err.stderr || err.message})`
-  }
-}
+// NOTE: postgres `synchronous_standby_names` is NOT set from here. A replicated postgres
+// node is owned by the Topology tab, whose `<db>-failover` watcher derives that setting
+// (as `ANY k (...)` over the LIVE sync standbys) from the ha.json it re-reads every tick.
+// It is the single writer on purpose: a second one here would race it, and could re-arm a
+// dead standby the watcher had just degraded out to unblock the primary's commits.
+// See frontend/server/postgresTopology.js.
 
 // ---------------------------------------------------------------------------
 // Request handling
@@ -406,8 +413,11 @@ function validate(body) {
   if (!ENGINE_LABEL[engine]) throw bad(`${ENGINE_LABEL[engine] || engine} databases don't support read replicas`)
   if (mode !== 'async' && mode !== 'sync') throw bad('mode must be "async" or "sync"')
   if (mode === 'sync' && engine !== 'postgres') throw bad('sync replication is only supported for postgres')
-  // Redis replicas are reconciled (count-based, with Sentinel) by the Topology tab.
+  // Redis and postgres replicas are reconciled (count-based, with a failure detector —
+  // Sentinel / the pg-failover watcher) by their Topology tab, which owns the whole
+  // cluster shape. A second writer of the same replicaOf nodes would fight it.
   if (engine === 'redis') throw bad('redis replication is managed by the Topology tab (POST /api/redis/topology)')
+  if (engine === 'postgres') throw bad('postgres replication is managed by the Topology tab (POST /api/postgres/topology)')
   return { system, primaryNode, engine, mode, manifest }
 }
 

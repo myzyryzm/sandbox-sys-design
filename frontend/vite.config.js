@@ -16,6 +16,7 @@ import endpoints from './server/endpoints.js'
 import models from './server/models.js'
 import dbSchema from './server/dbschema.js'
 import dbSeed from './server/dbseed.js'
+import dbIndexes from './server/dbindexes.js'
 import skills from './server/skills.js'
 import eventStreams from './server/eventstreams.js'
 import grpc from './server/grpc.js'
@@ -33,6 +34,7 @@ import etcdPlugin from './server/etcd.js'
 import redisKeyspaces from './server/redisKeyspaces.js'
 import redisTopology from './server/redisTopology.js'
 import redisPersistence from './server/redisPersistence.js'
+import postgresTopology from './server/postgresTopology.js'
 import settings from './server/settings.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -73,7 +75,7 @@ function serveSystems() {
 }
 
 export default defineConfig({
-  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin(), redisKeyspaces(), redisTopology(), redisPersistence(), settings()],
+  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), dbIndexes(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin(), redisKeyspaces(), redisTopology(), redisPersistence(), postgresTopology(), settings()],
   server: {
     proxy: {
       // Browser -> /api/prometheus/api/v1/query?...  proxied to Prometheus.
