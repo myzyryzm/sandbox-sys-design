@@ -173,6 +173,9 @@ function isLB(node) {
 // the diagram node (+ self-scrape) via /api/prom-node; the container keeps running
 // (all metric polling and every rebuild depend on it). Re-add it from the Add menu.
 function isDeletable(node) {
+  // A worker's token stream is a database node but never individually deletable —
+  // it cascades with its worker (remove.js blocks a direct delete on streamOf).
+  if (node.streamOf) return false
   return (
     node.type === 'service' ||
     node.type === 'service-lb' ||

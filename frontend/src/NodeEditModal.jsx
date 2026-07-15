@@ -133,9 +133,10 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   // the primary's data, so their keyspaces are managed on the primary.
   if (node.type === 'redis' && !node.replicaOf) {
     tabs.push({ id: 'redis-keyspaces', label: 'Keyspaces', Component: RedisKeyspacesTab })
-    // Topology (replica count + Sentinel, or Cluster sharding) only for "Add database"
-    // redis — a custom-owned redis (LLM token stream) or a websocket tier's bus/presence
-    // has its lifecycle owned by the feature that created it. Backend enforces the same.
+    // Topology (replica count + Sentinel, or Cluster sharding) for "Add database"
+    // redis — which includes a worker's token stream, stamped create-database at
+    // birth. A websocket tier's bus/presence stays feature-owned (no reshape story
+    // for the pub/sub fanout). Backend enforces the same.
     if (node.origin === 'create-database') {
       tabs.push({ id: 'redis-topology', label: 'Topology', Component: RedisTopologyTab })
       // RDB/AOF settings share Topology's gate: they rewrite the same data
@@ -148,14 +149,18 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   for (const t of customTypeOf(node)?.editTabs?.(node) || []) {
     tabs.push({ id: `custom:${t.id}`, label: t.label, Component: t.Component })
   }
-  // A custom-type-owned redis (e.g. an LLM worker's token stream, streamOf/origin
-  // create-custom-service) opens this modal ONLY for its Keyspaces tab — its container
-  // lifecycle (shutdown, delete) is owned and cascaded by the worker that created it.
+  // A legacy custom-owned redis (origin create-custom-service, predating the
+  // create-database stamp on token streams) opens this modal ONLY for its Keyspaces
+  // tab — its container lifecycle is owned and cascaded by the service that made it.
   const isCustomOwnedRedis = node.type === 'redis' && node.origin === 'create-custom-service'
+  // A worker's token stream is a full database node (Topology/Persistence/Shutdown)
+  // but never individually deletable — the backend refuses (delete the worker; the
+  // stream cascades with it), so a Delete tab here could only ever error.
+  const isOwnedStream = node.type === 'redis' && !!node.streamOf
   // A client has no container, so there's nothing to shut down; Prometheus is shared infra
   // that must never be shut down from here.
   if (!isClient && !isPrometheus && !isCustomOwnedRedis) tabs.push({ id: 'shutdown', label: 'Shutdown' })
-  if (!isCustomOwnedRedis) tabs.push({ id: 'delete', label: 'Delete', danger: true })
+  if (!isCustomOwnedRedis && !isOwnedStream) tabs.push({ id: 'delete', label: 'Delete', danger: true })
 
   const [active, setActive] = useState(tabs[0].id)
   const [busy, setBusy] = useState(false)
