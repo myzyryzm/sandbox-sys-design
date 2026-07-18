@@ -462,6 +462,14 @@ export default function SystemDiagram({
   cdcTrace = null,
   onSelectCdcRule,
   onClearCdcTrace,
+  // Interview mode (systems/<id>/interview.json via GET /api/interview, polled by App).
+  // When an interview exists, two excalidraw-style text boxes (functional / non-functional
+  // requirements) render from interview.layout.frBox/nfrBox — draggable/resizable in drag
+  // mode, persisted via POST /api/interview/layout (NOT /api/layout: these are interview
+  // render state, not manifest nodes). interviewTestVerdicts maps a requirement's linked
+  // endtoend processId -> 'PASS' | 'FAIL' for the row status dots.
+  interview = null,
+  interviewTestVerdicts = {},
 }) {
   // Live relationship-edge colors from Settings, falling back to the module defaults so the
   // diagram is unchanged until the user overrides a color. These re-tint the same edges +
@@ -491,6 +499,14 @@ export default function SystemDiagram({
   // node/box doesn't flicker back to its saved spot while the POST /api/layout round-trips.
   const [drag, setDrag] = useState({})
   const [boundaryOverride, setBoundaryOverride] = useState(null)
+  // In-progress / just-dropped interview requirement-box rects ({ frBox?, nfrBox? }),
+  // winning over interview.layout like boundaryOverride does — cleared once the polled
+  // interview.layout catches up with the persisted drop (the effect below).
+  const [ivOverride, setIvOverride] = useState({})
+  const ivLayoutJson = JSON.stringify(interview?.layout || null)
+  useEffect(() => {
+    setIvOverride({})
+  }, [ivLayoutJson])
   // Snapshot of the viewBox taken at drag start; while set, the canvas is pinned to it exactly
   // (no shrink, no grow) so the view stays put and doesn't scroll toward the edge mid-drag.
   const [frozenView, setFrozenView] = useState(null)
@@ -1370,6 +1386,25 @@ export default function SystemDiagram({
   }
   const fleetConnections = [...fleetConnMap.values()]
 
+  // Interview requirement text boxes (rendered below): one per layout rect, with the
+  // local drag override winning over the persisted rect exactly like boundaryOverride.
+  const ivBoxes = interview?.layout
+    ? [
+        {
+          key: 'frBox',
+          title: 'Functional requirements',
+          reqs: interview.functionalRequirements || [],
+          rect: ivOverride.frBox || interview.layout.frBox,
+        },
+        {
+          key: 'nfrBox',
+          title: 'Non-functional requirements',
+          reqs: interview.nonFunctionalRequirements || [],
+          rect: ivOverride.nfrBox || interview.layout.nfrBox,
+        },
+      ].filter((b) => b.rect)
+    : []
+
   // Size the canvas to the true bounding box of everything (nodes ⊕ the system
   // boundary ⊕ the ws shared-methods panels), plus a margin. Clients sit LEFT of the
   // system, so x can be negative — the viewBox origin moves with it instead of being
@@ -1395,6 +1430,12 @@ export default function SystemDiagram({
     xEnds.push(b.x + b.w)
     yStarts.push(b.y)
     yEnds.push(b.y + b.h)
+  }
+  for (const b of ivBoxes) {
+    xStarts.push(b.rect.x)
+    xEnds.push(b.rect.x + b.rect.w)
+    yStarts.push(b.rect.y)
+    yEnds.push(b.rect.y + b.rect.h)
   }
   let originX = Math.min(...xStarts) - MARGIN
   let originY = Math.min(...yStarts) - MARGIN
@@ -1479,6 +1520,30 @@ export default function SystemDiagram({
     })
   }
 
+  // The interview boxes' sibling of persistLayout — their rects live in interview.json,
+  // not the manifest, so they go through the interview plugin (which clamps w/h).
+  const persistInterviewLayout = (box, rect) => {
+    if (!systemId) return
+    fetch('/api/interview/layout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ system: systemId, [box]: rect }),
+    }).catch(() => {
+      /* keep the optimistic override; the next drop retries */
+    })
+  }
+
+  // The interview boxes resize from their single SE handle; mirror the server's 120px
+  // floor so the optimistic rect can't undershoot what /api/interview/layout will store.
+  const IV_MIN_BOX = 120
+  const ivRectFor = (g, dx, dy) => {
+    if (g.kind === 'iv-box') {
+      return { ...g.startRect, x: Math.round(g.startRect.x + dx), y: Math.round(g.startRect.y + dy) }
+    }
+    const r = resizeRect(g.startRect, 'se', dx, dy)
+    return { ...r, w: Math.max(IV_MIN_BOX, r.w), h: Math.max(IV_MIN_BOX, r.h) }
+  }
+
   const beginDrag = (e, g) => {
     if (!dragMode) return
     e.stopPropagation()
@@ -1520,6 +1585,8 @@ export default function SystemDiagram({
         }
         return next
       })
+    } else if (g.kind === 'iv-box' || g.kind === 'iv-box-resize') {
+      setIvOverride((o) => ({ ...o, [g.box]: ivRectFor(g, dx, dy) }))
     } else {
       setBoundaryOverride(rectFor(g, dx, dy))
     }
@@ -1559,6 +1626,8 @@ export default function SystemDiagram({
         positions[id] = { x: Math.round(p.x + dx), y: Math.round(p.y + dy) }
       }
       persistLayout({ positions })
+    } else if (g.kind === 'iv-box' || g.kind === 'iv-box-resize') {
+      persistInterviewLayout(g.box, ivRectFor(g, dx, dy))
     } else {
       persistLayout({ boundary: rectFor(g, dx, dy) })
     }
@@ -2900,6 +2969,76 @@ export default function SystemDiagram({
                 Edit
               </text>
             </g>
+          )}
+        </g>
+      ))}
+
+      {/* Interview requirement text boxes (FR / NFR) — whiteboard-style HTML boxes in
+          foreignObjects, fed from interview.json. Fixed-size with inner scroll (auto-grow
+          would fight the bounds math above every poll; Safari needs explicit w/h). In drag
+          mode the HTML goes pointer-inert and an SVG move target + one SE resize handle
+          take over, persisting through /api/interview/layout. */}
+      {ivBoxes.map((b) => (
+        <g key={`iv-${b.key}`} className={dragMode ? 'iv-box-drag' : undefined}>
+          <foreignObject
+            x={b.rect.x}
+            y={b.rect.y}
+            width={b.rect.w}
+            height={b.rect.h}
+            style={{ overflow: 'hidden', pointerEvents: dragMode ? 'none' : 'auto' }}
+          >
+            <div className="iv-req-box">
+              <div className="iv-req-box-title">{b.title}</div>
+              <div className="iv-req-box-body">
+                {b.reqs.length === 0 && <div className="iv-req-box-empty">to be scoped…</div>}
+                {b.reqs.map((r) => {
+                  const verdict = r.processId ? interviewTestVerdicts[r.processId] || null : null
+                  const dot = verdict ? (verdict === 'PASS' ? 'pass' : 'fail') : r.processId ? 'ready' : 'none'
+                  return (
+                    <div
+                      className="iv-req-row"
+                      key={r.id}
+                      title={
+                        verdict
+                          ? `${r.id} — last test run: ${verdict}`
+                          : r.processId
+                            ? `${r.id} — test authored, not run yet`
+                            : `${r.id} — no test yet`
+                      }
+                    >
+                      <span className={`iv-req-dot ${dot}`} />
+                      <span className="iv-req-id">{r.id}</span>
+                      <span className="iv-req-text">{r.text}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </foreignObject>
+          {dragMode && (
+            <>
+              <rect
+                x={b.rect.x}
+                y={b.rect.y}
+                width={b.rect.w}
+                height={b.rect.h}
+                fill="transparent"
+                style={{ cursor: 'grab' }}
+                onPointerDown={(e) => beginDrag(e, { kind: 'iv-box', box: b.key, startRect: b.rect })}
+              >
+                <title>Drag to move the {b.title.toLowerCase()} box</title>
+              </rect>
+              <rect
+                x={b.rect.x + b.rect.w - HANDLE_SIZE}
+                y={b.rect.y + b.rect.h - HANDLE_SIZE}
+                width={HANDLE_SIZE}
+                height={HANDLE_SIZE}
+                className="iv-box-handle"
+                onPointerDown={(e) =>
+                  beginDrag(e, { kind: 'iv-box-resize', box: b.key, startRect: b.rect })
+                }
+              />
+            </>
           )}
         </g>
       ))}

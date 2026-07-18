@@ -27,7 +27,8 @@ const DONE_TOKEN = '<<<SANDBOX_QUEUE_DONE>>>'
 // explicitly (not left to the host's global settings) so the sandbox behaves the
 // same for anyone running it. `opus[1m]` keeps the 1M-token context so a large
 // manifest + skill files don't crowd out the actual task.
-const MODEL_ARGS = ['--model', 'opus[1m]', '--effort', 'xhigh']
+// Exported so the interview chat transport (interview.js) pins the identical model.
+export const MODEL_ARGS = ['--model', 'opus[1m]', '--effort', 'xhigh']
 const DONE_INSTRUCTION = `
 
 --- EDIT QUEUE PROTOCOL ---

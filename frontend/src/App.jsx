@@ -11,6 +11,7 @@ import CreateWebsockets from "./CreateWebsockets.jsx";
 import EditQueuePanel from "./EditQueuePanel.jsx";
 import EndToEndModal from "./EndToEndModal.jsx";
 import GrpcContractsModal from "./GrpcContractsModal.jsx";
+import InterviewPanel from "./InterviewPanel.jsx";
 import ModelsModal from "./ModelsModal.jsx";
 import NodeEditModal from "./NodeEditModal.jsx";
 import SettingsModal from "./SettingsModal.jsx";
@@ -242,6 +243,17 @@ export default function App() {
   // diagram badge). Polled from /api/consumer-pause, mirroring the outage poll.
   const [pausedConsumers, setPausedConsumers] = useState(() => new Set());
   const [showEndToEnd, setShowEndToEnd] = useState(false);
+  // Interview mode: the chat drawer's visibility, the polled GET /api/interview payload
+  // (interview.json + the in-flight-turn flag + the skip-permissions gate), and — while
+  // an interview exists — the endtoend processes whose lastRun verdicts badge the
+  // requirement rows in the diagram's FR/NFR text boxes.
+  const [showInterview, setShowInterview] = useState(false);
+  const [interviewInfo, setInterviewInfo] = useState({
+    interview: null,
+    turnInFlight: false,
+    skipPermissions: false,
+  });
+  const [interviewProcesses, setInterviewProcesses] = useState([]);
   const [showSkills, setShowSkills] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   // Global app settings (repo-root settings.json via /api/settings). Fetched once on mount;
@@ -392,6 +404,57 @@ export default function App() {
       clearInterval(timerRef.current);
     };
   }, [manifest]);
+
+  // Poll the interview state (systems/<id>/interview.json + turn flag + permissions
+  // gate). Runs even with the drawer closed — the diagram renders the FR/NFR text
+  // boxes from it. Also called directly by the panel right after a mutating action.
+  const refreshInterview = async () => {
+    try {
+      const res = await fetch(`/api/interview?system=${SYSTEM_ID}`);
+      const data = await res.json();
+      if (data.ok)
+        setInterviewInfo({
+          interview: data.interview,
+          turnInFlight: data.turnInFlight,
+          skipPermissions: data.skipPermissions,
+        });
+    } catch {
+      /* keep the last good state */
+    }
+  };
+  useEffect(() => {
+    refreshInterview();
+    const id = setInterval(refreshInterview, 3000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // While an interview exists, poll the endtoend processes so requirement rows (panel
+  // + diagram boxes) can badge their linked test's last PASS/FAIL. Gated like the ws
+  // poll: no interview, no traffic.
+  const hasInterview = !!interviewInfo.interview;
+  useEffect(() => {
+    if (!hasInterview) {
+      setInterviewProcesses([]);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/endtoend?system=${SYSTEM_ID}`);
+        const data = await res.json();
+        if (!cancelled && data.ok) setInterviewProcesses(data.processes || []);
+      } catch {
+        /* keep the last good list */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [hasInterview]);
 
   // Poll the system's live, routable endpoints (shown on the LB node). They
   // change as services are added or as a service gains endpoints.
@@ -893,6 +956,12 @@ export default function App() {
     clientFunctions[n.id] = own;
   }
 
+  // processId -> 'PASS' | 'FAIL' for the diagram's requirement-box status dots.
+  const interviewTestVerdicts = {};
+  for (const p of interviewProcesses) {
+    if (p.lastRun?.verdict) interviewTestVerdicts[p.id] = p.lastRun.verdict;
+  }
+
   // The ws pool client's last-run delivery stats, keyed by its node id for the diagram.
   const wsClientNode = (manifest.nodes || []).find(
     (n) => n.origin === "create-websockets" && n.wsRole === "client",
@@ -947,6 +1016,13 @@ export default function App() {
           onClick={() => setShowEndToEnd(true)}
         >
           🔁 End-to-End
+        </button>
+        <button
+          className={`header-btn no-auto ${showInterview ? "active" : ""}`}
+          onClick={() => setShowInterview((v) => !v)}
+          title="Interview mode — a mock system-design interview that designs into this canvas"
+        >
+          🎙 Interview
         </button>
         <button
           className="header-btn no-auto"
@@ -1195,8 +1271,21 @@ export default function App() {
             });
           }}
           onClearCdcTrace={() => setCdcTrace(null)}
+          interview={interviewInfo.interview}
+          interviewTestVerdicts={interviewTestVerdicts}
         />
       </div>
+      {showInterview && (
+        <InterviewPanel
+          systemId={SYSTEM_ID}
+          interview={interviewInfo.interview}
+          turnInFlight={interviewInfo.turnInFlight}
+          skipPermissions={interviewInfo.skipPermissions}
+          onRefresh={refreshInterview}
+          onLaunch={enqueueSession}
+          onClose={() => setShowInterview(false)}
+        />
+      )}
       {showTerminal && (
         <div className="terminal-panel">
           <Terminal

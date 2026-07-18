@@ -162,6 +162,15 @@ function clearRun(system) {
   }
 }
 
+// For the interview reset (interview.js): it must refuse to wipe a system mid-run,
+// and clear a stale flag before wiping. The map itself stays module-private.
+export function isRunActive(system) {
+  return runs.has(system)
+}
+export function clearRunState(system) {
+  clearRun(system)
+}
+
 // --- validation -----------------------------------------------------------------
 
 function validateProcessInput(system, body) {
