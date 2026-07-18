@@ -7,7 +7,7 @@
 // add-service modal — the backend type is `hidden`. The reader→stream and reader→db
 // edges are STATIC in the manifest (written by onAdd), so no diagramEdges hook; the
 // default service card + metric rows (persisted / active) cover the diagram body.
-import ReadersTab from './ReadersTab.jsx'
+import ReadersTab from './ReadersTab'
 
 export default {
   serviceTypes: ['persistence_reader'],

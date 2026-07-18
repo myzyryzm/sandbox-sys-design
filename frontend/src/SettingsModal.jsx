@@ -4,8 +4,8 @@ import {
   PREFIX_ROLE_LABELS,
   HEX_RE,
   applyBadgeColors,
-} from './prefixColors.js'
-import { DEFAULT_NODE_COLORS, NODE_ROLE_LABELS } from './nodeColors.js'
+} from './prefixColors'
+import { DEFAULT_NODE_COLORS, NODE_ROLE_LABELS } from './nodeColors'
 
 // Order the color roles are shown in the modal, per section.
 const PREFIX_ORDER = [

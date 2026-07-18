@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { buildEndToEndRunPrompt } from './endToEndBank.js'
+import { buildEndToEndRunPrompt } from './endToEndBank'
 
 /**
  * Top-level "End-to-End" modal. Define whole test PROCESSES and run them.

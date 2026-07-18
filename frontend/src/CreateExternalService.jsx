@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
+import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
  * Modal for "Add external service". Creates a real FastAPI container (the same

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
+import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
  * An event stream's "Consumers" tab (embedded in NodeEditModal for a Kafka cluster node). It

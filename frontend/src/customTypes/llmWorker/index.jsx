@@ -7,10 +7,10 @@
 // runtime poll. The worker→redis edge is STATIC in the manifest (written by onAdd),
 // so no diagramEdges hook is needed. The `<name>-scaler` sidecar node (scalerOf)
 // renders at the top of the group's stack carrying the group's Edit button.
-import WorkerTab from './WorkerTab.jsx'
-import ScalingTab from './ScalingTab.jsx'
-import PersistenceTab from './PersistenceTab.jsx'
-import { DiagramBody, bodyHeight } from './DiagramBody.jsx'
+import WorkerTab from './WorkerTab'
+import ScalingTab from './ScalingTab'
+import PersistenceTab from './PersistenceTab'
+import { DiagramBody, bodyHeight } from './DiagramBody'
 
 export default {
   serviceTypes: ['llm_worker', 'llm_scaler'],

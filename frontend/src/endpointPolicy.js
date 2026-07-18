@@ -15,7 +15,7 @@
 // classifies ITS OWN routes through the registry seam — `customTypeOf(node).endpointPolicy`
 // — so no type-specific paths (e.g. a Download Coordinator's /dc/*) leak into this
 // generic layer.
-import { customTypeOf } from './customTypes/index.js'
+import { customTypeOf } from './customTypes/index'
 
 // The service-local path of a discovered endpoint, whose `.path` is LB-prefixed as
 // `/<service><local>`. Strips the prefix and any trailing slash: `/health/` -> `/health`.

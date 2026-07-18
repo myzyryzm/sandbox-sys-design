@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { resolveModelTs } from './modelBank.js'
+import { resolveModelTs } from './modelBank'
 
 /**
  * View of an event stream's topics, fetched live from GET /api/event-stream

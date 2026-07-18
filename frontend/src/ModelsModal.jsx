@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { modelImpact, buildModelUpdatePrompt } from './modelBank.js'
+import { modelImpact, buildModelUpdatePrompt } from './modelBank'
 
 /**
  * Per-system "models bank". Lists reusable TypeScript model interfaces and lets the

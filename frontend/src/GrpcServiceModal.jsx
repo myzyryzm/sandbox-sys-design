@@ -5,7 +5,7 @@ import {
   buildGrpcDetachPrompt,
   joinDescription,
   methodSig,
-} from './grpcBank.js'
+} from './grpcBank'
 
 // A history entry's ISO timestamp -> a short, local, human label (best-effort).
 function fmtAt(at) {

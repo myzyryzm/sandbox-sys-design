@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
-import { referencedModels, buildDbSchemaPrompt } from './modelBank.js'
-import { REDIS_KS_TYPES, REDIS_BADGE } from './redisKeyspaceMeta.js'
+import { nodeNameError, NODE_NAME_HINT } from './nodeName'
+import { referencedModels, buildDbSchemaPrompt } from './modelBank'
+import { REDIS_KS_TYPES, REDIS_BADGE } from './redisKeyspaceMeta'
 
 /**
  * Modal form for "Add database". Lets the user pick a database engine and

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   REDIS_BADGE, REDIS_KS_TYPES, REDIS_KS_RE, REDIS_SHORTHAND_RE, redisTypesCompatible,
-} from './redisKeyspaceMeta.js'
+} from './redisKeyspaceMeta'
 
 /**
  * A redis node's "Keyspaces" tab (embedded in NodeEditModal, for EVERY type:"redis"

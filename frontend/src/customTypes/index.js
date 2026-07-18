@@ -8,10 +8,10 @@
 //
 // A module may own several related service_types (e.g. the coordinator + its workers).
 // Adding the next type = drop a module here and list it below; no seam code changes.
-import consumerGroup from './consumerGroup/index.jsx'
-import downloadCoordinator from './downloadCoordinator/index.jsx'
-import llmWorker from './llmWorker/index.jsx'
-import persistenceReader from './persistenceReader/index.jsx'
+import consumerGroup from './consumerGroup/index'
+import downloadCoordinator from './downloadCoordinator/index'
+import llmWorker from './llmWorker/index'
+import persistenceReader from './persistenceReader/index'
 
 const MODULES = [consumerGroup, downloadCoordinator, llmWorker, persistenceReader]
 

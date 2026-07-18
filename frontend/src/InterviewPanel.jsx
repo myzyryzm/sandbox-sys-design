@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from 'react'
 // (the session authors the endtoend process itself) instead of enqueueing a separate
 // edit session; only RUNNING an authored test uses the normal edit queue (onLaunch),
 // because a run drives the system without designing it.
-import { buildEndToEndRunPrompt } from './endToEndBank.js'
+import { buildEndToEndRunPrompt } from './endToEndBank'
 
 const RUN_DURATION_SECONDS = 60
 

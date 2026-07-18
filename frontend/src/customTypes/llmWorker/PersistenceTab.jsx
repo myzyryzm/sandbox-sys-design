@@ -13,8 +13,8 @@
 // "specialized implementation" spec. Scaling and later edits live on the reader
 // node's own Readers tab.
 import { useEffect, useState } from 'react'
-import { nodeNameError, NODE_NAME_HINT } from '../../nodeName.js'
-import { buildPersistencePrompt } from '../persistenceReader/prompt.js'
+import { nodeNameError, NODE_NAME_HINT } from '../../nodeName'
+import { buildPersistencePrompt } from '../persistenceReader/prompt'
 
 const STATE_URL = (sys) => `/api/custom/persistence-reader/state?system=${encodeURIComponent(sys)}`
 const DB_TYPES = new Set(['postgres', 'mongodb'])

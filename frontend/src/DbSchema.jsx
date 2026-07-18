@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { referencedModels, buildDbSchemaPrompt } from './modelBank.js'
+import { referencedModels, buildDbSchemaPrompt } from './modelBank'
 
 /**
  * Per-database popup. Shows the node's CURRENT schema (fetched live from the

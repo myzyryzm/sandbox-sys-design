@@ -11,7 +11,7 @@
 //   3. Members — the manual "set member count" input (the shared replica reconciler;
 //      no autoscaler for this type — redis divides announcements across members).
 import { useEffect, useState } from 'react'
-import { buildPersistencePrompt } from './prompt.js'
+import { buildPersistencePrompt } from './prompt'
 
 const STATE_URL = (sys) => `/api/custom/persistence-reader/state?system=${encodeURIComponent(sys)}`
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_.-]*$/

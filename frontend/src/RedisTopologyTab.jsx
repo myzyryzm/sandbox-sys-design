@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { affectedServices, buildRedisTopologyRetrofitPrompt } from './redisTopologyPrompts.js'
+import { affectedServices, buildRedisTopologyRetrofitPrompt } from './redisTopologyPrompts'
 
 /**
  * A redis node's "Topology" tab (create-database redis primaries only). Reconciles

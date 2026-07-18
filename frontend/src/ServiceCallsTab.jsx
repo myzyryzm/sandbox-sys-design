@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { endpointPolicy, localPathOf } from './endpointPolicy.js'
+import { endpointPolicy, localPathOf } from './endpointPolicy'
 
 /**
  * Read-only "Calls" tab for a service (in-system or external). Lists the service's

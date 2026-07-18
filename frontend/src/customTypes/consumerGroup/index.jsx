@@ -7,8 +7,8 @@
 // dotted box, member cards stacked in columns — via the shared workerGroup predicate
 // SystemDiagram reads; its `<base>-scaler` sidecar node (scalerOf) renders at the top
 // of the stack as the group header, carrying the group's Edit button.
-import ScalingTab from './ScalingTab.jsx'
-import { DiagramBody, bodyHeight } from './DiagramBody.jsx'
+import ScalingTab from './ScalingTab'
+import { DiagramBody, bodyHeight } from './DiagramBody'
 
 export default {
   serviceTypes: ['consumer_group', 'consumer_scaler'],

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import ConfirmDelete from './ConfirmDelete.jsx'
+import ConfirmDelete from './ConfirmDelete'
 
 /**
  * The websocket tier's SHARED editing surface, opened from the shared-methods panel

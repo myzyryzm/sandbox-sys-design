@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { buildGrpcUpdatePrompt, methodSig } from './grpcBank.js'
+import { buildGrpcUpdatePrompt, methodSig } from './grpcBank'
 
 /**
  * gRPC contract bank (Part A) — pure SHAPE, model-bank workflow.

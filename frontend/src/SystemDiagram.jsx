@@ -16,12 +16,12 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { customTypeOf, CUSTOM_TYPES } from './customTypes/index.js'
-import { isExternalEndpoint, endpointPolicy, localPathOf } from './endpointPolicy.js'
-import { deriveFunctionTrace } from './scenarioBank.js'
-import { REDIS_BADGE, keyspaceLabel, keyspaceEdgeLabel } from './redisKeyspaceMeta.js'
-import { CDC_BADGE, CDC_BADGE_CLASS, cdcOpsOf, cdcRuleKey, cdcEdgeLabel } from './cdcMeta.js'
-import { DEFAULT_NODE_COLORS } from './nodeColors.js'
+import { customTypeOf, CUSTOM_TYPES } from './customTypes/index'
+import { isExternalEndpoint, endpointPolicy, localPathOf } from './endpointPolicy'
+import { deriveFunctionTrace } from './scenarioBank'
+import { REDIS_BADGE, keyspaceLabel, keyspaceEdgeLabel } from './redisKeyspaceMeta'
+import { CDC_BADGE, CDC_BADGE_CLASS, cdcOpsOf, cdcRuleKey, cdcEdgeLabel } from './cdcMeta'
+import { DEFAULT_NODE_COLORS } from './nodeColors'
 
 const NODE_W = 190
 const HEADER_H = 30

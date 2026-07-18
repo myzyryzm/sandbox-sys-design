@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { isExternalEndpoint } from './endpointPolicy.js'
-import { buildScenarioFunctionPrompt } from './scenarioBank.js'
+import { isExternalEndpoint } from './endpointPolicy'
+import { buildScenarioFunctionPrompt } from './scenarioBank'
 
 /**
  * A client's "Functions" tab (embedded in NodeEditModal). A client's behavior is a set of

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
+import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
  * Modal for "Add etcd". Provisions a real N-member etcd Raft cluster (N odd, one

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
+import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 import {
   buildListenerPrompt,
   buildListenerDeletePrompt,
   buildConfigListenerPrompt,
   buildConfigListenerDeletePrompt,
-} from './etcdListenerPrompts.js'
+} from './etcdListenerPrompts'
 
 /**
  * The etcd node's "Keyspaces" tab (embedded in NodeEditModal). Manages the two

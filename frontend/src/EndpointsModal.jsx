@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { endpointPolicy } from './endpointPolicy.js'
-import { resolveModelTs } from './modelBank.js'
+import { endpointPolicy } from './endpointPolicy'
+import { resolveModelTs } from './modelBank'
 
 /**
  * Per-service endpoint manager. Lists a service's endpoints and lets the user add

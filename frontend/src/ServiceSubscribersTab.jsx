@@ -4,7 +4,7 @@ import {
   buildListenerDeletePrompt,
   buildConfigListenerPrompt,
   buildConfigListenerDeletePrompt,
-} from './etcdListenerPrompts.js'
+} from './etcdListenerPrompts'
 
 /**
  * A SERVICE's "Subscribers" tab (embedded in NodeEditModal). The service-first mirror of

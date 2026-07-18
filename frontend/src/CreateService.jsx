@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
+import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
  * Modal for "Add service". Creates either a generic FastAPI service (a clone of the

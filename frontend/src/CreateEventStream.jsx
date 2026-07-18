@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { nodeNameError, NODE_NAME_HINT } from './nodeName.js'
+import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
  * Modal for "Add event stream". Provisions a real single-broker Kafka (KRaft) +

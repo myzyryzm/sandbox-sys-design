@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CDC_OPS as OPS } from './cdcMeta.js'
+import { CDC_OPS as OPS } from './cdcMeta'
 
 /**
  * Per-database "CDC" (Change Data Capture) tab. Manages a flat list of rules — each

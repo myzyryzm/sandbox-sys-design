@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { queryVector } from './prometheus.js'
-import { buildPgTopologyRetrofitPrompt } from './pgTopologyPrompts.js'
+import { queryVector } from './prometheus'
+import { buildPgTopologyRetrofitPrompt } from './pgTopologyPrompts'
 
 /**
  * A postgres node's "Topology" tab (create-database primaries only). Reconciles the node

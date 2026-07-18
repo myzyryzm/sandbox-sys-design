@@ -4,8 +4,8 @@
 // custom diagram body (bitmap grid + aggregate %), its live chain/source edges (star →
 // mesh), and its runtime poll. SystemDiagram + NodeEditModal + App stay type-agnostic and
 // drive all of this through these hooks.
-import CoordinatorTab from './CoordinatorTab.jsx'
-import { DiagramBody, bodyHeight } from './DiagramBody.jsx'
+import CoordinatorTab from './CoordinatorTab'
+import { DiagramBody, bodyHeight } from './DiagramBody'
 
 // Live chunk-source edges: distinct (source → puller) among the most recent transfers the
 // coordinator recorded. Early on every edge originates at the coordinator (a star); as
