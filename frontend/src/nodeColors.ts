@@ -10,11 +10,11 @@
 //
 // Precedence in SystemDiagram: an outage still wins (orange), and a load_balancer that DOES
 // carry health rules keeps being health-colored; this only paints the otherwise-static node.
-export const DEFAULT_NODE_COLORS = {
+export const DEFAULT_NODE_COLORS: Record<string, string> = {
   load_balancer: '#9e9e9e', // must match COLOR_HEX.gray in SystemDiagram.jsx
 }
 
 // Human labels for the Settings UI: which node each role paints.
-export const NODE_ROLE_LABELS = {
+export const NODE_ROLE_LABELS: Record<string, string> = {
   load_balancer: 'nginx load balancer',
 }

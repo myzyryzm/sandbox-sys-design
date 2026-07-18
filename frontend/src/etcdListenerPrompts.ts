@@ -7,10 +7,28 @@
 
 // The per-event handler name: Python snake_case, `on_`-prefixed, matching the diagram's
 // SUB-row label (onName → onLlmWorker; the authored code → on_llm_worker).
-const handlerName = (id) => 'on_' + String(id).toLowerCase().replace(/[^a-z0-9]+/g, '_')
+const handlerName = (id: string) => 'on_' + String(id).toLowerCase().replace(/[^a-z0-9]+/g, '_')
 
 // A LISTENER on a DISCOVERY keyspace: watch_prefix loop keeping a live in-memory worker map.
-export function buildListenerPrompt({ systemId, etcdId, keyspaceService, listener, prefix, description, editing, priorDescription }) {
+export function buildListenerPrompt({
+  systemId,
+  etcdId,
+  keyspaceService,
+  listener,
+  prefix,
+  description,
+  editing,
+  priorDescription,
+}: {
+  systemId: string
+  etcdId: string
+  keyspaceService: string
+  listener: string
+  prefix: string
+  description?: string | null
+  editing?: boolean
+  priorDescription?: string | null
+}): string {
   const handler = handlerName(keyspaceService)
   const lines = [
     `Use the sandbox-etcd skill to ${editing ? 'UPDATE' : 'IMPLEMENT'} an etcd LISTENER in the "${systemId}" system:`,
@@ -57,7 +75,19 @@ export function buildListenerPrompt({ systemId, etcdId, keyspaceService, listene
 }
 
 // Delete: registry + compose scrub already done by the DELETE; the session strips the code.
-export function buildListenerDeletePrompt({ systemId, etcdId, keyspaceService, listener, prefix }) {
+export function buildListenerDeletePrompt({
+  systemId,
+  etcdId,
+  keyspaceService,
+  listener,
+  prefix,
+}: {
+  systemId: string
+  etcdId: string
+  keyspaceService: string
+  listener: string
+  prefix: string
+}): string {
   const handler = handlerName(keyspaceService)
   return [
     `Use the sandbox-etcd skill to DELETE an etcd listener in the "${systemId}" system: service`,
@@ -73,7 +103,25 @@ export function buildListenerDeletePrompt({ systemId, etcdId, keyspaceService, l
 
 // A LISTENER on a CONFIG keyspace: the same watcher shape, but the map holds config values
 // (the app writes them via etcdctl — persistent keys, no lease, no registration half).
-export function buildConfigListenerPrompt({ systemId, etcdId, keyspaceName, listener, prefix, description, editing, priorDescription }) {
+export function buildConfigListenerPrompt({
+  systemId,
+  etcdId,
+  keyspaceName,
+  listener,
+  prefix,
+  description,
+  editing,
+  priorDescription,
+}: {
+  systemId: string
+  etcdId: string
+  keyspaceName: string
+  listener: string
+  prefix: string
+  description?: string | null
+  editing?: boolean
+  priorDescription?: string | null
+}): string {
   const handler = handlerName(keyspaceName)
   const lines = [
     `Use the sandbox-etcd skill to ${editing ? 'UPDATE' : 'IMPLEMENT'} an etcd CONFIG LISTENER in the "${systemId}" system:`,
@@ -121,7 +169,19 @@ export function buildConfigListenerPrompt({ systemId, etcdId, keyspaceName, list
   return lines.join('\n')
 }
 
-export function buildConfigListenerDeletePrompt({ systemId, etcdId, keyspaceName, listener, prefix }) {
+export function buildConfigListenerDeletePrompt({
+  systemId,
+  etcdId,
+  keyspaceName,
+  listener,
+  prefix,
+}: {
+  systemId: string
+  etcdId: string
+  keyspaceName: string
+  listener: string
+  prefix: string
+}): string {
   const handler = handlerName(keyspaceName)
   return [
     `Use the sandbox-etcd skill to DELETE an etcd config listener in the "${systemId}" system: service`,

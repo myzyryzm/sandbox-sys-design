@@ -5,7 +5,14 @@
 // persistence.json entry, compose env and manifest node already exist (written by
 // POST /api/custom-services); the session writes the code + rebuilds the service.
 
-function targetLines({ db, table, field, freeform }) {
+interface PersistTarget {
+  db?: string
+  table?: string
+  field?: string
+  freeform?: string | null
+}
+
+function targetLines({ db, table, field, freeform }: PersistTarget): string[] {
   if (freeform) {
     return [
       `Persist target: SPECIALIZED implementation — no structured table/field target. Follow this spec:`,
@@ -19,7 +26,29 @@ function targetLines({ db, table, field, freeform }) {
   ]
 }
 
-export function buildPersistencePrompt({ systemId, service, worker, stream, group, db, table, field, freeform, description, editing, priorDescription }) {
+export function buildPersistencePrompt({
+  systemId,
+  service,
+  worker,
+  stream,
+  group,
+  db,
+  table,
+  field,
+  freeform,
+  description,
+  editing,
+  priorDescription,
+}: PersistTarget & {
+  systemId: string
+  service: string
+  worker?: string
+  stream?: string
+  group?: string
+  description?: string | null
+  editing?: boolean
+  priorDescription?: string | null
+}): string {
   const lines = [
     `Use the sandbox-llm-persistence skill to ${editing ? 'UPDATE' : 'IMPLEMENT'} the persistence reader group "${service}" in the "${systemId}" system.`,
     '',

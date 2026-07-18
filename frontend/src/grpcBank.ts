@@ -9,15 +9,17 @@
 //    description text (sandbox-grpc-attach skill).
 //  - buildGrpcDetachPrompt   — unwire a served contract (sandbox-grpc-attach).
 
-function shape(obj) {
+import type { GrpcMethodRecord } from './types/registries'
+
+function shape(obj?: Record<string, unknown>): string {
   const keys = Object.keys(obj || {})
-  return keys.length ? keys.map((k) => `${k}: ${obj[k]}`).join(', ') : ''
+  return keys.length ? keys.map((k) => `${k}: ${obj?.[k]}`).join(', ') : ''
 }
 
 // A method's display signature. Form-authored methods carry request/response
 // field maps; uploaded methods carry only the message type names — fall back to
 // those (with any stream markers) when the maps are empty.
-export function methodSig(m) {
+export function methodSig(m: GrpcMethodRecord): string {
   const reqInner = shape(m.request) || `${m.requestStreaming ? 'stream ' : ''}${m.requestType || 'empty'}`
   const resInner = shape(m.response) || (m.responseType || 'empty')
   return `(${reqInner}) → ${m.responseStreaming ? 'stream ' : ''}(${resInner})`
@@ -26,7 +28,7 @@ export function methodSig(m) {
 // A new description chunk is APPENDED to a method's existing description rather
 // than replacing it (an empty chunk leaves it unchanged), so behavior text
 // accumulates over successive edits — same discipline as endpoints.json.
-export function joinDescription(base, addition) {
+export function joinDescription(base?: string | null, addition?: string | null): string {
   const b = (base || '').trim()
   const a = (addition || '').trim()
   if (!b) return a
@@ -34,8 +36,8 @@ export function joinDescription(base, addition) {
   return `${b}\n\n${a}`
 }
 
-const sigLine = (m) => `  ${m.name} ${methodSig(m)}`
-const descLine = (m) =>
+const sigLine = (m: GrpcMethodRecord) => `  ${m.name} ${methodSig(m)}`
+const descLine = (m: GrpcMethodRecord) =>
   `  ${m.name} ${methodSig(m)}: ${
     (m.description || '').trim() || '(no description — stub it: context.abort UNIMPLEMENTED)'
   }`
@@ -49,7 +51,28 @@ const descLine = (m) =>
 //     upserts?: [methodRecord], deletes?: [name], methods?: [postApplyRecords] }
 // `impact` is the backend's manifest join: { owners:[{contract,service}],
 //   clients:[{contract,service}] }.
-export function buildGrpcUpdatePrompt({ systemId, entries, impact }) {
+export interface GrpcApplyEntry {
+  contract: string
+  kind: 'methods' | 'replace-proto' | 'delete'
+  upserts?: GrpcMethodRecord[]
+  deletes?: string[]
+  methods?: GrpcMethodRecord[]
+}
+
+export interface GrpcImpact {
+  owners?: Array<{ contract: string; service: string }>
+  clients?: Array<{ contract: string; service: string }>
+}
+
+export function buildGrpcUpdatePrompt({
+  systemId,
+  entries,
+  impact,
+}: {
+  systemId: string
+  entries: GrpcApplyEntry[]
+  impact: GrpcImpact
+}): string {
   const lines = [
     `Use the sandbox-grpc-contract skill to propagate gRPC contract changes in the "${systemId}" system.`,
     ``,
@@ -107,7 +130,17 @@ export function buildGrpcUpdatePrompt({ systemId, entries, impact }) {
 
 // `methods` are the contract's full method records with the (possibly blank)
 // descriptions the user just wrote in the attach form.
-export function buildGrpcAttachPrompt({ systemId, service, contract, methods }) {
+export function buildGrpcAttachPrompt({
+  systemId,
+  service,
+  contract,
+  methods,
+}: {
+  systemId: string
+  service: string
+  contract: string
+  methods?: GrpcMethodRecord[] | null
+}): string {
   return [
     `Use the sandbox-grpc-attach skill to attach the gRPC contract "${contract}" to service "${service}"`,
     `as its SERVER in the "${systemId}" system.`,
@@ -128,7 +161,17 @@ export function buildGrpcAttachPrompt({ systemId, service, contract, methods }) 
 
 // `methods` here are only the EDITED ones: [{ name, signature-bearing record,
 // priorDescription, change }].
-export function buildGrpcDescriptionsPrompt({ systemId, service, contract, methods }) {
+export function buildGrpcDescriptionsPrompt({
+  systemId,
+  service,
+  contract,
+  methods,
+}: {
+  systemId: string
+  service: string
+  contract: string
+  methods: Array<GrpcMethodRecord & { priorDescription?: string; change?: string }>
+}): string {
   const lines = [
     `Use the sandbox-grpc-attach skill to UPDATE served gRPC method implementations on service`,
     `"${service}" for contract "${contract}" in the "${systemId}" system.`,
@@ -151,7 +194,15 @@ export function buildGrpcDescriptionsPrompt({ systemId, service, contract, metho
   return lines.join('\n')
 }
 
-export function buildGrpcDetachPrompt({ systemId, service, contract }) {
+export function buildGrpcDetachPrompt({
+  systemId,
+  service,
+  contract,
+}: {
+  systemId: string
+  service: string
+  contract: string
+}): string {
   return [
     `Use the sandbox-grpc-attach skill to DETACH the gRPC contract "${contract}" from service`,
     `"${service}" in the "${systemId}" system.`,

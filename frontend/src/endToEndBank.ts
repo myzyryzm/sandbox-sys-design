@@ -3,7 +3,19 @@
 // systems/<id>/endtoend.json — the session reads it from there — so this stays short (the terminal
 // slices the positional prompt to 8000 chars and it rides a WebSocket query param). The repeatable
 // procedure lives in the sandbox-end-to-end-process skill; here we only name the target + duration.
-export function buildEndToEndRunPrompt({ systemId, processId, processName, durationSeconds, apiBase }) {
+export function buildEndToEndRunPrompt({
+  systemId,
+  processId,
+  processName,
+  durationSeconds,
+  apiBase,
+}: {
+  systemId: string
+  processId: string
+  processName: string
+  durationSeconds: number
+  apiBase: string
+}): string {
   return [
     `Use the sandbox-end-to-end-process skill to RUN the end-to-end process "${processName}" in the "${systemId}" system.`,
     ``,

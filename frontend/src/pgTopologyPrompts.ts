@@ -6,9 +6,20 @@
 // to the standbys, then rebuild the touched services. The repeatable procedure lives in the
 // sandbox-postgres-topology skill.
 
+import type { PostgresHaBlock } from './types/manifest'
+
 export function buildPgTopologyRetrofitPrompt({
   systemId, dbId, mode, ha, replicas, services, dsn,
-}) {
+}: {
+  systemId: string
+  dbId: string
+  mode: string
+  ha?: PostgresHaBlock | null
+  replicas?: unknown
+  services?: string[] | null
+  dsn?: { readWrite?: string; readOnly?: string } | null
+}): string {
+  void replicas
   const svc = services || []
   const members = ha?.members || [dbId]
   const sync = ha?.sync || {}

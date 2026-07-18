@@ -42,6 +42,14 @@ export interface EndpointEntry {
 // service id → its endpoint entries.
 export type EndpointsMap = Record<string, EndpointEntry[]>
 
+// GET /api/endpoints merges the registry onto live OpenAPI discovery through the
+// lb: each entry gains its owning service (its `path` is LB-prefixed as
+// `/<service><local>`) and the resolved downstream method refs per node.
+export interface DiscoveredEndpoint extends EndpointEntry {
+  service: string
+  downstreamMethods?: Record<string, string[]>
+}
+
 // ─── models.json (the per-system model bank) ────────────────────────────────
 
 export interface ModelRecord {
@@ -241,6 +249,44 @@ export interface EndToEndFile {
   processes: EndToEndProcess[]
 }
 
+// ─── <db>/cdc.json (a database's Change-Data-Capture rules) ─────────────────
+
+export interface CdcRule {
+  table: string
+  operations?: string[]
+  stream?: string
+  topic?: string
+}
+
+// ─── GET /api/model-usage (what references each model-bank model) ───────────
+
+export interface ModelUsageEndpoint {
+  service: string
+  method: string
+  path: string
+  field?: string
+}
+
+export interface ModelUsageDatabase {
+  id: string
+  engine?: string
+}
+
+export interface ModelUsageStream {
+  cluster: string
+  topic: string
+  enforce?: boolean
+}
+
+export type ModelUsageMap = Record<
+  string,
+  {
+    endpoints?: ModelUsageEndpoint[]
+    databases?: ModelUsageDatabase[]
+    streams?: ModelUsageStream[]
+  }
+>
+
 // ─── Prometheus HTTP API (via the /api/prometheus proxy) ────────────────────
 
 export interface PromSample {
@@ -251,6 +297,7 @@ export interface PromSample {
 
 export interface PromInstantResponse {
   status: string
+  error?: string
   data?: {
     resultType: string
     result: PromSample[]

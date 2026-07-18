@@ -51,6 +51,13 @@ export interface HealthSpec {
   rules: HealthRule[]
 }
 
+// A writer's declared write mode: WAIT pseudo-sync vs the async default.
+export interface RedisWriteMode {
+  mode?: string // 'wait'
+  numreplicas?: number
+  timeoutMs?: number
+}
+
 // A redis node's live-edited typed key namespaces (managed by /api/redis, no rebuild).
 export interface RedisKeyspace {
   name: string
@@ -60,7 +67,7 @@ export interface RedisKeyspace {
   writers?: string[]
   readers?: string[]
   // Per-writer write mode: async vs WAIT pseudo-sync.
-  writeModes?: Record<string, string>
+  writeModes?: Record<string, RedisWriteMode>
   verified?: boolean
   origin?: string
   suggestedWriters?: string[]

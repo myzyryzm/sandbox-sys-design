@@ -9,18 +9,29 @@
 // reference is always a field *type*, never inside a comment, so the `\b<Name>\b` reference
 // scan runs on this stripped text to avoid phantom FKs. The prompt and UI keep the full,
 // commented `ts` — this is scan-only.
-function stripTsComments(ts) {
+import type {
+  ModelRecord,
+  ModelUsageDatabase,
+  ModelUsageEndpoint,
+  ModelUsageMap,
+  ModelUsageStream,
+} from './types/registries'
+
+function stripTsComments(ts?: string): string {
   return (ts || '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
 }
 
 // Collect the records for `names` plus every model they reference, transitively, each once.
 // Word-boundary name scan (over comment-stripped text), deduped, depth-capped (also stops
 // reference cycles).
-export function collectModels(names, models) {
+export function collectModels(
+  names: string[] | null | undefined,
+  models: ModelRecord[] | null | undefined,
+): ModelRecord[] {
   const byName = new Map((models || []).map((m) => [m.name, m]))
-  const out = []
-  const seen = new Set()
-  const visit = (n, depth) => {
+  const out: ModelRecord[] = []
+  const seen = new Set<string>()
+  const visit = (n: string, depth: number) => {
     if (seen.has(n) || depth > 12) return
     const m = byName.get(n)
     if (!m) return
@@ -38,7 +49,7 @@ export function collectModels(names, models) {
 
 // One model's TypeScript plus the definitions of every model it references, transitively.
 // Used when an endpoint references a model so the implementing session sees the full shape.
-export function resolveModelTs(name, models) {
+export function resolveModelTs(name: string, models?: ModelRecord[] | null): string {
   const out = collectModels([name], models)
   if (!out.length) return `// model "${name}" is not defined in the models bank`
   return out.map((m) => (m.ts || '').trim()).join('\n\n')
@@ -46,7 +57,7 @@ export function resolveModelTs(name, models) {
 
 // The OTHER bank-model names a model directly references (FK hint in the picker UI).
 // Scans the comment-stripped definition so a model named only in a comment isn't a phantom FK.
-export function referencedModels(name, models) {
+export function referencedModels(name: string, models?: ModelRecord[] | null): string[] {
   const me = (models || []).find((m) => m.name === name)
   if (!me) return []
   const code = stripTsComments(me.ts)
@@ -59,17 +70,20 @@ export function referencedModels(name, models) {
 // transitively REFERENCES any of them — a change to a model ripples UP to whatever uses
 // it. Includes the seed names. Depth-capped + seen-guarded (like collectModels) so
 // reference cycles terminate.
-export function dependentModels(names, models) {
+export function dependentModels(
+  names: string[] | null | undefined,
+  models: ModelRecord[] | null | undefined,
+): string[] {
   // Reverse adjacency: ref -> [models that reference it].
-  const rev = new Map()
+  const rev = new Map<string, string[]>()
   for (const m of models || []) {
     for (const ref of referencedModels(m.name, models)) {
       if (!rev.has(ref)) rev.set(ref, [])
-      rev.get(ref).push(m.name)
+      rev.get(ref)!.push(m.name)
     }
   }
-  const seen = new Set()
-  const visit = (n, depth) => {
+  const seen = new Set<string>()
+  const visit = (n: string, depth: number) => {
     if (seen.has(n) || depth > 12) return
     seen.add(n)
     for (const dependent of rev.get(n) || []) visit(dependent, depth + 1)
@@ -82,14 +96,29 @@ export function dependentModels(names, models) {
 // union of endpoints/databases/streams that reference any model in that set. `usage` is the
 // map from GET /api/model-usage. Endpoints are deduped by service|method|path|field, dbs by
 // id, stream topics by cluster|topic.
-export function modelImpact({ names, models, usage }) {
+export interface ModelImpact {
+  models: string[]
+  endpoints: ModelUsageEndpoint[]
+  databases: ModelUsageDatabase[]
+  streams: ModelUsageStream[]
+}
+
+export function modelImpact({
+  names,
+  models,
+  usage,
+}: {
+  names: string[]
+  models?: ModelRecord[] | null
+  usage?: ModelUsageMap | null
+}): ModelImpact {
   const closure = dependentModels(names, models)
-  const endpoints = []
-  const databases = []
-  const streams = []
-  const epSeen = new Set()
-  const dbSeen = new Set()
-  const stSeen = new Set()
+  const endpoints: ModelUsageEndpoint[] = []
+  const databases: ModelUsageDatabase[] = []
+  const streams: ModelUsageStream[] = []
+  const epSeen = new Set<string>()
+  const dbSeen = new Set<string>()
+  const stSeen = new Set<string>()
   for (const n of closure) {
     const u = (usage && usage[n]) || { endpoints: [], databases: [], streams: [] }
     for (const e of u.endpoints || []) {
@@ -119,15 +148,25 @@ export function modelImpact({ names, models, usage }) {
 // slices the positional prompt to 8000 chars): inline only the changed models' new TS and
 // point the session at models.json for any types they reference. `allModels` is the whole
 // bank, available if a tighter prompt later wants resolveModelTs enrichment.
-export function buildModelUpdatePrompt({ systemId, edits, impact, allModels }) {
+export function buildModelUpdatePrompt({
+  systemId,
+  edits,
+  impact,
+  allModels,
+}: {
+  systemId: string
+  edits?: Array<Pick<ModelRecord, 'name' | 'ts'>> | null
+  impact?: ModelImpact | null
+  allModels?: ModelRecord[] | null
+}): string {
   void allModels
   const changed = (edits || [])
     .map((e) => `## ${e.name}\n\`\`\`ts\n${(e.ts || '').trim()}\n\`\`\``)
     .join('\n\n')
-  const epLines = (impact?.endpoints || []).length
+  const epLines = impact?.endpoints?.length
     ? impact.endpoints.map((e) => `- ${e.service} ${e.method} /${e.service}${e.path}  (${e.field} body)`).join('\n')
     : '- (none)'
-  const dbLines = (impact?.databases || []).length
+  const dbLines = impact?.databases?.length
     ? impact.databases.map((d) => `- ${d.id} (${d.engine})`).join('\n')
     : '- (none)'
   // Only ENFORCED topics need code changes; documented-only topics re-resolve their TS
@@ -159,7 +198,20 @@ export function buildModelUpdatePrompt({ systemId, edits, impact, allModels }) {
 // the engine-specific prose the DB-authoring session needs. postgres/mongodb reproduce
 // the original SQL-vs-NoSQL binary exactly; dynamodb/cassandra add key-model + no-join
 // (denormalized) guidance, since their data models differ sharply from relational/document.
-const SCHEMA_SPECS = {
+interface SchemaSpec {
+  word: string
+  initFile: string
+  seedFile: string
+  degrade: string
+  refNote: string
+  oneEntity: string
+  refSingular: string
+  refArray: string
+  typeMap: string
+  idempotentApply: string
+}
+
+const SCHEMA_SPECS: Record<string, SchemaSpec> = {
   postgres: {
     word: 'table',
     initFile: 'init.sql',
@@ -215,7 +267,21 @@ const SCHEMA_SPECS = {
 // this session writes the actual tables/collections + keys/references via the
 // sandbox-database skill. `allModels` is the whole bank (so referenced-but-unselected
 // models still resolve).
-export function buildDbSchemaPrompt({ systemId, dbId, engine, models, allModels, update }) {
+export function buildDbSchemaPrompt({
+  systemId,
+  dbId,
+  engine,
+  models,
+  allModels,
+  update,
+}: {
+  systemId: string
+  dbId: string
+  engine: string
+  models: string[]
+  allModels?: ModelRecord[] | null
+  update?: boolean
+}): string {
   const needed = collectModels(models, allModels)
   const tsBlock = needed.length
     ? needed.map((m) => (m.ts || '').trim()).join('\n\n')

@@ -1,3 +1,5 @@
+import type { PromInstantResponse, VectorSample } from './types/registries'
+
 /**
  * Run a single instant PromQL query against the Prometheus HTTP API.
  *
@@ -5,12 +7,12 @@
  * Vite dev proxy forwards to the Prometheus container. Returns the scalar value
  * of the first result series, or null if there is no data / the value is NaN.
  */
-export async function queryInstant(base, query) {
+export async function queryInstant(base: string, query: string): Promise<number | null> {
   const url = `${base}/api/v1/query?query=${encodeURIComponent(query)}`
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Prometheus HTTP ${res.status}`)
 
-  const body = await res.json()
+  const body = (await res.json()) as PromInstantResponse
   if (body.status !== 'success') {
     throw new Error(`Prometheus error: ${body.error || 'unknown'}`)
   }
@@ -30,12 +32,12 @@ export async function queryInstant(base, query) {
  * strip reads all N `up{job="etcd"}` series (one per member) where
  * queryInstant would collapse them to the first.
  */
-export async function queryVector(base, query) {
+export async function queryVector(base: string, query: string): Promise<VectorSample[]> {
   const url = `${base}/api/v1/query?query=${encodeURIComponent(query)}`
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Prometheus HTTP ${res.status}`)
 
-  const body = await res.json()
+  const body = (await res.json()) as PromInstantResponse
   if (body.status !== 'success') {
     throw new Error(`Prometheus error: ${body.error || 'unknown'}`)
   }

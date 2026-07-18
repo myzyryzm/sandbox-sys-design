@@ -10,9 +10,11 @@
  * parse exactly this shape so the manifest stays declarative and safe.
  */
 
+import type { HealthRule } from './types/manifest'
+
 const RULE_RE = /^value\s*(<=|>=|==|!=|<|>)\s*(-?\d+(?:\.\d+)?)$/
 
-function matches(when, value) {
+function matches(when: string, value: number): boolean {
   const m = String(when).trim().match(RULE_RE)
   if (!m) {
     console.warn(`Unparseable health rule: "${when}"`)
@@ -42,7 +44,7 @@ function matches(when, value) {
  * Return the color of the first rule whose condition holds, or 'gray' when we
  * have no value yet (query failed / no data) — the "unknown" state.
  */
-export function pickColor(rules, value) {
+export function pickColor(rules: HealthRule[] | null | undefined, value: number | null | undefined): string {
   if (value == null) return 'gray'
   for (const rule of rules || []) {
     if (matches(rule.when, value)) return rule.color

@@ -8,26 +8,44 @@
 
 // The services a topology change affects: every declared writer/reader across the
 // node's keyspaces (deduped, keyspace-role annotated for the prompt).
-export function affectedServices(keyspaces) {
-  const byService = new Map()
+import type { RedisClusterBlock, RedisKeyspace, SentinelBlock } from './types/manifest'
+
+export function affectedServices(keyspaces?: RedisKeyspace[] | null): Map<string, string[]> {
+  const byService = new Map<string, string[]>()
   for (const ks of keyspaces || []) {
     for (const svc of ks.writers || []) {
       if (!byService.has(svc)) byService.set(svc, [])
       const wm = ks.writeModes?.[svc]
-      byService.get(svc).push(
+      byService.get(svc)!.push(
         `WRITES ${ks.name}${ks.match === 'prefix' ? '*' : ''} (${ks.type})` +
           (wm?.mode === 'wait' ? ` [write mode: WAIT numreplicas=${wm.numreplicas} timeout=${wm.timeoutMs}ms]` : ''),
       )
     }
     for (const svc of ks.readers || []) {
       if (!byService.has(svc)) byService.set(svc, [])
-      byService.get(svc).push(`READS ${ks.name}${ks.match === 'prefix' ? '*' : ''} (${ks.type})`)
+      byService.get(svc)!.push(`READS ${ks.name}${ks.match === 'prefix' ? '*' : ''} (${ks.type})`)
     }
   }
   return byService
 }
 
-export function buildRedisTopologyRetrofitPrompt({ systemId, redisId, mode, sentinel, cluster, replicas, keyspaces }) {
+export function buildRedisTopologyRetrofitPrompt({
+  systemId,
+  redisId,
+  mode,
+  sentinel,
+  cluster,
+  replicas,
+  keyspaces,
+}: {
+  systemId: string
+  redisId: string
+  mode: string
+  sentinel?: SentinelBlock | null
+  cluster?: RedisClusterBlock | null
+  replicas?: Array<{ id: string }> | null
+  keyspaces?: RedisKeyspace[] | null
+}): string {
   const roles = affectedServices(keyspaces)
   const services = [...roles.keys()]
   const lines = [

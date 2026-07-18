@@ -9,7 +9,7 @@
 export const NODE_NAME_RE = /^[a-z][a-z0-9-]*$/
 
 // Returns a human-readable error string if `name` isn't a valid node id, else null.
-export function nodeNameError(name) {
+export function nodeNameError(name: string | null | undefined): string | null {
   const n = (name || '').trim()
   if (!n) return 'Name is required'
   if (/\s/.test(n)) return 'Name can’t contain spaces'

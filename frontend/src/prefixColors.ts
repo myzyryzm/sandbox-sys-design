@@ -25,6 +25,8 @@ export const DEFAULT_PREFIX_COLORS = {
   cdcDelete: '#e0574f', // CDC DEL badge
 }
 
+export type PrefixRole = keyof typeof DEFAULT_PREFIX_COLORS
+
 // Role -> the CSS custom property styles.css reads for that role's badge(s). Roles
 // with no badge (etcdEdge is edge-only) are absent here.
 export const BADGE_VARS = {
@@ -40,7 +42,7 @@ export const BADGE_VARS = {
 }
 
 // Human labels for the Settings UI: which prefixes each role paints.
-export const PREFIX_ROLE_LABELS = {
+export const PREFIX_ROLE_LABELS: Record<PrefixRole, string> = {
   http: 'HTTP (GET / POST / …)',
   function: 'Function ƒ / WATCH',
   consumer: 'PULL (Kafka consumer)',
@@ -59,10 +61,11 @@ export const HEX_RE = /^#[0-9a-fA-F]{6}$/
 // Set the --badge-* CSS variables on :root from a colors map, so every badge across
 // the SVG diagram (fill) and the HTML lists (color) re-tints live. Missing/invalid
 // keys fall back to the defaults. Called by App on load and by the Settings modal on save.
-export function applyBadgeColors(colors) {
+export function applyBadgeColors(colors?: Record<string, string> | null) {
   const root = document.documentElement
-  for (const [role, cssVar] of Object.entries(BADGE_VARS)) {
-    const value = HEX_RE.test(colors?.[role]) ? colors[role] : DEFAULT_PREFIX_COLORS[role]
+  for (const [role, cssVar] of Object.entries(BADGE_VARS) as [PrefixRole, string][]) {
+    const candidate = colors?.[role]
+    const value = candidate && HEX_RE.test(candidate) ? candidate : DEFAULT_PREFIX_COLORS[role]
     root.style.setProperty(cssVar, value)
   }
 }
