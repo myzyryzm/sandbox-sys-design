@@ -1,4 +1,11 @@
-import { useState } from 'react'
+import { useState, type ChangeEvent } from 'react'
+import type {
+  CircuitBreakerConfig,
+  ConnectionPoolBlock,
+  ResilienceBlock,
+  RetryConfig,
+} from './types/manifest'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * Per-connection resilience policy editor. Opened by clicking a connection (a
@@ -20,7 +27,33 @@ const RETRY_STRATEGIES = [
 // Defaults match the brief's example policy; an existing policy (re-open) wins. The
 // connection pool defaults OFF (unlike breaker/retry) so opening a resilience-only edge
 // doesn't imply a pool; an existing pool block seeds the fields.
-function initialState(initial, initialPool) {
+// Numeric fields hold the raw input text while editing (coerced on submit).
+interface ResilienceForm {
+  cbEnabled: boolean
+  failure_threshold: string
+  pause_duration_seconds: string
+  half_open_trial_calls: string
+  open_behavior: string
+  fallback_response: string
+  rtEnabled: boolean
+  max_attempts: string
+  strategy: string
+  base_delay_seconds: string
+  max_delay_seconds: string
+  poolEnabled: boolean
+  max_connections: string
+  min_idle: string
+  idle_timeout_seconds: string
+  max_lifetime_seconds: string
+  instruction: string
+}
+
+type ResilienceFormText = Exclude<keyof ResilienceForm, 'cbEnabled' | 'rtEnabled' | 'poolEnabled'>
+
+function initialState(
+  initial?: ResilienceBlock | null,
+  initialPool?: ConnectionPoolBlock | null,
+): ResilienceForm {
   const cb = initial?.circuit_breaker || {}
   const rt = initial?.retry || {}
   const pool = initialPool || {}
@@ -45,7 +78,23 @@ function initialState(initial, initialPool) {
   }
 }
 
-function buildResiliencePrompt({ systemId, from, to, firstAttach, circuit_breaker, retry, instruction }) {
+function buildResiliencePrompt({
+  systemId,
+  from,
+  to,
+  firstAttach,
+  circuit_breaker,
+  retry,
+  instruction,
+}: {
+  systemId: string
+  from: string
+  to: string
+  firstAttach?: boolean
+  circuit_breaker: CircuitBreakerConfig
+  retry: RetryConfig
+  instruction: string
+}): string {
   const cb = circuit_breaker.enabled
     ? `circuit breaker: trip after ${circuit_breaker.failure_threshold} consecutive failures, pause ${circuit_breaker.pause_duration_seconds}s, then ${circuit_breaker.half_open_trial_calls} half-open trial call(s); while OPEN → ${circuit_breaker.open_behavior}${circuit_breaker.open_behavior === 'fallback' ? ` (serve: ${JSON.stringify(circuit_breaker.fallback_response)})` : ''}`
     : 'circuit breaker: disabled'
@@ -90,7 +139,21 @@ function buildResiliencePrompt({ systemId, from, to, firstAttach, circuit_breake
   ].join('\n')
 }
 
-function buildConnectionPoolPrompt({ systemId, from, to, firstAttach, pool, instruction }) {
+function buildConnectionPoolPrompt({
+  systemId,
+  from,
+  to,
+  firstAttach,
+  pool,
+  instruction,
+}: {
+  systemId: string
+  from: string
+  to: string
+  firstAttach?: boolean
+  pool: ConnectionPoolBlock
+  instruction?: string
+}): string {
   const summary = `max ${pool.max_connections} connections, min ${pool.min_idle} idle, reap an idle connection after ${pool.idle_timeout_seconds}s, recycle a connection after ${pool.max_lifetime_seconds}s`
   return [
     `Use the sandbox-connection-pool skill to apply a connection pool on the "${systemId}" system.`,
@@ -134,13 +197,26 @@ function buildConnectionPoolPrompt({ systemId, from, to, firstAttach, pool, inst
   ].join('\n')
 }
 
-export default function ConnectionResilienceModal({ systemId, from, to, initial, initialPool, poolEligible = true, onClose, onLaunch }) {
+interface ConnectionResilienceModalProps {
+  systemId: string
+  from: string
+  to: string
+  initial?: ResilienceBlock | null
+  initialPool?: ConnectionPoolBlock | null
+  poolEligible?: boolean
+  onClose: () => void
+  onLaunch: LaunchSession
+}
+
+export default function ConnectionResilienceModal({ systemId, from, to, initial, initialPool, poolEligible = true, onClose, onLaunch }: ConnectionResilienceModalProps) {
   const [f, setF] = useState(() => initialState(initial, initialPool))
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }))
-  const toggle = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.checked }))
+  const set = (k: ResilienceFormText) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
+    setF((s) => ({ ...s, [k]: e.target.value }))
+  const toggle = (k: 'cbEnabled' | 'rtEnabled' | 'poolEnabled') => (e: ChangeEvent<HTMLInputElement>) =>
+    setF((s) => ({ ...s, [k]: e.target.checked }))
 
   async function submit() {
     setError(null)
@@ -160,7 +236,7 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
       if (minI > maxC) return setError('Min idle must be ≤ max connections.')
     }
 
-    const circuit_breaker = f.cbEnabled
+    const circuit_breaker: CircuitBreakerConfig = f.cbEnabled
       ? {
           enabled: true,
           failure_threshold: Number(f.failure_threshold),
@@ -170,7 +246,7 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
           ...(f.open_behavior === 'fallback' ? { fallback_response: f.fallback_response } : {}),
         }
       : { enabled: false }
-    const retry = f.rtEnabled
+    const retry: RetryConfig = f.rtEnabled
       ? {
           enabled: true,
           max_attempts: Number(f.max_attempts),
@@ -190,7 +266,7 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ system: systemId, from, to, circuit_breaker, retry, instruction: f.instruction, conversationId }),
         })
-        const data = await res.json().catch(() => ({}))
+        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; firstAttach?: boolean }
         if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
         onLaunch({
           sessionId: conversationId,
@@ -204,7 +280,7 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
 
       // Connection pool — its own config write + session (queue serializes them).
       if (poolRequested) {
-        const connection_pool = {
+        const connection_pool: ConnectionPoolBlock = {
           enabled: true,
           max_connections: Number(f.max_connections),
           min_idle: Number(f.min_idle),
@@ -217,7 +293,7 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ system: systemId, from, to, connection_pool, instruction: f.instruction, conversationId }),
         })
-        const data = await res.json().catch(() => ({}))
+        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; firstAttach?: boolean }
         if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
         onLaunch({
           sessionId: conversationId,
@@ -231,7 +307,7 @@ export default function ConnectionResilienceModal({ systemId, from, to, initial,
       onClose()
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 

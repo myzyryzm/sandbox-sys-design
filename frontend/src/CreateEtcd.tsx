@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { FormEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
@@ -14,14 +15,19 @@ import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 const SIZES = [3, 5, 7]
 const ELECTION_FACTOR = 5 // keep in sync with the backend's validation
 
-export default function CreateEtcd({ systemId, onClose }) {
+interface CreateEtcdProps {
+  systemId: string
+  onClose: () => void
+}
+
+export default function CreateEtcd({ systemId, onClose }: CreateEtcdProps) {
   const [name, setName] = useState('etcd')
   const [size, setSize] = useState(3)
-  const [heartbeatMs, setHeartbeatMs] = useState(100)
-  const [electionMs, setElectionMs] = useState(1000)
-  const [leaseTtlSeconds, setLeaseTtlSeconds] = useState(15)
-  const [status, setStatus] = useState('idle') // idle | submitting | error
-  const [error, setError] = useState(null)
+  const [heartbeatMs, setHeartbeatMs] = useState<number | string>(100)
+  const [electionMs, setElectionMs] = useState<number | string>(1000)
+  const [leaseTtlSeconds, setLeaseTtlSeconds] = useState<number | string>(15)
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
 
   const busy = status === 'submitting'
   const nameErr = nodeNameError(name)
@@ -30,7 +36,7 @@ export default function CreateEtcd({ systemId, onClose }) {
   const el = Number(electionMs)
   const timingWarn = hb > 0 && el > 0 && el < ELECTION_FACTOR * hb
 
-  async function submit(e) {
+  async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setStatus('submitting')
     setError(null)
@@ -47,12 +53,12 @@ export default function CreateEtcd({ systemId, onClose }) {
           leaseTtlSeconds: Number(leaseTtlSeconds),
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
       setStatus('error')
-      setError(err.message)
+      setError((err as Error).message)
     }
   }
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { Manifest, ManifestNode } from './types/manifest'
 
 /**
  * "Are you sure?" modal for deleting a service or database node. Confirm tears
@@ -19,10 +20,29 @@ import { useEffect, useState } from 'react'
  * return just the body, so it can live inside the NodeEditModal "Delete" tab.
  * `onBusyChange` lets that parent disable tab-switching during the delete.
  */
-export default function ConfirmDelete({ systemId, node, manifest, onClose, embedded = false, onBusyChange }) {
+
+// One row of GET /api/dependents (remove.js findDependents): who still uses this node.
+interface DependentRef {
+  node: string
+  label?: string
+  via: string
+  detail?: string
+  calls?: string[]
+}
+
+interface ConfirmDeleteProps {
+  systemId: string
+  node: ManifestNode
+  manifest: Manifest
+  onClose: () => void
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function ConfirmDelete({ systemId, node, manifest, onClose, embedded = false, onBusyChange }: ConfirmDeleteProps) {
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
-  const [dependents, setDependents] = useState([])
+  const [error, setError] = useState<string | null>(null)
+  const [dependents, setDependents] = useState<DependentRef[]>([])
   const [checking, setChecking] = useState(false)
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
@@ -50,7 +70,7 @@ export default function ConfirmDelete({ systemId, node, manifest, onClose, embed
     let live = true
     setChecking(true)
     fetch(`/api/dependents?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(node.id)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ dependents?: DependentRef[] }>)
       .then((d) => { if (live) setDependents(Array.isArray(d.dependents) ? d.dependents : []) })
       .catch(() => { if (live) setDependents([]) })
       .finally(() => { if (live) setChecking(false) })
@@ -71,7 +91,11 @@ export default function ConfirmDelete({ systemId, node, manifest, onClose, embed
           body: JSON.stringify({ system: systemId, id: node.id }),
         },
       )
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean
+        error?: string
+        dependents?: DependentRef[]
+      }
       if (!res.ok || !data.ok) {
         // A blocked-delete 400 carries the dependent list — surface it like the probe.
         if (Array.isArray(data.dependents) && data.dependents.length) setDependents(data.dependents)
@@ -80,18 +104,18 @@ export default function ConfirmDelete({ systemId, node, manifest, onClose, embed
       onClose() // the manifest/endpoints polls drop the node from the diagram
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError((err as Error).message)
     }
   }
 
   // Group dependents by the node that depends on us, so each caller is one row.
-  const groups = []
+  const groups: { node: string; label: string; refs: DependentRef[] }[] = []
   for (const d of dependents) {
     let g = groups.find((x) => x.node === d.node)
     if (!g) { g = { node: d.node, label: d.label || d.node, refs: [] }; groups.push(g) }
     g.refs.push(d)
   }
-  const viaLabel = { http: 'HTTP', grpc: 'gRPC', kafka: 'Kafka', scenario: 'function', consumer: 'consumer' }
+  const viaLabel: Record<string, string> = { http: 'HTTP', grpc: 'gRPC', kafka: 'Kafka', scenario: 'function', consumer: 'consumer' }
 
   // A websocket tier member offers no delete at all — just the pointer at its lb
   // (the backend rejects the delete the same way, so this isn't merely cosmetic).

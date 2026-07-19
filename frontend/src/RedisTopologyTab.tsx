@@ -1,5 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { affectedServices, buildRedisTopologyRetrofitPrompt } from './redisTopologyPrompts'
+import type { Manifest, ManifestNode, RedisClusterBlock, SentinelBlock } from './types/manifest'
+import type { LaunchSession } from './types/customTypes'
+
+type RedisTopoMode = 'standalone' | 'replicated' | 'cluster'
+
+interface RedisTopoLimits {
+  replicasMin: number
+  replicasMax: number
+  shardsMin: number
+  shardsMax: number
+  replicasPerShardMax?: number
+}
+
+// GET/POST /api/redis/topology response.
+interface RedisTopoState {
+  ok?: boolean
+  error?: string
+  mode: RedisTopoMode
+  replicas: Array<{ id: string }>
+  cluster?: RedisClusterBlock | null
+  sentinel?: SentinelBlock | null
+  limits?: RedisTopoLimits
+  node?: ManifestNode | null
+  warnings?: string[]
+}
 
 /**
  * A redis node's "Topology" tab (create-database redis primaries only). Reconciles
@@ -19,16 +44,28 @@ import { affectedServices, buildRedisTopologyRetrofitPrompt } from './redisTopol
  * declared writer/reader services' code — Sentinel discovery for writes,
  * RedisCluster clients, per-keyspace WAIT calls (declared in the Keyspaces tab).
  */
-export default function RedisTopologyTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
+interface RedisTopologyTabProps {
+  systemId: string
+  node: ManifestNode
+  manifest?: Manifest | null
+  onClose: () => void
+  onLaunch?: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function RedisTopologyTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }: RedisTopologyTabProps) {
+  void manifest
   const redisId = node.id
-  const [topo, setTopo] = useState(null)
-  const [error, setError] = useState(null)
+  const [topo, setTopo] = useState<RedisTopoState | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState(null) // { mode, warnings, enqueued } of the last apply
+  // { mode, warnings, enqueued } of the last apply.
+  const [result, setResult] = useState<{ mode: string; warnings: string[]; enqueued: boolean } | null>(null)
 
   // Form state, seeded from the live topology on first load only (edits survive polls).
   const seeded = useRef(false)
-  const [mode, setMode] = useState('standalone')
+  const [mode, setMode] = useState<RedisTopoMode>('standalone')
   const [replicas, setReplicas] = useState(1)
   const [shards, setShards] = useState(3)
   const [rps, setRps] = useState(1)
@@ -40,7 +77,7 @@ export default function RedisTopologyTab({ systemId, node, manifest, onClose, on
       const res = await fetch(
         `/api/redis/topology?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(redisId)}`,
       )
-      const data = await res.json()
+      const data = (await res.json()) as RedisTopoState
       if (!data.ok) throw new Error(data.error || 'failed to load')
       setTopo(data)
       if (!seeded.current) {
@@ -53,7 +90,7 @@ export default function RedisTopologyTab({ systemId, node, manifest, onClose, on
         }
       }
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }, [systemId, redisId])
 
@@ -67,7 +104,8 @@ export default function RedisTopologyTab({ systemId, node, manifest, onClose, on
     return <p className="sim-desc">{error ? `Error: ${error}` : 'Loading…'}</p>
   }
 
-  const limits = topo.limits || { replicasMin: 1, replicasMax: 4, shardsMin: 3, shardsMax: 5, replicasPerShardMax: 2 }
+  const limits: RedisTopoLimits =
+    topo.limits || { replicasMin: 1, replicasMax: 4, shardsMin: 3, shardsMax: 5, replicasPerShardMax: 2 }
   const noChange =
     (mode === 'standalone' && topo.mode === 'standalone') ||
     (mode === 'replicated' && topo.mode === 'replicated' && topo.replicas.length === replicas)
@@ -94,7 +132,7 @@ export default function RedisTopologyTab({ systemId, node, manifest, onClose, on
           ...(mode === 'cluster' ? { shards, replicasPerShard: rps } : {}),
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as RedisTopoState
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       await load()
       // The mechanical reconcile is done — the code retrofit (Sentinel discovery /
@@ -119,7 +157,7 @@ export default function RedisTopologyTab({ systemId, node, manifest, onClose, on
       }
       setResult({ mode: data.mode, warnings: data.warnings || [], enqueued })
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -127,7 +165,7 @@ export default function RedisTopologyTab({ systemId, node, manifest, onClose, on
 
   // The replica list after an apply: re-derive from the POST's manifest node echo
   // (GET may lag a poll behind).
-  function topoReplicasOf(data) {
+  function topoReplicasOf(data: RedisTopoState): Array<{ id: string }> {
     if (data.mode !== 'replicated') return []
     const count = replicas
     return Array.from({ length: count }, (_, i) => ({ id: `${redisId}-${i + 1}` }))
@@ -135,7 +173,7 @@ export default function RedisTopologyTab({ systemId, node, manifest, onClose, on
 
   const currentLabel =
     topo.mode === 'cluster'
-      ? `Redis Cluster — ${topo.cluster.shards} shards × ${1 + topo.cluster.replicasPerShard} (members: ${topo.cluster.members.join(', ')})`
+      ? `Redis Cluster — ${topo.cluster!.shards} shards × ${1 + topo.cluster!.replicasPerShard} (members: ${topo.cluster!.members.join(', ')})`
       : topo.mode === 'replicated'
         ? `Replicated — primary + ${topo.replicas.length} replica(s) (${topo.replicas.map((r) => r.id).join(', ')}), sentinel ${topo.sentinel?.members?.join(', ')}`
         : 'Standalone — a single container'

@@ -1,4 +1,19 @@
 import { useEffect, useState } from 'react'
+import type { ManifestNode } from './types/manifest'
+
+// The node's live outage entry from the outage poll (null/undefined = up).
+interface OutageState {
+  remaining_seconds?: number
+}
+
+interface NodeOutageModalProps {
+  systemId: string
+  node: ManifestNode
+  current?: OutageState | null
+  onClose: () => void
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
 
 /**
  * "Shut down for N seconds" modal. Temporarily stops a node's container so it stops
@@ -11,10 +26,11 @@ import { useEffect, useState } from 'react'
  * `embedded` to drop the overlay/header and return just the body, so it can live
  * inside the NodeEditModal "Shutdown" tab (`onBusyChange` reports in-flight state up).
  */
-export default function NodeOutageModal({ systemId, node, current, onClose, embedded = false, onBusyChange }) {
-  const [seconds, setSeconds] = useState(30)
+export default function NodeOutageModal({ systemId, node, current, onClose, embedded = false, onBusyChange }: NodeOutageModalProps) {
+  // Holds the raw input text while editing (coerced with Number() on use).
+  const [seconds, setSeconds] = useState<number | string>(30)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
@@ -34,12 +50,12 @@ export default function NodeOutageModal({ systemId, node, current, onClose, embe
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, node: node.id, duration_seconds: n }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose() // the outage poll turns the node orange on the diagram
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -52,12 +68,12 @@ export default function NodeOutageModal({ systemId, node, current, onClose, embe
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, node: node.id }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -68,7 +84,7 @@ export default function NodeOutageModal({ systemId, node, current, onClose, embe
             <p className="sim-desc">
               <strong>{node.label}</strong> is stopped — it's refusing all inbound
               connections. It will come back automatically in about{' '}
-              <strong>{current.remaining_seconds}s</strong>, or you can restore it now.
+              <strong>{current?.remaining_seconds}s</strong>, or you can restore it now.
             </p>
             {error && <p className="modal-error">{error}</p>}
             <div className="modal-actions">

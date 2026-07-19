@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { ChangeEvent, KeyboardEvent } from 'react'
 import { isExternalEndpoint } from './endpointPolicy'
 import { buildScenarioFunctionPrompt } from './scenarioBank'
+import type { DiscoveredEndpoint, ScenarioArg, ScenarioFunction } from './types/registries'
+import type { EditTabProps } from './types/customTypes'
 
 /**
  * A client's "Functions" tab (embedded in NodeEditModal). A client's behavior is a set of
@@ -29,18 +32,36 @@ const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 // those names so an authored function can't produce a colliding, ambiguous row.
 const WS_BUILTIN_NAMES = ['send', 'onReceive']
 
-function blankForm() {
+interface ScenarioForm {
+  name: string
+  args: ScenarioArg[]
+  description: string
+}
+
+// One step's outcome from POST /api/scenarios/run (the script's __LB_RESULTS__ line).
+interface RunResult {
+  step: number
+  ok?: boolean
+  method?: string
+  path?: string
+  status?: number
+  error?: string
+  sentBody?: unknown
+  response?: unknown
+}
+
+function blankForm(): ScenarioForm {
   return { name: '', args: [], description: '' }
 }
 
 // A function's display signature, e.g. "checkout(userId: string, qty: number)".
-function sig(fn) {
+function sig(fn: ScenarioFunction): string {
   return `${fn.name}(${(fn.args || []).map((a) => `${a.name}: ${a.type}`).join(', ')})`
 }
 
 // When editing, a new description entry is APPENDED to the existing one (an empty entry
 // leaves it unchanged), so the description accumulates over successive edits.
-function joinDescription(base, addition) {
+function joinDescription(base: string | null | undefined, addition: string | null | undefined): string {
   const b = (base || '').trim()
   const a = (addition || '').trim()
   if (!b) return a
@@ -48,32 +69,32 @@ function joinDescription(base, addition) {
   return `${b}\n\n${a}`
 }
 
-export default function ClientScenarioTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
+export default function ClientScenarioTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }: EditTabProps) {
   const client = node.id
   const moduleFile = `${client.replace(/-/g, '_')}.py` // the client's python script (clients/<module>.py)
-  const [functions, setFunctions] = useState(null) // this client's own functions; null = loading
-  const [endpoints, setEndpoints] = useState([]) // discovered endpoints (for the prompt)
-  const [error, setError] = useState(null)
+  const [functions, setFunctions] = useState<ScenarioFunction[] | null>(null) // this client's own functions; null = loading
+  const [endpoints, setEndpoints] = useState<DiscoveredEndpoint[]>([]) // discovered endpoints (for the prompt)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   // Define / edit form.
   const [adding, setAdding] = useState(false)
-  const [editingName, setEditingName] = useState(null) // name when editing an existing function
+  const [editingName, setEditingName] = useState<string | null>(null) // name when editing an existing function
   const [editingDescription, setEditingDescription] = useState('') // existing description (read-only)
-  const [form, setForm] = useState(blankForm)
-  const [confirmName, setConfirmName] = useState(null) // function pending delete confirm
+  const [form, setForm] = useState<ScenarioForm>(blankForm)
+  const [confirmName, setConfirmName] = useState<string | null>(null) // function pending delete confirm
 
   // Run panel.
   const [runName, setRunName] = useState('')
-  const [runArgs, setRunArgs] = useState({})
-  const [results, setResults] = useState(null)
+  const [runArgs, setRunArgs] = useState<Record<string, string | boolean>>({})
+  const [results, setResults] = useState<RunResult[] | null>(null)
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
   const load = useCallback(() => {
     return Promise.all([
-      fetch(`/api/scenarios?system=${encodeURIComponent(systemId)}`).then((r) => r.json()).catch(() => ({})),
-      fetch(`/api/endpoints?system=${encodeURIComponent(systemId)}`).then((r) => r.json()).catch(() => ({})),
+      fetch(`/api/scenarios?system=${encodeURIComponent(systemId)}`).then((r) => r.json()).catch(() => ({})) as Promise<{ ok?: boolean; functions?: ScenarioFunction[] }>,
+      fetch(`/api/endpoints?system=${encodeURIComponent(systemId)}`).then((r) => r.json()).catch(() => ({})) as Promise<{ ok?: boolean; endpoints?: DiscoveredEndpoint[] }>,
     ]).then(([fns, eps]) => {
       // Keep only the functions this client owns (the registry holds every client's).
       const mine = fns.ok ? (fns.functions || []).filter((f) => f.client === client) : []
@@ -91,10 +112,12 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
   const callableEndpoints = endpoints.filter((e) => isExternalEndpoint(e, byId[e.service]))
 
   // --- form helpers ---
-  const setField = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
+  const setField = (k: 'name' | 'description') => (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+    setForm((f) => ({ ...f, [k]: e.target.value }))
   const addArg = () => setForm((f) => ({ ...f, args: [...f.args, { name: '', type: 'string' }] }))
-  const updateArg = (i, patch) => setForm((f) => ({ ...f, args: f.args.map((r, j) => (j === i ? { ...r, ...patch } : r)) }))
-  const removeArg = (i) => setForm((f) => ({ ...f, args: f.args.filter((_, j) => j !== i) }))
+  const updateArg = (i: number, patch: Partial<ScenarioArg>) =>
+    setForm((f) => ({ ...f, args: f.args.map((r, j) => (j === i ? { ...r, ...patch } : r)) }))
+  const removeArg = (i: number) => setForm((f) => ({ ...f, args: f.args.filter((_, j) => j !== i) }))
 
   function startAdd() {
     setForm(blankForm())
@@ -104,7 +127,7 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
     setAdding(true)
   }
 
-  function startEdit(fn) {
+  function startEdit(fn: ScenarioFunction) {
     setForm({ name: fn.name, args: (fn.args || []).map((a) => ({ ...a })), description: '' })
     setEditingName(fn.name)
     setEditingDescription(fn.description || '')
@@ -122,7 +145,7 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
 
   async function submit() {
     setError(null)
-    const name = editing ? editingName : form.name.trim()
+    const name = editing ? editingName! : form.name.trim()
     if (!editing) {
       if (!name) return setError('Function name is required')
       if (!IDENT_RE.test(name)) {
@@ -136,8 +159,8 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
       }
     }
     // Collect args (skip fully blank rows; validate the rest).
-    const args = []
-    const seen = new Set()
+    const args: ScenarioArg[] = []
+    const seen = new Set<string>()
     for (const r of form.args) {
       const an = (r.name || '').trim()
       if (!an) continue
@@ -160,11 +183,11 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, client, name, args, description, conversationId }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
       // 2. Launch the authoring session.
-      onLaunch({
+      onLaunch!({
         sessionId: conversationId,
         mode: 'new',
         prompt: buildScenarioFunctionPrompt({ systemId, client, name, args, description, endpoints: callableEndpoints }),
@@ -172,18 +195,18 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
       onClose()
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError((err as Error).message)
     }
   }
 
-  function onDescriptionKeyDown(e) {
+  function onDescriptionKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       submit()
     }
   }
 
-  async function removeFunction(fn) {
+  async function removeFunction(fn: ScenarioFunction) {
     setBusy(true)
     setError(null)
     try {
@@ -192,13 +215,13 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, client, name: fn.name }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setConfirmName(null)
       if (runName === fn.name) { setRunName(''); setRunArgs({}); setResults(null) }
       await load()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -207,11 +230,11 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
   // --- run ---
   const runFn = (functions || []).find((f) => f.name === runName) || null
 
-  function pickRun(name) {
+  function pickRun(name: string) {
     setRunName(name)
     setResults(null)
     const fn = (functions || []).find((f) => f.name === name)
-    const seed = {}
+    const seed: Record<string, string | boolean> = {}
     for (const a of fn?.args || []) seed[a.name] = a.type === 'boolean' ? false : ''
     setRunArgs(seed)
   }
@@ -227,11 +250,11 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, client, name: runFn.name, args: runArgs }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; results?: RunResult[] }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setResults(data.results || [])
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -262,7 +285,7 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
                 {pending ? (
                   <span className="scenario-pending" title="Steps not authored yet — open or resume the Claude session">pending</span>
                 ) : (
-                  <span className="scenario-stepcount">{fn.steps.length} step{fn.steps.length === 1 ? '' : 's'}</span>
+                  <span className="scenario-stepcount">{fn.steps!.length} step{fn.steps!.length === 1 ? '' : 's'}</span>
                 )}
                 {confirming ? (
                   <span className="endpoint-list-actions">
@@ -278,7 +301,7 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
                         disabled={busy}
                         title="Resume this function’s Claude session"
                         onClick={() => {
-                          onLaunch({ sessionId: fn.conversationId, mode: 'resume', prompt: '' })
+                          onLaunch?.({ sessionId: fn.conversationId!, mode: 'resume', prompt: '' })
                           onClose()
                         }}
                       >
@@ -408,7 +431,7 @@ export default function ClientScenarioTab({ systemId, node, manifest, onClose, o
               ) : (
                 <input
                   type={a.type === 'number' ? 'number' : 'text'}
-                  value={runArgs[a.name] ?? ''}
+                  value={(runArgs[a.name] ?? '') as string}
                   onChange={(e) => setRunArgs((v) => ({ ...v, [a.name]: e.target.value }))}
                   disabled={busy}
                 />

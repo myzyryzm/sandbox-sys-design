@@ -11,9 +11,27 @@
 //      autoscaler applies through). With autoscaling enabled a manual count is soon
 //      reconciled back to the policy's desired — the tab says so.
 import { useEffect, useState } from 'react'
+import type { EditTabProps } from '../../types/customTypes'
+import type { LlmWorkerState } from './DiagramBody'
 
-const STATE_URL = (sys) => `/api/custom/llm-worker/state?system=${encodeURIComponent(sys)}`
-const POLICY_FIELDS = [
+const STATE_URL = (sys: string) => `/api/custom/llm-worker/state?system=${encodeURIComponent(sys)}`
+
+// The policy form's numeric fields (enabled is the checkbox); inputs hold the raw
+// string while the user types, Number()-ed on save.
+type PolicyNumField =
+  | 'min'
+  | 'max'
+  | 'scale_up_util'
+  | 'scale_down_util'
+  | 'up_stable_seconds'
+  | 'down_stable_seconds'
+  | 'cooldown_seconds'
+
+interface PolicyForm extends Record<PolicyNumField, number | string> {
+  enabled: boolean
+}
+
+const POLICY_FIELDS: Array<[PolicyNumField, string, string]> = [
   ['min', 'Min workers', 'never fewer than this'],
   ['max', 'Max workers', 'never more than this'],
   ['scale_up_util', 'Scale-up util (0-1)', 'add a worker when utilization stays above this'],
@@ -23,15 +41,15 @@ const POLICY_FIELDS = [
   ['cooldown_seconds', 'Cooldown (s)', 'minimum gap between scaling steps'],
 ]
 
-const pct = (u) => (u == null ? '—' : `${Math.round(u * 100)}%`)
+const pct = (u: number | null | undefined) => (u == null ? '—' : `${Math.round(u * 100)}%`)
 
-export default function ScalingTab({ systemId, node, onClose, onBusyChange }) {
-  const [state, setState] = useState(null) // this base's { scaler, policy } entry
-  const [form, setForm] = useState(null) // policy form; seeded once from the registry
+export default function ScalingTab({ systemId, node, onClose, onBusyChange }: EditTabProps) {
+  const [state, setState] = useState<LlmWorkerState | null>(null) // this base's { scaler, policy } entry
+  const [form, setForm] = useState<PolicyForm | null>(null) // policy form; seeded once from the registry
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState(0)
-  const [workerCount, setWorkerCount] = useState(1 + (node.replicas?.instances?.length || 0))
+  const [workerCount, setWorkerCount] = useState<number | string>(1 + (node.replicas?.instances?.length || 0))
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
@@ -41,20 +59,20 @@ export default function ScalingTab({ systemId, node, onClose, onBusyChange }) {
     const tick = async () => {
       try {
         const res = await fetch(STATE_URL(systemId))
-        const data = await res.json()
+        const data = (await res.json()) as { ok: boolean; nodes: Record<string, LlmWorkerState> }
         if (cancelled || !data.ok) return
         const s = data.nodes[node.id] || null
         setState(s)
         if (s?.policy) {
           setForm((f) => f || {
-            enabled: s.policy.enabled !== false,
-            min: s.policy.min ?? 1,
-            max: s.policy.max ?? 8,
-            scale_up_util: s.policy.scale_up_util ?? 0.8,
-            scale_down_util: s.policy.scale_down_util ?? 0.3,
-            up_stable_seconds: s.policy.up_stable_seconds ?? 15,
-            down_stable_seconds: s.policy.down_stable_seconds ?? 60,
-            cooldown_seconds: s.policy.cooldown_seconds ?? 90,
+            enabled: s.policy!.enabled !== false,
+            min: s.policy!.min ?? 1,
+            max: s.policy!.max ?? 8,
+            scale_up_util: s.policy!.scale_up_util ?? 0.8,
+            scale_down_util: s.policy!.scale_down_util ?? 0.3,
+            up_stable_seconds: s.policy!.up_stable_seconds ?? 15,
+            down_stable_seconds: s.policy!.down_stable_seconds ?? 60,
+            cooldown_seconds: s.policy!.cooldown_seconds ?? 90,
           })
         }
       } catch {
@@ -93,11 +111,11 @@ export default function ScalingTab({ systemId, node, onClose, onBusyChange }) {
           cooldown_seconds: Number(form.cooldown_seconds),
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setSavedAt(Date.now())
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -112,11 +130,11 @@ export default function ScalingTab({ systemId, node, onClose, onBusyChange }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, node: node.id, instances: wc }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
       setBusy(false)
     }
   }

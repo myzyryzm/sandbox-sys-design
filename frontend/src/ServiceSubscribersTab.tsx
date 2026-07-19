@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import {
   buildListenerPrompt,
   buildListenerDeletePrompt,
   buildConfigListenerPrompt,
   buildConfigListenerDeletePrompt,
 } from './etcdListenerPrompts'
+import type { Manifest, ManifestNode } from './types/manifest'
+import type { EtcdKeyspace, EtcdListener } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * A SERVICE's "Subscribers" tab (embedded in NodeEditModal). The service-first mirror of
@@ -19,27 +22,37 @@ import {
 
 // Mirrors the server's identity rule (frontend/server/etcd.js ksIdentity):
 // discovery keyspaces are keyed by their service, config keyspaces by their name.
-const ksId = (k) => (k.type === 'config' ? k.name : k.service)
+const ksId = (k: EtcdKeyspace): string => (k.type === 'config' ? k.name : k.service)
 // Matches SystemDiagram's SUB-row label: the KEY it watches, camelCased + `on`-prefixed
 // (`llm-worker` → `onLlmWorker`, `app-settings` → `onAppSettings`).
-const camelName = (id) => id.replace(/-+([a-z0-9])/g, (_, c) => c.toUpperCase())
-const onName = (id) => {
+const camelName = (id: string) => id.replace(/-+([a-z0-9])/g, (_, c: string) => c.toUpperCase())
+const onName = (id: string) => {
   const c = camelName(id)
   return 'on' + c.charAt(0).toUpperCase() + c.slice(1)
 }
 
-export default function ServiceSubscribersTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
+interface ServiceSubscribersTabProps {
+  systemId: string
+  node: ManifestNode
+  manifest?: Manifest | null
+  onClose: () => void
+  onLaunch: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function ServiceSubscribersTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }: ServiceSubscribersTabProps) {
   const service = node.id
   const etcdNode = (manifest?.nodes || []).find((n) => n.type === 'etcd')
   const etcdId = etcdNode?.id || null
 
-  const [keyspaces, setKeyspaces] = useState(null) // null = loading
-  const [error, setError] = useState(null)
+  const [keyspaces, setKeyspaces] = useState<EtcdKeyspace[] | null>(null) // null = loading
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [confirmKey, setConfirmKey] = useState(null) // 'sub:<identity>' pending delete
+  const [confirmKey, setConfirmKey] = useState<string | null>(null) // 'sub:<identity>' pending delete
   const [pick, setPick] = useState('') // identity of the keyspace to subscribe to
   const [desc, setDesc] = useState('')
-  const [editKey, setEditKey] = useState(null) // identity of the subscriber row being edited
+  const [editKey, setEditKey] = useState<string | null>(null) // identity of the subscriber row being edited
   const [editDesc, setEditDesc] = useState('')
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
@@ -50,11 +63,11 @@ export default function ServiceSubscribersTab({ systemId, node, manifest, onClos
       const res = await fetch(
         `/api/etcd?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(etcdId)}&live=0`,
       )
-      const data = await res.json()
+      const data = (await res.json()) as { ok?: boolean; error?: string; keyspaces?: EtcdKeyspace[] }
       if (!data.ok) throw new Error(data.error || 'failed to load')
       setKeyspaces(data.keyspaces || [])
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }, [systemId, etcdId])
 
@@ -82,37 +95,37 @@ export default function ServiceSubscribersTab({ systemId, node, manifest, onClos
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: etcdId, keyspace: ksId(ks), service, description: desc, conversationId }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; listener?: EtcdListener }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onLaunch({
         sessionId: conversationId,
         mode: 'new',
         prompt: ks.type === 'config'
           ? buildConfigListenerPrompt({
-              systemId, etcdId,
+              systemId, etcdId: etcdId!,
               keyspaceName: ks.name,
               listener: service,
               prefix: ks.prefix,
-              description: data.listener.description,
+              description: data.listener!.description,
               editing: false,
             })
           : buildListenerPrompt({
-              systemId, etcdId,
+              systemId, etcdId: etcdId!,
               keyspaceService: ks.service,
               listener: service,
               prefix: ks.prefix,
-              description: data.listener.description,
+              description: data.listener!.description,
               editing: false,
             }),
       }, { kind: 'etcd', target: service, title: `listen ${ks.prefix}` })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
 
-  function startEdit(ks, l) {
+  function startEdit(ks: EtcdKeyspace, l: EtcdListener) {
     setConfirmKey(null)
     setEditKey(ksId(ks))
     setEditDesc(l.description || '')
@@ -122,7 +135,7 @@ export default function ServiceSubscribersTab({ systemId, node, manifest, onClos
   // then launch a mode:'new' editing session (resume can't inject a new prompt — terminal.js
   // runs --resume with no prompt). The upsert stores the fresh id, so the row's Resume then
   // resumes THIS edit session on the next load.
-  async function saveEdit(ks, l) {
+  async function saveEdit(ks: EtcdKeyspace, l: EtcdListener) {
     const conversationId = crypto.randomUUID()
     setBusy(true)
     setError(null)
@@ -132,39 +145,39 @@ export default function ServiceSubscribersTab({ systemId, node, manifest, onClos
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: etcdId, keyspace: ksId(ks), service, description: editDesc, conversationId }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; listener?: EtcdListener }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onLaunch({
         sessionId: conversationId,
         mode: 'new',
         prompt: ks.type === 'config'
           ? buildConfigListenerPrompt({
-              systemId, etcdId,
+              systemId, etcdId: etcdId!,
               keyspaceName: ks.name,
               listener: service,
               prefix: ks.prefix,
-              description: data.listener.description,
+              description: data.listener!.description,
               editing: true,
               priorDescription: l.description,
             })
           : buildListenerPrompt({
-              systemId, etcdId,
+              systemId, etcdId: etcdId!,
               keyspaceService: ks.service,
               listener: service,
               prefix: ks.prefix,
-              description: data.listener.description,
+              description: data.listener!.description,
               editing: true,
               priorDescription: l.description,
             }),
       }, { kind: 'etcd', target: service, title: `edit ${ks.prefix}` })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
 
-  async function removeSubscription(ks, l) {
+  async function removeSubscription(ks: EtcdKeyspace, l: EtcdListener) {
     setBusy(true)
     setError(null)
     try {
@@ -173,7 +186,7 @@ export default function ServiceSubscribersTab({ systemId, node, manifest, onClos
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: etcdId, keyspace: ksId(ks), service }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; wasImplemented?: boolean }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setConfirmKey(null)
       if (data.wasImplemented) {
@@ -181,21 +194,21 @@ export default function ServiceSubscribersTab({ systemId, node, manifest, onClos
           sessionId: crypto.randomUUID(),
           mode: 'new',
           prompt: ks.type === 'config'
-            ? buildConfigListenerDeletePrompt({ systemId, etcdId, keyspaceName: ks.name, listener: service, prefix: ks.prefix })
-            : buildListenerDeletePrompt({ systemId, etcdId, keyspaceService: ks.service, listener: service, prefix: ks.prefix }),
+            ? buildConfigListenerDeletePrompt({ systemId, etcdId: etcdId!, keyspaceName: ks.name, listener: service, prefix: ks.prefix })
+            : buildListenerDeletePrompt({ systemId, etcdId: etcdId!, keyspaceService: ks.service, listener: service, prefix: ks.prefix }),
         }, { kind: 'etcd', target: service, title: `unlisten ${ks.prefix}` })
         onClose()
         return
       }
       await load()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  function resume(conversationId) {
+  function resume(conversationId?: string | null) {
     if (!conversationId) return
     onLaunch({ sessionId: conversationId, mode: 'resume', prompt: '' })
     onClose()
@@ -204,14 +217,14 @@ export default function ServiceSubscribersTab({ systemId, node, manifest, onClos
   // The keyspaces this service already watches, paired with its own listener entry.
   const subscribed = (keyspaces || [])
     .map((ks) => ({ ks, l: (ks.listeners || []).find((l) => l.service === service) }))
-    .filter((s) => s.l)
+    .filter((s): s is { ks: EtcdKeyspace; l: EtcdListener } => !!s.l)
   // Keyspaces it could subscribe to: not already watched, and not its OWN discovery
   // keyspace (the backend forbids a service watching the prefix it registers under).
   const available = (keyspaces || []).filter(
     (ks) => ks.service !== service && !(ks.listeners || []).some((l) => l.service === service),
   )
 
-  let body
+  let body: ReactElement
   if (!etcdId) {
     body = <p className="sim-desc">This system has no etcd cluster — add one to subscribe services to keyspaces.</p>
   } else if (keyspaces === null) {

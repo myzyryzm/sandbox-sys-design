@@ -4,8 +4,12 @@
 // + live aggregate status. Worker node: its own live download status. Live state comes
 // from the same aggregate endpoint App polls, fetched here so the tab updates on its own.
 import { useCallback, useEffect, useState } from 'react'
+import type { ReactElement } from 'react'
+import type { ManifestNode } from '../../types/manifest'
+import type { EditTabProps } from '../../types/customTypes'
+import type { DcNodeState } from './DiagramBody'
 
-const STATE_URL = (sys) => `/api/custom/download-coordinator/state?system=${encodeURIComponent(sys)}`
+const STATE_URL = (sys: string) => `/api/custom/download-coordinator/state?system=${encodeURIComponent(sys)}`
 
 // Chunk size is chosen in MB (powers of two) but sent to the coordinator in bytes.
 const MB = 1024 * 1024
@@ -13,13 +17,13 @@ const CHUNK_MB_OPTIONS = [2, 4, 8, 16, 32, 64, 128, 256]
 const DEFAULT_CHUNK_MB = 64
 // Derive the dropdown's initial MB value from the node's stored byte size, snapping
 // to a known option (falling back to the default if it doesn't line up).
-function initialChunkMB(node) {
+function initialChunkMB(node: ManifestNode): number {
   const bytes = node.coordinator?.chunk_size
   const mb = bytes ? Math.round(bytes / MB) : DEFAULT_CHUNK_MB
   return CHUNK_MB_OPTIONS.includes(mb) ? mb : DEFAULT_CHUNK_MB
 }
 
-function bytesLabel(n) {
+function bytesLabel(n: number | undefined): string {
   if (!n || typeof n !== 'number') return '—'
   if (n >= 1024 * 1024) return `${Math.round(n / (1024 * 1024))} MB`
   if (n >= 1024) return `${Math.round(n / 1024)} KB`
@@ -27,10 +31,10 @@ function bytesLabel(n) {
 }
 
 // A compact held/missing grid (held = green). Distinct from the SVG diagram body.
-function Bitmap({ bitmap, count }) {
+function Bitmap({ bitmap, count }: { bitmap?: number[] | null; count?: number }) {
   const n = count || (bitmap ? bitmap.length : 0)
   if (!n) return <span className="sim-desc">—</span>
-  const cells = []
+  const cells: ReactElement[] = []
   for (let i = 0; i < n; i++) {
     const held = bitmap && bitmap[i] === 1
     cells.push(<span key={i} className={held ? 'dc-cell held' : 'dc-cell'} />)
@@ -38,18 +42,18 @@ function Bitmap({ bitmap, count }) {
   return <span className="dc-bitmap">{cells}</span>
 }
 
-export default function CoordinatorTab({ systemId, node, onBusyChange }) {
+export default function CoordinatorTab({ systemId, node, onBusyChange }: EditTabProps) {
   const isCoordinator = node.service_type === 'download_coordinator'
 
-  const [live, setLive] = useState(null) // aggregate state for THIS node
-  const [allWorkers, setAllWorkers] = useState([]) // [{id, ...}] for a coordinator
-  const [sources, setSources] = useState([])
-  const [srcMode, setSrcMode] = useState('local') // 'local' | 'url'
+  const [live, setLive] = useState<DcNodeState | null>(null) // aggregate state for THIS node
+  const [allWorkers, setAllWorkers] = useState<Array<DcNodeState & { id: string }>>([]) // [{id, ...}] for a coordinator
+  const [sources, setSources] = useState<string[]>([])
+  const [srcMode, setSrcMode] = useState<'local' | 'url'>('local')
   const [localFile, setLocalFile] = useState('')
   const [url, setUrl] = useState('')
   const [chunkMB, setChunkMB] = useState(() => initialChunkMB(node))
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
@@ -59,7 +63,7 @@ export default function CoordinatorTab({ systemId, node, onBusyChange }) {
     const tick = async () => {
       try {
         const res = await fetch(STATE_URL(systemId))
-        const data = await res.json()
+        const data = (await res.json()) as { ok: boolean; nodes: Record<string, DcNodeState> }
         if (cancelled || !data.ok) return
         setLive(data.nodes[node.id] || null)
         if (isCoordinator) {
@@ -81,7 +85,7 @@ export default function CoordinatorTab({ systemId, node, onBusyChange }) {
   const loadSources = useCallback(() => {
     fetch(`/api/custom/download-coordinator/sources?system=${encodeURIComponent(systemId)}&node=${encodeURIComponent(node.id)}`)
       .then((r) => r.json())
-      .then((d) => { if (d.ok) setSources(d.sources || []) })
+      .then((d: { ok?: boolean; sources?: string[] }) => { if (d.ok) setSources(d.sources || []) })
       .catch(() => {})
   }, [systemId, node.id])
 
@@ -96,10 +100,10 @@ export default function CoordinatorTab({ systemId, node, onBusyChange }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, coordinator: node.id }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -116,10 +120,10 @@ export default function CoordinatorTab({ systemId, node, onBusyChange }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, node: node.id, source, chunk_size: chunkMB * MB }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }

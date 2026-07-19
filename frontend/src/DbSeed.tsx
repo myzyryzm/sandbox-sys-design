@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { ManifestNode } from './types/manifest'
 
 /**
  * Per-database "Seed" tab. Lets you fill a postgres/mongodb db with fixture rows that
@@ -11,21 +12,61 @@ import { useEffect, useState } from 'react'
  * (auto IDs, timestamps). "Re-seed now" re-applies everything after a test wipe.
  */
 
-const WORDS = {
+const WORDS: Record<string, { entity: string; empty: string }> = {
   postgres: { entity: 'Table', empty: 'No tables yet — author a schema first.' },
   mongodb: { entity: 'Collection', empty: 'No collections yet — author a schema first.' },
   cassandra: { entity: 'Table', empty: 'No tables yet — author a schema first.' },
   dynamodb: { entity: 'Table', empty: 'No tables yet — author a schema first.' },
 }
 
-export default function DbSeed({ systemId, node, onClose, embedded = false, onBusyChange }) {
-  const [state, setState] = useState({ status: 'loading' })
-  const [seeds, setSeeds] = useState({ tables: [] })
+// Live-introspected entity shapes (GET /api/db-seed) + the seeds.json registry copy.
+interface SeedField {
+  name: string
+  type?: string
+}
+
+interface SeedEntity {
+  name: string
+  fields?: SeedField[]
+}
+
+interface SeedTable {
+  table: string
+  rows: Array<Record<string, unknown>>
+}
+
+interface SeedsFile {
+  tables: SeedTable[]
+}
+
+type SeedState =
+  | { status: 'loading' }
+  | { status: 'error'; error?: string }
+  | { status: 'ok'; entities: SeedEntity[] }
+
+interface SeedResponse {
+  ok?: boolean
+  error?: string
+  entities?: SeedEntity[]
+  seeds?: SeedsFile
+}
+
+interface DbSeedProps {
+  systemId: string
+  node: ManifestNode
+  onClose: () => void
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function DbSeed({ systemId, node, onClose, embedded = false, onBusyChange }: DbSeedProps) {
+  const [state, setState] = useState<SeedState>({ status: 'loading' })
+  const [seeds, setSeeds] = useState<SeedsFile>({ tables: [] })
   const [table, setTable] = useState('')
-  const [values, setValues] = useState({}) // field -> string (for tables with known fields)
-  const [extra, setExtra] = useState([]) // mongo empty-collection fallback: [{ key, val }]
-  const [busy, setBusy] = useState(null)
-  const [error, setError] = useState(null)
+  const [values, setValues] = useState<Record<string, string>>({}) // field -> string (for tables with known fields)
+  const [extra, setExtra] = useState<Array<{ key: string; val: string }>>([]) // mongo empty-collection fallback: [{ key, val }]
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   const engine = node.type
   const words = WORDS[engine] || { entity: 'Entity', empty: 'Empty.' }
@@ -36,7 +77,7 @@ export default function DbSeed({ systemId, node, onClose, embedded = false, onBu
     let cancelled = false
     setState({ status: 'loading' })
     fetch(`/api/db-seed?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(node.id)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<SeedResponse>)
       .then((d) => {
         if (cancelled) return
         if (!d.ok) return setState({ status: 'error', error: d.error })
@@ -45,7 +86,7 @@ export default function DbSeed({ systemId, node, onClose, embedded = false, onBu
         setSeeds(d.seeds && Array.isArray(d.seeds.tables) ? d.seeds : { tables: [] })
         setTable((t) => t || ents[0]?.name || '')
       })
-      .catch((err) => !cancelled && setState({ status: 'error', error: err.message }))
+      .catch((err: Error) => !cancelled && setState({ status: 'error', error: err.message }))
     return () => {
       cancelled = true
     }
@@ -61,7 +102,7 @@ export default function DbSeed({ systemId, node, onClose, embedded = false, onBu
     setExtra([])
   }, [table])
 
-  async function post(url, body, key, after) {
+  async function post(url: string, body: unknown, key: string, after?: (data: SeedResponse) => void) {
     setBusy(key)
     setError(null)
     try {
@@ -70,19 +111,19 @@ export default function DbSeed({ systemId, node, onClose, embedded = false, onBu
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as SeedResponse
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       if (data.seeds) setSeeds(data.seeds)
       after?.(data)
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(null)
     }
   }
 
   function addEntry() {
-    const row = {}
+    const row: Record<string, string> = {}
     for (const f of fields) {
       const v = values[f.name]
       if (v !== undefined && v !== '') row[f.name] = v
@@ -95,7 +136,7 @@ export default function DbSeed({ systemId, node, onClose, embedded = false, onBu
     })
   }
 
-  const removeEntry = (t, i) =>
+  const removeEntry = (t: string, i: number) =>
     post('/api/db-seed-remove', { system: systemId, id: node.id, table: t, index: i }, `del:${t}:${i}`)
   const reseed = () => post('/api/db-seed-apply', { system: systemId, id: node.id }, 'apply')
 

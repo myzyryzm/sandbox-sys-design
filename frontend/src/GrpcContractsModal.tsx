@@ -1,5 +1,26 @@
-import { useCallback, useEffect, useState } from 'react'
-import { buildGrpcUpdatePrompt, methodSig } from './grpcBank'
+import { useCallback, useEffect, useState, type ChangeEvent } from 'react'
+import { buildGrpcUpdatePrompt, methodSig, type GrpcApplyEntry, type GrpcImpact } from './grpcBank'
+import type { DiscoveredGrpcContract, GrpcMethodRecord } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
+
+// One staged (unsaved) change to an existing contract.
+type ContractDraft =
+  | { kind: 'methods'; upserts: Record<string, GrpcMethodRecord>; deletes: string[] }
+  | { kind: 'replace-proto'; protoFile: string }
+  | { kind: 'delete' }
+
+interface FieldRow {
+  name: string
+  type: string
+}
+
+interface MethodForm {
+  contract: string
+  method: string
+  request: FieldRow[]
+  response: FieldRow[]
+  responseStreaming: boolean
+}
 
 /**
  * gRPC contract bank (Part A) — pure SHAPE, model-bank workflow.
@@ -26,7 +47,7 @@ const PROTO_TYPES = [
   'repeated string', 'repeated bytes', 'repeated int32', 'repeated int64',
 ]
 
-function blankForm() {
+function blankForm(): MethodForm {
   return {
     contract: '',
     method: '',
@@ -37,8 +58,8 @@ function blankForm() {
 }
 
 // Turn dynamic {name,type} rows into a flat { name: type } object, dropping blanks.
-function rowsToFields(rows) {
-  const out = {}
+function rowsToFields(rows: FieldRow[]): Record<string, string> {
+  const out: Record<string, string> = {}
   for (const r of rows) {
     const n = r.name.trim()
     if (n) out[n] = r.type
@@ -46,47 +67,54 @@ function rowsToFields(rows) {
   return out
 }
 
-function fieldsToRows(obj) {
-  const rows = Object.entries(obj || {}).map(([name, type]) => ({ name, type }))
+function fieldsToRows(obj?: Record<string, unknown>): FieldRow[] {
+  const rows = Object.entries(obj || {}).map(([name, type]) => ({ name, type: type as string }))
   return rows.length ? rows : [{ name: '', type: 'string' }]
 }
 
-const sameFields = (a, b) => JSON.stringify(a || {}) === JSON.stringify(b || {})
+const sameFields = (a?: Record<string, unknown>, b?: Record<string, unknown>) =>
+  JSON.stringify(a || {}) === JSON.stringify(b || {})
 
 // Client-side mirror of the backend's upload check, only to route the submit:
 // an uploaded proto whose service name already exists becomes a STAGED
 // replace-proto draft; a new name creates immediately. (The backend re-checks.)
-function protoServiceName(text) {
+function protoServiceName(text: string): string | null {
   const src = (text || '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
   const names = [...src.matchAll(/\bservice\s+([A-Za-z_]\w*)\s*\{/g)].map((m) => m[1])
   return names.length === 1 ? names[0] : null
 }
 
 // How a contract row shows who uses it.
-function attachmentLabel(c) {
+function attachmentLabel(c: DiscoveredGrpcContract) {
   if (c.servers.length > 1) return `served by ${c.servers.join(', ')} (custom)`
   if (c.server) return `served by ${c.server}`
   return 'unattached'
 }
 
-export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
-  const [contracts, setContracts] = useState(null) // null = loading
-  const [drafts, setDrafts] = useState({}) // staged edits: { name: {kind, ...} }
-  const [form, setForm] = useState(blankForm)
-  const [editingMethod, setEditingMethod] = useState(null) // method name being edited
-  const [openName, setOpenName] = useState(null) // expanded contract row
-  const [confirmName, setConfirmName] = useState(null) // contract pending delete-stage confirm
+interface GrpcContractsModalProps {
+  systemId: string
+  onClose: () => void
+  onLaunch: LaunchSession
+}
+
+export default function GrpcContractsModal({ systemId, onClose, onLaunch }: GrpcContractsModalProps) {
+  const [contracts, setContracts] = useState<DiscoveredGrpcContract[] | null>(null) // null = loading
+  const [drafts, setDrafts] = useState<Record<string, ContractDraft>>({}) // staged edits
+  const [form, setForm] = useState<MethodForm>(blankForm)
+  const [editingMethod, setEditingMethod] = useState<string | null>(null) // method name being edited
+  const [openName, setOpenName] = useState<string | null>(null) // expanded contract row
+  const [confirmName, setConfirmName] = useState<string | null>(null) // contract pending delete-stage confirm
   const [review, setReview] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [tab, setTab] = useState('form') // 'form' (build a method) | 'upload' (.proto file)
+  const [tab, setTab] = useState<'form' | 'upload'>('form')
   const [proto, setProto] = useState('') // uploaded / pasted .proto text
 
-  const load = useCallback(() => {
+  const load = useCallback((): Promise<DiscoveredGrpcContract[]> => {
     return fetch(`/api/grpc-contracts?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ ok?: boolean; contracts?: DiscoveredGrpcContract[] }>)
       .then((d) => {
-        const list = d.ok ? d.contracts : []
+        const list = d.ok ? d.contracts || [] : []
         setContracts(list)
         return list
       })
@@ -103,7 +131,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
   const byName = new Map((contracts || []).map((c) => [c.name, c]))
 
   // A contract's method list with its staged draft applied (what review saves).
-  function draftedMethods(c) {
+  function draftedMethods(c: DiscoveredGrpcContract): GrpcMethodRecord[] {
     const d = drafts[c.name]
     if (!d || d.kind !== 'methods') return c.methods
     const deletes = new Set(d.deletes)
@@ -114,11 +142,13 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
     return out
   }
 
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
-  const updateRow = (key, i, patch) =>
+  const set = (k: 'contract' | 'method') => (e: ChangeEvent<HTMLInputElement>) =>
+    setForm((f) => ({ ...f, [k]: e.target.value }))
+  type FieldKey = 'request' | 'response'
+  const updateRow = (key: FieldKey, i: number, patch: Partial<FieldRow>) =>
     setForm((f) => ({ ...f, [key]: f[key].map((r, j) => (j === i ? { ...r, ...patch } : r)) }))
-  const addRow = (key) => setForm((f) => ({ ...f, [key]: [...f[key], { name: '', type: 'string' }] }))
-  const removeRow = (key, i) => setForm((f) => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }))
+  const addRow = (key: FieldKey) => setForm((f) => ({ ...f, [key]: [...f[key], { name: '', type: 'string' }] }))
+  const removeRow = (key: FieldKey, i: number) => setForm((f) => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }))
 
   function resetForm() {
     setForm(blankForm())
@@ -127,7 +157,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
   }
 
   // Pre-fill the form so a new method joins an existing contract (staged).
-  function addMethodTo(name) {
+  function addMethodTo(name: string) {
     setForm({ ...blankForm(), contract: name })
     setEditingMethod(null)
     setTab('form')
@@ -135,7 +165,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
   }
 
   // Load an existing (or staged) method into the form for a staged edit.
-  function startEditMethod(c, m) {
+  function startEditMethod(c: DiscoveredGrpcContract, m: GrpcMethodRecord) {
     setForm({
       contract: c.name,
       method: m.name,
@@ -149,10 +179,13 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
   }
 
   // Merge one staged change into a contract's draft, dropping no-op drafts.
-  function stageMethodChange(name, mutate) {
+  function stageMethodChange(
+    name: string,
+    mutate: (d: { kind: 'methods'; upserts: Record<string, GrpcMethodRecord>; deletes: string[] }) => void,
+  ) {
     setDrafts((all) => {
       const cur = all[name]
-      const d =
+      const d: { kind: 'methods'; upserts: Record<string, GrpcMethodRecord>; deletes: string[] } =
         cur && cur.kind === 'methods'
           ? { kind: 'methods', upserts: { ...cur.upserts }, deletes: [...cur.deletes] }
           : { kind: 'methods', upserts: {}, deletes: [] }
@@ -170,7 +203,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
     const method = form.method.trim()
     if (!/^[A-Z][A-Za-z0-9]*$/.test(contract)) return setError('Contract must be PascalCase (e.g. ChunkTransfer)')
     if (!/^[A-Z][A-Za-z0-9]*$/.test(method)) return setError('Method must be PascalCase (e.g. GetChunk)')
-    const record = {
+    const record: GrpcMethodRecord = {
       name: method,
       request: rowsToFields(form.request),
       response: rowsToFields(form.response),
@@ -182,10 +215,12 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
     if (!existing) return createContract(contract, record)
 
     // Staged upsert on an existing contract (model-bank "Stage edit").
-    if (drafts[contract]?.kind === 'delete') return setError(`"${contract}" is staged for deletion — undo that first`)
-    if (drafts[contract]?.kind === 'replace-proto') return setError(`"${contract}" has a staged re-upload — form edits would be overwritten`)
+    const cd = drafts[contract]
+    if (cd?.kind === 'delete') return setError(`"${contract}" is staged for deletion — undo that first`)
+    if (cd?.kind === 'replace-proto') return setError(`"${contract}" has a staged re-upload — form edits would be overwritten`)
     const saved = existing.methods.find((m) => m.name === method)
-    if (saved && !editingMethod && !drafts[contract]?.upserts?.[method]) {
+    const stagedUpsert = cd?.kind === 'methods' ? cd.upserts[method] : undefined
+    if (saved && !editingMethod && !stagedUpsert) {
       return setError(`method "${method}" already exists — use its Edit action to stage a change`)
     }
     if (saved && !saved.formAuthored) {
@@ -207,7 +242,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
 
   // Create a brand-new contract immediately — it has no owner or callers yet,
   // so there is nothing to propagate (the backend runs protoc mechanically).
-  async function createContract(contract, record) {
+  async function createContract(contract: string, record: GrpcMethodRecord) {
     setBusy(true)
     try {
       const res = await fetch('/api/grpc-contracts', {
@@ -215,20 +250,20 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, contract, methods: [record] }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       await load()
       resetForm()
       setOpenName(contract)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
   // Stage a method delete (or drop a staged-only method).
-  function deleteMethod(c, m) {
+  function deleteMethod(c: DiscoveredGrpcContract, m: GrpcMethodRecord) {
     setError(null)
     stageMethodChange(c.name, (d) => {
       delete d.upserts[m.name]
@@ -239,12 +274,12 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
   }
 
   // Stage / unstage a whole-contract delete.
-  function stageContractDelete(name) {
+  function stageContractDelete(name: string) {
     setDrafts((all) => ({ ...all, [name]: { kind: 'delete' } }))
     setConfirmName(null)
     if (form.contract.trim() === name) resetForm()
   }
-  function unstage(name) {
+  function unstage(name: string) {
     setDrafts((all) => {
       const next = { ...all }
       delete next[name]
@@ -253,7 +288,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
   }
 
   // Load the chosen .proto into the editable textarea (the user can also paste).
-  async function onProtoFile(e) {
+  async function onProtoFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     setError(null)
@@ -283,13 +318,13 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, protoFile: proto }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; contract?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       await load()
       setProto('')
-      setOpenName(data.contract)
+      setOpenName(data.contract || null)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -301,7 +336,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
     setError(null)
     const names = Object.keys(drafts)
     if (!names.length) return setReview(false)
-    const changes = names.map((name) => {
+    const changes = names.map((name): Record<string, unknown> => {
       const d = drafts[name]
       if (d.kind === 'methods') {
         return { contract: name, kind: 'methods', upserts: Object.values(d.upserts), deletes: d.deletes }
@@ -316,10 +351,10 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, changes }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; impact?: GrpcImpact }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
-      const impact = data.impact || { owners: [], clients: [] }
+      const impact = { owners: data.impact?.owners || [], clients: data.impact?.clients || [] }
       const fresh = await load() // post-apply registry (carried descriptions, new methods)
       if (!impact.owners.length && !impact.clients.length) {
         // Nothing attached — pure shape + codegen, stay open.
@@ -330,7 +365,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
       }
 
       const freshByName = new Map(fresh.map((c) => [c.name, c]))
-      const entries = names.map((name) => {
+      const entries: GrpcApplyEntry[] = names.map((name): GrpcApplyEntry => {
         const d = drafts[name]
         if (d.kind === 'delete') return { contract: name, kind: 'delete' }
         if (d.kind === 'replace-proto') {
@@ -340,7 +375,9 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
         return {
           contract: name,
           kind: 'methods',
-          upserts: Object.keys(d.upserts).map((n) => methods.find((m) => m.name === n)).filter(Boolean),
+          upserts: Object.keys(d.upserts)
+            .map((n) => methods.find((m) => m.name === n))
+            .filter((m): m is GrpcMethodRecord => !!m),
           deletes: d.deletes,
         }
       })
@@ -355,7 +392,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
       })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
@@ -469,7 +506,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
             {(() => {
               const affected = Object.keys(drafts)
                 .map((name) => byName.get(name))
-                .filter(Boolean)
+                .filter((c): c is DiscoveredGrpcContract => !!c)
                 .filter((c) => c.servers.length || c.clients.length)
               return affected.length === 0 ? (
                 <p className="sim-desc">No services serve or call these contracts — changes will just be saved.</p>
@@ -541,7 +578,7 @@ export default function GrpcContractsModal({ systemId, onClose, onLaunch }) {
                     <input value={form.method} onChange={set('method')} placeholder="GetChunk" disabled={busy || !!editingMethod} />
                   </label>
 
-                  {['request', 'response'].map((key) => (
+                  {(['request', 'response'] as const).map((key) => (
                     <div className="form-section" key={key}>
                       <div className="form-section-head">
                         <span>{key} fields <em className="grpc-optional">(blank = empty message)</em></span>

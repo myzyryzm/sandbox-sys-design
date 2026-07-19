@@ -18,14 +18,45 @@ import { buildEndToEndRunPrompt } from './endToEndBank'
  * know when to halt. One run at a time per system.
  */
 
+import type { Manifest } from './types/manifest'
+import type {
+  EndToEndClientRow,
+  EndToEndProcess,
+  EndToEndRunState,
+  ScenarioFunction,
+} from './types/registries'
+import type { LaunchSession } from './types/customTypes'
+
 // A client function's display signature, e.g. "checkout(order_id: string)".
-function sig(fn) {
+function sig(fn: ScenarioFunction) {
   return `${fn.name}(${(fn.args || []).map((a) => `${a.name}: ${a.type}`).join(', ')})`
+}
+
+// Numeric fields hold the raw input text while editing (coerced on submit).
+interface FormClientRow {
+  client: string
+  method: string
+  requestsPerSecond: number | string
+  instances: number | string
+}
+
+interface FormWsRow {
+  client: string
+  clientCount: number | string
+  messagesPerSecond: number | string
+}
+
+interface ProcessForm {
+  name: string
+  client_list: FormClientRow[]
+  websocket_list: FormWsRow[]
+  failure_list: string[]
+  constraint_list: string[]
 }
 
 // Rows carry BOTH mode fields; the row renders (and submit keeps) only the one matching the
 // client's current stateful flag, so a mode flip mid-edit just re-renders the other input.
-function blankForm() {
+function blankForm(): ProcessForm {
   return {
     name: '',
     client_list: [{ client: '', method: '', requestsPerSecond: 1, instances: 1 }],
@@ -35,20 +66,31 @@ function blankForm() {
   }
 }
 
-export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch, onClose }) {
-  const [data, setData] = useState({ processes: [], run: { running: false } })
+interface EndToEndModalProps {
+  systemId: string
+  manifest?: Manifest | null
+  scenarios?: ScenarioFunction[] | null
+  onLaunch: LaunchSession
+  onClose: () => void
+}
+
+export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch, onClose }: EndToEndModalProps) {
+  const [data, setData] = useState<{ processes: EndToEndProcess[]; run: EndToEndRunState }>({
+    processes: [],
+    run: { running: false },
+  })
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
   // Define / edit form.
   const [adding, setAdding] = useState(false)
-  const [editingId, setEditingId] = useState(null)
-  const [form, setForm] = useState(blankForm)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [form, setForm] = useState<ProcessForm>(blankForm)
 
   // Per-row transient UI.
-  const [startingId, setStartingId] = useState(null) // the process showing its duration sub-form
-  const [duration, setDuration] = useState(30)
-  const [confirmDelete, setConfirmDelete] = useState(null)
+  const [startingId, setStartingId] = useState<string | null>(null) // the process showing its duration sub-form
+  const [duration, setDuration] = useState<number | string>(30)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
   const run = data.run || { running: false }
   const processes = data.processes || []
@@ -75,7 +117,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/endtoend?system=${encodeURIComponent(systemId)}`)
-      const d = await res.json()
+      const d = (await res.json()) as { ok?: boolean; processes?: EndToEndProcess[]; run?: EndToEndRunState }
       if (d.ok) setData({ processes: d.processes || [], run: d.run || { running: false } })
     } catch {
       /* keep the last good state */
@@ -92,22 +134,24 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
   // --- form helpers ---
   const addMethod = () =>
     setForm((f) => ({ ...f, client_list: [...f.client_list, { client: '', method: '', requestsPerSecond: 1, instances: 1 }] }))
-  const updateMethod = (i, patch) =>
+  const updateMethod = (i: number, patch: Partial<FormClientRow>) =>
     setForm((f) => ({ ...f, client_list: f.client_list.map((r, j) => (j === i ? { ...r, ...patch } : r)) }))
-  const removeMethod = (i) =>
+  const removeMethod = (i: number) =>
     setForm((f) => ({ ...f, client_list: f.client_list.filter((_, j) => j !== i) }))
 
   const addWsPool = () =>
     setForm((f) => ({ ...f, websocket_list: [...f.websocket_list, { client: wsClientOptions[0] || '', clientCount: 10, messagesPerSecond: 1 }] }))
-  const updateWsPool = (i, patch) =>
+  const updateWsPool = (i: number, patch: Partial<FormWsRow>) =>
     setForm((f) => ({ ...f, websocket_list: f.websocket_list.map((r, j) => (j === i ? { ...r, ...patch } : r)) }))
-  const removeWsPool = (i) =>
+  const removeWsPool = (i: number) =>
     setForm((f) => ({ ...f, websocket_list: f.websocket_list.filter((_, j) => j !== i) }))
 
-  const addCond = (key) => setForm((f) => ({ ...f, [key]: [...f[key], ''] }))
-  const updateCond = (key, i, val) =>
+  type CondKey = 'failure_list' | 'constraint_list'
+  const addCond = (key: CondKey) => setForm((f) => ({ ...f, [key]: [...f[key], ''] }))
+  const updateCond = (key: CondKey, i: number, val: string) =>
     setForm((f) => ({ ...f, [key]: f[key].map((s, j) => (j === i ? val : s)) }))
-  const removeCond = (key, i) => setForm((f) => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }))
+  const removeCond = (key: CondKey, i: number) =>
+    setForm((f) => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }))
 
   function startAdd() {
     setForm(blankForm())
@@ -115,7 +159,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
     setError(null)
     setAdding(true)
   }
-  function startEdit(p) {
+  function startEdit(p: EndToEndProcess) {
     setForm({
       name: p.name || '',
       // The GET normalizes rows to the new shape; the fallbacks only guard a stale poll.
@@ -123,10 +167,14 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
         client: r.client,
         method: r.method,
         requestsPerSecond:
-          r.requestsPerSecond ?? (r.intervalSeconds > 0 ? Math.round(100 / r.intervalSeconds) / 100 : 1),
+          r.requestsPerSecond ?? ((r.intervalSeconds ?? 0) > 0 ? Math.round(100 / r.intervalSeconds!) / 100 : 1),
         instances: r.instances ?? 1,
       })),
-      websocket_list: (p.websocket_list || []).map((r) => ({ ...r })),
+      websocket_list: (p.websocket_list || []).map((r) => ({
+        client: r.client,
+        clientCount: r.clientCount ?? 10,
+        messagesPerSecond: r.messagesPerSecond ?? 1,
+      })),
       failure_list: [...(p.failure_list || [])],
       constraint_list: [...(p.constraint_list || [])],
     })
@@ -146,7 +194,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
     const name = form.name.trim()
     if (!name) return setError('Process name is required')
 
-    const client_list = form.client_list
+    const client_list: EndToEndClientRow[] = form.client_list
       .filter((r) => r.client && r.method)
       .map((r) =>
         statefulClients.has(r.client)
@@ -168,7 +216,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
         if (!Number.isInteger(r.instances) || r.instances < 1 || r.instances > 20) {
           return setError(`Instances for ${r.client}.${r.method} must be a whole number between 1 and 20`)
         }
-      } else if (!Number.isFinite(r.requestsPerSecond) || r.requestsPerSecond < 0.01 || r.requestsPerSecond > 20) {
+      } else if (!Number.isFinite(r.requestsPerSecond) || r.requestsPerSecond! < 0.01 || r.requestsPerSecond! > 20) {
         return setError(`Rate for ${r.client}.${r.method} must be between 0.01 and 20 requests per second`)
       }
     }
@@ -198,18 +246,18 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
           constraint_list,
         }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       cancelForm()
       await load()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  async function removeProcess(p) {
+  async function removeProcess(p: EndToEndProcess) {
     setBusy(true)
     setError(null)
     try {
@@ -218,18 +266,18 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: p.id }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       setConfirmDelete(null)
       await load()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  async function startProcess(p) {
+  async function startProcess(p: EndToEndProcess) {
     const n = Number(duration)
     if (!Number.isInteger(n) || n < 1 || n > 600) {
       return setError('Choose a whole number of seconds between 1 and 600')
@@ -243,7 +291,7 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: p.id, duration_seconds: n }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       onLaunch(
         {
@@ -263,11 +311,11 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
       onClose() // reveal the terminal running the process (same as the other launch flows)
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
-  async function stopProcess(p) {
+  async function stopProcess(p: EndToEndProcess) {
     setBusy(true)
     setError(null)
     try {
@@ -276,11 +324,11 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: p.id }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       await load()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -325,9 +373,9 @@ export default function EndToEndModal({ systemId, manifest, scenarios, onLaunch,
                   </span>
                   <span className="scenario-stepcount">
                     {(p.client_list || []).length} method{(p.client_list || []).length === 1 ? '' : 's'}
-                    {(p.websocket_list || []).length ? ` · ${p.websocket_list.length} ws pool${p.websocket_list.length === 1 ? '' : 's'}` : ''}
-                    {(p.failure_list || []).length ? ` · ${p.failure_list.length} fail` : ''}
-                    {(p.constraint_list || []).length ? ` · ${p.constraint_list.length} constraint` : ''}
+                    {p.websocket_list?.length ? ` · ${p.websocket_list.length} ws pool${p.websocket_list.length === 1 ? '' : 's'}` : ''}
+                    {p.failure_list?.length ? ` · ${p.failure_list.length} fail` : ''}
+                    {p.constraint_list?.length ? ` · ${p.constraint_list.length} constraint` : ''}
                   </span>
 
                   {isThis ? (

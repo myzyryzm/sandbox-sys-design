@@ -11,7 +11,25 @@
  *   onNext()                 skip the 10s hold and start the next edit now
  *   onClose()                hide the panel
  */
-export default function EditQueuePanel({ items, countdown, onRemove, onNext, onClose }) {
+import type { SessionMeta } from './types/customTypes'
+
+export interface EditQueueItem {
+  id: string
+  sessionId?: string
+  prompt?: string
+  meta?: SessionMeta
+  status: 'pending' | 'running' | 'done'
+}
+
+interface EditQueuePanelProps {
+  items: EditQueueItem[]
+  countdown: number | null
+  onRemove: (id: string) => void
+  onNext: () => void
+  onClose: () => void
+}
+
+export default function EditQueuePanel({ items, countdown, onRemove, onNext, onClose }: EditQueuePanelProps) {
   const pendingCount = items.filter((it) => it.status === 'pending').length
 
   return (

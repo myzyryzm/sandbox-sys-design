@@ -2,6 +2,18 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   REDIS_BADGE, REDIS_KS_TYPES, REDIS_KS_RE, REDIS_SHORTHAND_RE, redisTypesCompatible,
 } from './redisKeyspaceMeta'
+import type { Manifest, ManifestNode, RedisKeyspace, RedisWriteMode } from './types/manifest'
+
+// POST /api/redis/scan report (live SCAN + TYPE + source grep).
+interface RedisScanReport {
+  scannedKeys: number
+  matched: Array<{ name: string; keyCount: number; observedType?: string; mismatch?: boolean }>
+  unseen: string[]
+  added: Array<{ name: string; type?: string; keyCount?: number }>
+  suggestions: Array<{ name: string; suggestedWriters: string[]; suggestedReaders: string[] }>
+  waitChecks?: Array<{ name: string; writer: string; implemented?: boolean }>
+  notes: string[]
+}
 
 /**
  * A redis node's "Keyspaces" tab (embedded in NodeEditModal, for EVERY type:"redis"
@@ -26,27 +38,36 @@ import {
  *     WAIT call and badges each wait writer implemented / not implemented.
  */
 
-export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, embedded = false, onBusyChange }) {
+interface RedisKeyspacesTabProps {
+  systemId: string
+  node: ManifestNode
+  manifest?: Manifest | null
+  onClose: () => void
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, embedded = false, onBusyChange }: RedisKeyspacesTabProps) {
   const redisId = node.id
-  const [keyspaces, setKeyspaces] = useState(null)
-  const [error, setError] = useState(null)
+  const [keyspaces, setKeyspaces] = useState<RedisKeyspace[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [scanning, setScanning] = useState(false)
-  const [report, setReport] = useState(null)
+  const [report, setReport] = useState<RedisScanReport | null>(null)
 
   // Add/edit form. `editing` is the entry's current name (the upsert's prevName).
   const [formOpen, setFormOpen] = useState(false)
-  const [editing, setEditing] = useState(null)
+  const [editing, setEditing] = useState<string | null>(null)
   const [fName, setFName] = useState('')
   const [fMatch, setFMatch] = useState('prefix')
   const [fType, setFType] = useState('string')
   const [fShorthand, setFShorthand] = useState('')
 
   // Per-keyspace "add a writer/reader" picks: `${name}:writer` -> service id.
-  const [rolePick, setRolePick] = useState({})
-  const [confirmKey, setConfirmKey] = useState(null) // keyspace name pending delete
+  const [rolePick, setRolePick] = useState<Record<string, string>>({})
+  const [confirmKey, setConfirmKey] = useState<string | null>(null) // keyspace name pending delete
   // In-progress WAIT param edits, keyed `${ks.name}:${writer}` (committed on blur).
-  const [waitEdit, setWaitEdit] = useState({})
+  const [waitEdit, setWaitEdit] = useState<Record<string, { numreplicas?: string | number; timeoutMs?: string | number }>>({})
 
   useEffect(() => onBusyChange?.(busy || scanning), [busy, scanning, onBusyChange])
 
@@ -55,7 +76,7 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
   const eligible = (manifest?.nodes || [])
     .filter((n) => (n.type === 'service' && !n.instanceOf) || n.type === 'service-lb' || n.type === 'websocket-server')
     .map((n) => n.id)
-  const nodeExists = (id) => (manifest?.nodes || []).some((n) => n.id === id)
+  const nodeExists = (id: string) => (manifest?.nodes || []).some((n) => n.id === id)
 
   // How many replicas could acknowledge a WAIT: the replicaOf secondaries in
   // replicated mode, or replicas-per-shard in cluster mode (WAIT on a shard master
@@ -69,11 +90,11 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
       const res = await fetch(
         `/api/redis/keyspaces?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(redisId)}`,
       )
-      const data = await res.json()
+      const data = (await res.json()) as { ok?: boolean; error?: string; keyspaces?: RedisKeyspace[] }
       if (!data.ok) throw new Error(data.error || 'failed to load')
       setKeyspaces(data.keyspaces || [])
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }, [systemId, redisId])
 
@@ -87,7 +108,7 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
     return <p className="sim-desc">{error ? `Error: ${error}` : 'Loading…'}</p>
   }
 
-  async function call(method, path, body) {
+  async function call(method: string, path: string, body: Record<string, unknown>) {
     setBusy(true)
     setError(null)
     try {
@@ -96,12 +117,12 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       await load()
       return data
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       return null
     } finally {
       setBusy(false)
@@ -118,11 +139,11 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
     setFormOpen(true)
   }
 
-  function startEdit(ks) {
+  function startEdit(ks: RedisKeyspace) {
     setEditing(ks.name)
     setFName(ks.name)
-    setFMatch(ks.match)
-    setFType(ks.type)
+    setFMatch(ks.match || 'prefix')
+    setFType(ks.type || 'string')
     setFShorthand(ks.shorthand || '')
     setError(null)
     setFormOpen(true)
@@ -133,14 +154,14 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
     if (!REDIS_KS_RE.test(name)) {
       return 'Name: 1-128 chars of letters, digits, _ . : - (start with a letter or digit)'
     }
-    if (keyspaces.some((k) => k.name === name && k.name !== editing)) {
+    if (keyspaces!.some((k) => k.name === name && k.name !== editing)) {
       return `A keyspace named "${name}" already exists`
     }
     const sh = fShorthand.trim()
     if (sh && !REDIS_SHORTHAND_RE.test(sh)) {
       return 'Shorthand: 1-32 chars of letters, digits, _ - (start with a letter)'
     }
-    if (sh && keyspaces.some((k) => k.shorthand === sh && k.name !== editing)) {
+    if (sh && keyspaces!.some((k) => k.shorthand === sh && k.name !== editing)) {
       return `Shorthand "${sh}" is already used`
     }
     return null
@@ -149,7 +170,7 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
   async function submitForm() {
     const err = formError()
     if (err) return setError(err)
-    const prev = editing ? keyspaces.find((k) => k.name === editing) : null
+    const prev = editing ? keyspaces!.find((k) => k.name === editing) : null
     const data = await call('POST', '/api/redis/keyspace', {
       system: systemId,
       id: redisId,
@@ -170,7 +191,7 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
   // Add/remove a declared writer/reader: re-upsert the entry with the role list
   // changed (the backend preserves verified/origin/suggestions on edit, and drops
   // writeModes keys whose writer is no longer declared).
-  async function setRole(ks, role, ids) {
+  async function setRole(ks: RedisKeyspace, role: 'writers' | 'readers', ids: string[]) {
     await call('POST', '/api/redis/keyspace', {
       system: systemId,
       id: redisId,
@@ -189,7 +210,7 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
 
   // Set one writer's write mode: `wm` is { mode:'wait', numreplicas, timeoutMs } or
   // null for async (the unstored default) — a full-map re-upsert like setRole.
-  async function setWriteMode(ks, svc, wm) {
+  async function setWriteMode(ks: RedisKeyspace, svc: string, wm: RedisWriteMode | null) {
     const writeModes = { ...(ks.writeModes || {}) }
     if (wm) writeModes[svc] = wm
     else delete writeModes[svc]
@@ -210,7 +231,7 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
   }
 
   // Commit an in-progress WAIT param edit (on blur): only POSTs a valid change.
-  function commitWaitEdit(ks, svc, wm) {
+  function commitWaitEdit(ks: RedisKeyspace, svc: string, wm: RedisWriteMode) {
     const editKey = `${ks.name}:${svc}`
     const draft = waitEdit[editKey]
     if (!draft) return
@@ -237,19 +258,24 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: redisId }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean
+        error?: string
+        report?: RedisScanReport
+        keyspaces?: RedisKeyspace[]
+      }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      setReport(data.report)
+      setReport(data.report || null)
       setKeyspaces(data.keyspaces || [])
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setScanning(false)
     }
   }
 
   // One declared writer/reader list + its suggestions + the add-dropdown.
-  function roleRows(ks, role) {
+  function roleRows(ks: RedisKeyspace, role: 'writers' | 'readers') {
     const singular = role === 'writers' ? 'writer' : 'reader'
     const suggestedKey = role === 'writers' ? 'suggestedWriters' : 'suggestedReaders'
     const declared = ks[role] || []
@@ -380,7 +406,7 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
               onClick={() => {
                 const svc = rolePick[pickKey]
                 setRolePick((p) => ({ ...p, [pickKey]: '' }))
-                setRole(ks, role, [...declared, svc])
+                if (svc) setRole(ks, role, [...declared, svc])
               }}
             >
               Add {singular}
@@ -458,7 +484,7 @@ export default function RedisKeyspacesTab({ systemId, node, manifest, onClose, e
             <div className="form-section" key={ks.name}>
               <div className="form-section-head">
                 <span>
-                  <span className="endpoint-list-method endpoint-list-method-redis">{REDIS_BADGE[ks.type]}</span>{' '}
+                  <span className="endpoint-list-method endpoint-list-method-redis">{REDIS_BADGE[ks.type ?? '']}</span>{' '}
                   <code>{ks.name}{ks.match === 'prefix' ? '*' : ''}</code>
                   {ks.shorthand && <code className="endpoint-alias" title="Shorthand — what the diagram row displays and services reference"> {ks.shorthand}</code>}
                   {ks.verified === false && (

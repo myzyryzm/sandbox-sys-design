@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 import { CDC_OPS as OPS } from './cdcMeta'
+import type { Manifest, ManifestNode } from './types/manifest'
+import type { CdcRule } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * Per-database "CDC" (Change Data Capture) tab. Manages a flat list of rules — each
@@ -19,10 +22,16 @@ const NEW_TOPIC = '__new__'
 // Prompt for the spawned session that authors + builds the CDC worker. The mechanical
 // scaffold (cdc.json, engine enablement, compose service, scrape job, manifest, producer
 // registration) is already done by the backend — this only asks for the worker code.
-function buildCdcPrompt({ systemId, dbId, engine, dbNameStr, rules }) {
+function buildCdcPrompt({ systemId, dbId, engine, dbNameStr, rules }: {
+  systemId: string
+  dbId: string
+  engine: string
+  dbNameStr: string
+  rules: CdcRule[]
+}): string {
   const wid = `${dbId}-cdc`
   const ruleLines = rules
-    .map((r) => `  - table "${r.table}" — ${r.operations.join(', ')} -> stream "${r.stream}", topic "${r.topic}"`)
+    .map((r) => `  - table "${r.table}" — ${r.operations!.join(', ')} -> stream "${r.stream}", topic "${r.topic}"`)
     .join('\n')
   return [
     `Use the sandbox-database-cdc skill to build the CDC worker for database "${dbId}" in system "${systemId}".`,
@@ -33,12 +42,12 @@ function buildCdcPrompt({ systemId, dbId, engine, dbNameStr, rules }) {
     '',
     'The backend has ALREADY done the mechanical scaffold — DO NOT redo any of it:',
     `  • wrote systems/${systemId}/${dbId}/cdc.json (the rules below, mounted into the worker at /cdc.json:ro)`,
-    {
+    ({
       postgres: `  • set wal_level=logical on ${dbId} and recreated it`,
       mongodb: `  • converted ${dbId} to single-node replica set rs0 and initiated it`,
       dynamodb: `  • ${dbId}'s tables already have DynamoDB Streams enabled (NEW_AND_OLD_IMAGES) — tail them via boto3 dynamodbstreams`,
       cassandra: `  • left ${dbId} unchanged — use POLLING capture (no commitlog CDC): periodically query each table and emit new/changed rows`,
-    }[engine],
+    } as Record<string, string>)[engine],
     `  • added the ${wid} compose service (build ./${wid}), its prometheus scrape job (job ${wid}, target ${wid}:8000),`,
     `    the manifest node + edges (${dbId} → ${wid} → each stream), and registered ${wid} as a producer in streams.json`,
     '',
@@ -57,19 +66,51 @@ function buildCdcPrompt({ systemId, dbId, engine, dbNameStr, rules }) {
   ].join('\n')
 }
 
-export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
-  const [state, setState] = useState({ status: 'loading' })
-  const [rules, setRules] = useState([])
-  const [entities, setEntities] = useState([])
-  const [streams, setStreams] = useState([])
+// Live-introspected shapes of GET /api/db-cdc.
+interface CdcEntity {
+  name: string
+}
+
+interface CdcStreamOption {
+  id: string
+  topics?: string[]
+}
+
+type CdcState =
+  | { status: 'loading' }
+  | { status: 'error'; error?: string }
+  | { status: 'ok' }
+
+interface CdcPostResponse {
+  ok?: boolean
+  error?: string
+  rules?: CdcRule[]
+  needsWorker?: boolean
+}
+
+interface DbCdcProps {
+  systemId: string
+  node: ManifestNode
+  manifest: Manifest
+  onClose: () => void
+  onLaunch?: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }: DbCdcProps) {
+  const [state, setState] = useState<CdcState>({ status: 'loading' })
+  const [rules, setRules] = useState<CdcRule[]>([])
+  const [entities, setEntities] = useState<CdcEntity[]>([])
+  const [streams, setStreams] = useState<CdcStreamOption[]>([])
   // New-rule form.
   const [table, setTable] = useState('')
-  const [ops, setOps] = useState(() => new Set(OPS))
+  const [ops, setOps] = useState<Set<string>>(() => new Set(OPS))
   const [stream, setStream] = useState('')
   const [topicSel, setTopicSel] = useState(NEW_TOPIC)
   const [newTopic, setNewTopic] = useState('')
-  const [busy, setBusy] = useState(null)
-  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   const engine = node.type
 
@@ -79,7 +120,7 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
     let cancelled = false
     setState({ status: 'loading' })
     fetch(`/api/db-cdc?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(node.id)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ ok?: boolean; error?: string; entities?: CdcEntity[]; streams?: CdcStreamOption[]; rules?: CdcRule[] }>)
       .then((d) => {
         if (cancelled) return
         if (!d.ok) return setState({ status: 'error', error: d.error })
@@ -92,7 +133,7 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
         setStream((s) => s || strs[0]?.id || '')
         setState({ status: 'ok' })
       })
-      .catch((err) => !cancelled && setState({ status: 'error', error: err.message }))
+      .catch((err: Error) => !cancelled && setState({ status: 'error', error: err.message }))
     return () => {
       cancelled = true
     }
@@ -108,14 +149,14 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stream])
 
-  const toggleOp = (op) =>
+  const toggleOp = (op: string) =>
     setOps((s) => {
       const next = new Set(s)
       next.has(op) ? next.delete(op) : next.add(op)
       return next
     })
 
-  async function post(url, body, key, after) {
+  async function post(url: string, body: unknown, key: string, after?: (data: CdcPostResponse) => void) {
     setBusy(key)
     setError(null)
     try {
@@ -124,13 +165,13 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as CdcPostResponse
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       if (Array.isArray(data.rules)) setRules(data.rules)
       after?.(data)
       return data
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
       return null
     } finally {
       setBusy(null)
@@ -138,7 +179,7 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
   }
 
   // Launch the worker-authoring session (first rule) or just refresh the list.
-  function applyAddResult(data) {
+  function applyAddResult(data: CdcPostResponse) {
     if (data?.needsWorker) {
       onLaunch?.({
         sessionId: crypto.randomUUID(),
@@ -171,9 +212,9 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
   }
 
   // Toggle an operation on an existing rule (pure registry edit + worker restart).
-  function toggleRuleOp(rule, op) {
-    const has = rule.operations.includes(op)
-    const operations = OPS.filter((o) => (o === op ? !has : rule.operations.includes(o)))
+  function toggleRuleOp(rule: CdcRule, op: string) {
+    const has = rule.operations!.includes(op)
+    const operations = OPS.filter((o) => (o === op ? !has : rule.operations!.includes(o)))
     if (!operations.length) return setError('A rule needs at least one operation — remove it instead.')
     post(
       '/api/db-cdc',
@@ -182,7 +223,7 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
     )
   }
 
-  const removeRule = (rule) =>
+  const removeRule = (rule: CdcRule) =>
     post(
       '/api/db-cdc-remove',
       { system: systemId, id: node.id, table: rule.table, stream: rule.stream, topic: rule.topic },
@@ -337,7 +378,7 @@ export default function DbCdc({ systemId, node, manifest, onClose, onLaunch, emb
                           <label key={op} className="cdc-op">
                             <input
                               type="checkbox"
-                              checked={r.operations.includes(op)}
+                              checked={r.operations!.includes(op)}
                               onChange={() => toggleRuleOp(r, op)}
                               disabled={!!busy}
                             />

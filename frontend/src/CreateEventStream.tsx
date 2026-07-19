@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type FormEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
@@ -11,37 +11,48 @@ import { nodeNameError, NODE_NAME_HINT } from './nodeName'
  * event-stream engines are added.
  */
 
-const TYPE_META = {
+const TYPE_META: Record<string, { label: string; defaultName: string }> = {
   kafka: { label: 'Kafka', defaultName: 'events' },
 }
 
-export default function CreateEventStream({ systemId, onClose }) {
+// The partitions field holds the raw input text while editing (coerced on submit).
+interface TopicRow {
+  id: string
+  partitions: number | string
+}
+
+interface CreateEventStreamProps {
+  systemId: string
+  onClose: () => void
+}
+
+export default function CreateEventStream({ systemId, onClose }: CreateEventStreamProps) {
   const [type, setType] = useState('kafka')
   const [name, setName] = useState(TYPE_META.kafka.defaultName)
-  const [topics, setTopics] = useState([{ id: '', partitions: 1 }])
-  const [status, setStatus] = useState('idle') // idle | submitting | error
-  const [error, setError] = useState(null)
+  const [topics, setTopics] = useState<TopicRow[]>([{ id: '', partitions: 1 }])
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
 
   const busy = status === 'submitting'
   const nameErr = nodeNameError(name)
 
-  function changeType(next) {
+  function changeType(next: string) {
     setType(next)
     setName(TYPE_META[next].defaultName)
     setError(null)
   }
 
-  function updateTopic(i, patch) {
+  function updateTopic(i: number, patch: Partial<TopicRow>) {
     setTopics((ts) => ts.map((t, j) => (j === i ? { ...t, ...patch } : t)))
   }
   function addTopic() {
     setTopics((ts) => [...ts, { id: '', partitions: 1 }])
   }
-  function removeTopic(i) {
+  function removeTopic(i: number) {
     setTopics((ts) => ts.filter((_, j) => j !== i))
   }
 
-  async function submit(e) {
+  async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setStatus('submitting')
     setError(null)
@@ -54,12 +65,12 @@ export default function CreateEventStream({ systemId, onClose }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, type, name: name.trim(), topics: payloadTopics }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
       setStatus('error')
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 

@@ -30,15 +30,48 @@ import {
  * delete drives a strip-the-code session when the loop was implemented.
  */
 
+import type { Manifest, ManifestNode } from './types/manifest'
+import type { EtcdKeyspace, EtcdListener } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
+
+// A keyspace as GET /api/etcd serves it: the registry entry plus (when live=1)
+// the real cluster's key listing — worker keys for discovery, values for config.
+type LiveKeyspace = EtcdKeyspace & { workers?: Array<{ id: string; value: string }> | null }
+
+interface EtcdInfoResponse {
+  ok?: boolean
+  error?: string
+  cluster?: { leaseTtlSeconds?: number }
+  keyspaces?: LiveKeyspace[]
+}
+
 // Mirrors the server's identity rule (frontend/server/etcd.js ksIdentity):
 // discovery keyspaces are keyed by their service, config keyspaces by their name.
-const ksId = (k) => (k.type === 'config' ? k.name : k.service)
+const ksId = (k: EtcdKeyspace): string => (k.type === 'config' ? k.name : k.service)
 // Mirrors KEY_RE in frontend/server/etcd.js — friendly pre-check only.
 const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
 
 // Prompt seeding the launched session that implements (or updates) a service's
 // REGISTRATION loop. The repeatable procedure lives in the sandbox-etcd skill.
-function buildRegistrationPrompt({ systemId, etcdId, service, prefix, leaseTtlSeconds, description, editing, priorDescription }) {
+function buildRegistrationPrompt({
+  systemId,
+  etcdId,
+  service,
+  prefix,
+  leaseTtlSeconds,
+  description,
+  editing,
+  priorDescription,
+}: {
+  systemId: string
+  etcdId: string
+  service: string
+  prefix: string
+  leaseTtlSeconds?: number
+  description?: string | null
+  editing?: boolean
+  priorDescription?: string | null
+}): string {
   const lines = [
     `Use the sandbox-etcd skill to ${editing ? 'UPDATE' : 'IMPLEMENT'} etcd REGISTRATION for service "${service}" in the "${systemId}" system.`,
     '',
@@ -76,7 +109,17 @@ function buildRegistrationPrompt({ systemId, etcdId, service, prefix, leaseTtlSe
 }
 
 // Deletes: registry + compose scrub already done by the DELETE; the session strips the code.
-function buildRegistrationDeletePrompt({ systemId, etcdId, service, prefix }) {
+function buildRegistrationDeletePrompt({
+  systemId,
+  etcdId,
+  service,
+  prefix,
+}: {
+  systemId: string
+  etcdId: string
+  service: string
+  prefix: string
+}): string {
   return [
     `Use the sandbox-etcd skill to DELETE the etcd registration of service "${service}" in the`,
     `"${systemId}" system (it registered workers under ${prefix} on cluster "${etcdId}").`,
@@ -89,10 +132,20 @@ function buildRegistrationDeletePrompt({ systemId, etcdId, service, prefix }) {
   ].join('\n')
 }
 
-export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
+interface EtcdKeyspacesTabProps {
+  systemId: string
+  node: ManifestNode
+  manifest?: Manifest | null
+  onClose: () => void
+  onLaunch: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }: EtcdKeyspacesTabProps) {
   const etcdId = node.id
-  const [info, setInfo] = useState(null) // GET /api/etcd response; keyspaces carry workers when live
-  const [error, setError] = useState(null)
+  const [info, setInfo] = useState<EtcdInfoResponse | null>(null) // GET /api/etcd response; keyspaces carry workers when live
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   // Add-keyspace form.
@@ -101,13 +154,13 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
   const [regService, setRegService] = useState('')
   const [regName, setRegName] = useState('')
   const [regDescription, setRegDescription] = useState('')
-  const [seedRows, setSeedRows] = useState([]) // config seed values: [{ key, value }]
+  const [seedRows, setSeedRows] = useState<Array<{ key: string; value: string }>>([]) // config seed values
   // Per-keyspace "add listener" picker: keyspace identity -> selected listener service.
-  const [listenerPick, setListenerPick] = useState({})
-  const [confirmKey, setConfirmKey] = useState(null) // 'ks:<identity>' | 'ln:<identity>:<svc>' pending delete
+  const [listenerPick, setListenerPick] = useState<Record<string, string>>({})
+  const [confirmKey, setConfirmKey] = useState<string | null>(null) // 'ks:<identity>' | 'ln:<identity>:<svc>' pending delete
   // Config value editor: '<keyspace>:<key>' -> draft value; per-keyspace add-row.
-  const [valDrafts, setValDrafts] = useState({})
-  const [newKV, setNewKV] = useState({})
+  const [valDrafts, setValDrafts] = useState<Record<string, string>>({})
+  const [newKV, setNewKV] = useState<Record<string, { key: string; value: string }>>({})
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
@@ -116,24 +169,26 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
     .filter((n) => (n.type === 'service' && !n.instanceOf) || n.type === 'service-lb')
     .map((n) => n.id)
 
-  const load = useCallback(async (live) => {
+  const load = useCallback(async (live: boolean) => {
     try {
       const res = await fetch(
         `/api/etcd?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(etcdId)}&live=${live ? 1 : 0}`,
       )
-      const data = await res.json()
+      const data = (await res.json()) as EtcdInfoResponse
       if (!data.ok) throw new Error(data.error || 'failed to load')
       // Keep the last live worker listing while a registry-only refresh paints.
       setInfo((prev) => {
         if (live || !prev) return data
-        const prevWorkers = Object.fromEntries((prev.keyspaces || []).map((k) => [ksId(k), k.workers]))
+        const prevWorkers: Record<string, LiveKeyspace['workers']> = Object.fromEntries(
+          (prev.keyspaces || []).map((k) => [ksId(k), k.workers]),
+        )
         return {
           ...data,
           keyspaces: (data.keyspaces || []).map((k) => ({ ...k, workers: k.workers ?? prevWorkers[ksId(k)] ?? null })),
         }
       })
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }, [systemId, etcdId])
 
@@ -167,7 +222,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
     setAdding(true)
   }
 
-  function changeType(next) {
+  function changeType(next: string) {
     setRegType(next)
     setRegService(next === 'discovery' ? registrable[0] || '' : '')
     setRegName('')
@@ -203,12 +258,12 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
             values: values.map((r) => ({ key: r.key.trim(), value: r.value })),
           }),
         })
-        const data = await res.json().catch(() => ({}))
+        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
         if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
         setAdding(false)
         await load(true)
       } catch (err) {
-        setError(err.message)
+        setError(err instanceof Error ? err.message : String(err))
       } finally {
         setBusy(false)
       }
@@ -225,7 +280,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: etcdId, service: regService, description: regDescription, conversationId }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; keyspace?: EtcdKeyspace }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onLaunch({
         sessionId: conversationId,
@@ -233,21 +288,21 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
         prompt: buildRegistrationPrompt({
           systemId, etcdId,
           service: regService,
-          prefix: data.keyspace.prefix,
+          prefix: data.keyspace!.prefix,
           leaseTtlSeconds,
-          description: data.keyspace.description,
+          description: data.keyspace!.description,
           editing: false,
         }),
       }, { kind: 'etcd', target: regService, title: `register ${regService}` })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
 
   // Add a listener to a keyspace and launch the watch-loop session.
-  async function addListener(ks) {
+  async function addListener(ks: LiveKeyspace) {
     const listener = listenerPick[ksId(ks)]
     if (!listener) return
     const conversationId = crypto.randomUUID()
@@ -259,7 +314,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: etcdId, keyspace: ksId(ks), service: listener, conversationId }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; listener?: EtcdListener }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onLaunch({
         sessionId: conversationId,
@@ -270,7 +325,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
               keyspaceName: ks.name,
               listener,
               prefix: ks.prefix,
-              description: data.listener.description,
+              description: data.listener!.description,
               editing: false,
             })
           : buildListenerPrompt({
@@ -278,18 +333,18 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
               keyspaceService: ks.service,
               listener,
               prefix: ks.prefix,
-              description: data.listener.description,
+              description: data.listener!.description,
               editing: false,
             }),
       }, { kind: 'etcd', target: listener, title: `listen ${ks.prefix}` })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
 
-  async function removeKeyspace(ks) {
+  async function removeKeyspace(ks: LiveKeyspace) {
     setBusy(true)
     setError(null)
     try {
@@ -300,27 +355,27 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
           ? { system: systemId, id: etcdId, name: ks.name }
           : { system: systemId, id: etcdId, service: ks.service }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; wasImplemented?: boolean }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setConfirmKey(null)
       if (data.wasImplemented) {
         onLaunch({
           sessionId: crypto.randomUUID(),
           mode: 'new',
-          prompt: buildRegistrationDeletePrompt({ systemId, etcdId, service: ks.service, prefix: ks.prefix }),
+          prompt: buildRegistrationDeletePrompt({ systemId, etcdId, service: ks.service!, prefix: ks.prefix }),
         }, { kind: 'etcd', target: ks.service, title: `unregister ${ks.service}` })
         onClose()
         return
       }
       await load(true)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  async function removeListener(ks, l) {
+  async function removeListener(ks: LiveKeyspace, l: EtcdListener) {
     setBusy(true)
     setError(null)
     try {
@@ -329,7 +384,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: etcdId, keyspace: ksId(ks), service: l.service }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; wasImplemented?: boolean }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setConfirmKey(null)
       if (data.wasImplemented) {
@@ -345,13 +400,13 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
       }
       await load(true)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  function resume(conversationId) {
+  function resume(conversationId?: string | null) {
     if (!conversationId) return
     onLaunch({ sessionId: conversationId, mode: 'resume', prompt: '' })
     onClose()
@@ -359,7 +414,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
 
   // Config keyspace key/values. The backend writes etcd FIRST (watchers get the
   // change pushed), then the registry copy — so a thrown error means nothing moved.
-  async function saveKeyValue(ks, key, value) {
+  async function saveKeyValue(ks: LiveKeyspace, key: string, value: string) {
     setBusy(true)
     setError(null)
     try {
@@ -368,23 +423,23 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: etcdId, keyspace: ks.name, key, value }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setValDrafts((d) => {
         const next = { ...d }
         delete next[`${ks.name}:${key}`]
         return next
       })
-      setNewKV((p) => ({ ...p, [ks.name]: { key: '', value: '' } }))
+      setNewKV((p) => ({ ...p, [ks.name!]: { key: '', value: '' } }))
       await load(true)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  async function removeKeyValue(ks, key) {
+  async function removeKeyValue(ks: LiveKeyspace, key: string) {
     setBusy(true)
     setError(null)
     try {
@@ -393,11 +448,11 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: etcdId, keyspace: ks.name, key }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       await load(true)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -509,7 +564,7 @@ export default function EtcdKeyspacesTab({ systemId, node, manifest, onClose, on
                     </button>
                   </div>
                 </>
-              ) : ks.workers === null ? (
+              ) : ks.workers == null ? (
                 /* Live workers (host:port), straight from the real cluster. */
                 <small className="form-hint">Probing live workers…</small>
               ) : ks.workers.length === 0 ? (

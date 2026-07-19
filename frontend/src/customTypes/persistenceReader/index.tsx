@@ -7,6 +7,7 @@
 // add-service modal — the backend type is `hidden`. The reader→stream and reader→db
 // edges are STATIC in the manifest (written by onAdd), so no diagramEdges hook; the
 // default service card + metric rows (persisted / active) cover the diagram body.
+import type { CustomTypeModule } from '../../types/customTypes'
 import ReadersTab from './ReadersTab'
 
 export default {
@@ -39,4 +40,4 @@ export default {
     }
     return null
   },
-}
+} satisfies CustomTypeModule

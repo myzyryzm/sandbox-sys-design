@@ -11,12 +11,29 @@
 //      and sets implemented:true in hook.json. Resume reopens that session.
 // Worker count (manual + autoscaling policy) lives on the Scaling tab.
 import { useEffect, useState } from 'react'
+import type { EditTabProps } from '../../types/customTypes'
+import type { LlmWorkerState } from './DiagramBody'
 
-const STATE_URL = (sys) => `/api/custom/llm-worker/state?system=${encodeURIComponent(sys)}`
+const STATE_URL = (sys: string) => `/api/custom/llm-worker/state?system=${encodeURIComponent(sys)}`
+
+// The tunables form; number inputs hold the raw string while the user types,
+// Number()-ed on save.
+interface TunablesForm {
+  ttl_seconds: number
+  max_active: number | string
+  chat_db: string
+}
 
 // Prompt seeding the launched session. The repeatable procedure lives in the
 // sandbox-llm-worker skill, so this stays short.
-function buildHookPrompt({ systemId, worker, description, editing, priorDescription, instances = [] }) {
+function buildHookPrompt({ systemId, worker, description, editing, priorDescription, instances = [] }: {
+  systemId: string
+  worker: string
+  description: string
+  editing: boolean
+  priorDescription?: string
+  instances?: string[]
+}): string {
   // Every replica bind-mounts the BASE worker's hooks.py, so a restart must cover the
   // whole group (base + instances) or the instances keep the old hook.
   const group = [worker, ...instances]
@@ -51,12 +68,12 @@ function buildHookPrompt({ systemId, worker, description, editing, priorDescript
   return lines.join('\n')
 }
 
-export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch, onBusyChange }) {
-  const [state, setState] = useState(null) // { live, config, hook } for THIS node
-  const [form, setForm] = useState(null) // tunables form; seeded once from the registry
+export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch, onBusyChange }: EditTabProps) {
+  const [state, setState] = useState<LlmWorkerState | null>(null) // { live, config, hook } for THIS node
+  const [form, setForm] = useState<TunablesForm | null>(null) // tunables form; seeded once from the registry
   const [hookText, setHookText] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState(0)
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
@@ -67,15 +84,15 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
     const tick = async () => {
       try {
         const res = await fetch(STATE_URL(systemId))
-        const data = await res.json()
+        const data = (await res.json()) as { ok: boolean; nodes: Record<string, LlmWorkerState> }
         if (cancelled || !data.ok) return
         const s = data.nodes[node.id] || null
         setState(s)
         if (s?.config) {
           setForm((f) => f || {
-            ttl_seconds: s.config.ttl_seconds ?? 30,
-            max_active: s.config.max_active ?? 5,
-            chat_db: s.config.chat_db ?? '',
+            ttl_seconds: s.config!.ttl_seconds ?? 30,
+            max_active: s.config!.max_active ?? 5,
+            chat_db: s.config!.chat_db ?? '',
           })
         }
       } catch {
@@ -107,11 +124,11 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
           chat_db: form.chat_db || null,
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setSavedAt(Date.now())
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -130,11 +147,12 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, node: node.id, description, conversationId }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
       // 2. Launch the authoring session (queued; runs in the one terminal).
-      onLaunch({
+      // NodeEditModal always passes onLaunch (App wires it to enqueueSession).
+      onLaunch!({
         sessionId: conversationId,
         mode: 'new',
         prompt: buildHookPrompt({
@@ -148,7 +166,7 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
       }, { kind: 'llm-worker', target: node.id, title: 'on_cache_evict' })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
       setBusy(false)
     }
   }
@@ -284,7 +302,7 @@ export default function WorkerTab({ systemId, node, manifest, onClose, onLaunch,
           {hook?.conversationId ? (
             <button
               type="button"
-              onClick={() => onLaunch({ sessionId: hook.conversationId, mode: 'resume', prompt: '' })}
+              onClick={() => onLaunch!({ sessionId: hook.conversationId!, mode: 'resume', prompt: '' })}
               disabled={busy}
             >
               Resume session

@@ -1,5 +1,10 @@
-import { useState } from 'react'
+import { useState, type FormEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'
+
+interface CreateExternalServiceProps {
+  systemId: string
+  onClose: () => void
+}
 
 /**
  * Modal for "Add external service". Creates a real FastAPI container (the same
@@ -9,15 +14,15 @@ import { nodeNameError, NODE_NAME_HINT } from './nodeName'
  * a third-party API that in-system services call out to — you can add HTTP endpoints
  * to it and wrap calls to it in a circuit breaker.
  */
-export default function CreateExternalService({ systemId, onClose }) {
+export default function CreateExternalService({ systemId, onClose }: CreateExternalServiceProps) {
   const [name, setName] = useState('payments-api')
-  const [status, setStatus] = useState('idle') // idle | submitting | error
-  const [error, setError] = useState(null)
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
 
   const busy = status === 'submitting'
   const nameErr = nodeNameError(name)
 
-  async function submit(e) {
+  async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setStatus('submitting')
     setError(null)
@@ -27,12 +32,12 @@ export default function CreateExternalService({ systemId, onClose }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, name: name.trim() }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
       setStatus('error')
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
@@ -8,12 +8,23 @@ import { nodeNameError, NODE_NAME_HINT } from './nodeName'
  * POST /api/custom-services. Custom types are discovered at runtime from
  * GET /api/custom-types, so adding a new type needs no change here.
  */
-export default function CreateService({ systemId, onClose }) {
+interface CustomTypeInfo {
+  serviceType: string
+  displayName: string
+  description?: string
+}
+
+interface CreateServiceProps {
+  systemId: string
+  onClose: () => void
+}
+
+export default function CreateService({ systemId, onClose }: CreateServiceProps) {
   const [name, setName] = useState('worker')
   const [type, setType] = useState('generic') // 'generic' | <serviceType>
-  const [customTypes, setCustomTypes] = useState([]) // [{ serviceType, displayName, description }]
-  const [status, setStatus] = useState('idle') // idle | submitting | error
-  const [error, setError] = useState(null)
+  const [customTypes, setCustomTypes] = useState<CustomTypeInfo[]>([])
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
 
   const busy = status === 'submitting'
   const nameErr = nodeNameError(name)
@@ -22,7 +33,7 @@ export default function CreateService({ systemId, onClose }) {
   useEffect(() => {
     let cancelled = false
     fetch('/api/custom-types')
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ ok?: boolean; types?: CustomTypeInfo[] }>)
       .then((d) => { if (!cancelled && d.ok) setCustomTypes(d.types || []) })
       .catch(() => { /* no custom types available — generic only */ })
     return () => { cancelled = true }
@@ -30,26 +41,26 @@ export default function CreateService({ systemId, onClose }) {
 
   const selected = customTypes.find((t) => t.serviceType === type) || null
 
-  async function submit(e) {
+  async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setStatus('submitting')
     setError(null)
     try {
       const [url, body] =
         type === 'generic'
-          ? ['/api/services', { system: systemId, name: name.trim() }]
-          : ['/api/custom-services', { system: systemId, serviceType: type, name: name.trim() }]
+          ? (['/api/services', { system: systemId, name: name.trim() }] as const)
+          : (['/api/custom-services', { system: systemId, serviceType: type, name: name.trim() }] as const)
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
       setStatus('error')
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 

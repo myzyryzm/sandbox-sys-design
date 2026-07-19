@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { FormEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
@@ -9,16 +10,22 @@ import { nodeNameError, NODE_NAME_HINT } from './nodeName'
  * through the real load balancer), so creating one is instant: POST /api/clients just
  * appends a `client` node to the manifest.
  */
-export default function CreateClient({ systemId, onClose }) {
+
+interface CreateClientProps {
+  systemId: string
+  onClose: () => void
+}
+
+export default function CreateClient({ systemId, onClose }: CreateClientProps) {
   const [name, setName] = useState('mobile-app')
   const [stateful, setStateful] = useState(false) // false = stateless (fire-and-forget, default)
-  const [status, setStatus] = useState('idle') // idle | submitting | error
-  const [error, setError] = useState(null)
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
 
   const busy = status === 'submitting'
   const nameErr = nodeNameError(name)
 
-  async function submit(e) {
+  async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setStatus('submitting')
     setError(null)
@@ -28,12 +35,12 @@ export default function CreateClient({ systemId, onClose }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, name: name.trim(), stateful }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
       setStatus('error')
-      setError(err.message)
+      setError((err as Error).message)
     }
   }
 

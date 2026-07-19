@@ -1,4 +1,13 @@
 import { useEffect, useState } from 'react'
+import type { ManifestNode } from './types/manifest'
+
+interface ServiceLbTabProps {
+  systemId: string
+  node: ManifestNode
+  onClose: () => void
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
 
 /**
  * A service's "Load Balancing" tab (embedded in NodeEditModal). It puts a per-service
@@ -23,15 +32,16 @@ const ALGORITHMS = [
 
 const MAX_INSTANCES = 8
 
-export default function ServiceLbTab({ systemId, node, onClose, embedded = false, onBusyChange }) {
+export default function ServiceLbTab({ systemId, node, onClose, embedded = false, onBusyChange }: ServiceLbTabProps) {
   const svcLb = node.type === 'service-lb' ? node.svcLb : null
   const currentCount = svcLb?.instances?.length || 1
   const currentAlgorithm = svcLb?.algorithm || 'roundrobin'
 
-  const [instances, setInstances] = useState(currentCount)
+  // Holds the raw input text while editing (coerced with Number() on use).
+  const [instances, setInstances] = useState<number | string>(currentCount)
   const [algorithm, setAlgorithm] = useState(currentAlgorithm)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
@@ -51,11 +61,11 @@ export default function ServiceLbTab({ systemId, node, onClose, embedded = false
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, service: node.id, instances: n, algorithm }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }

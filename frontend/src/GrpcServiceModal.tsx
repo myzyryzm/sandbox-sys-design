@@ -7,8 +7,12 @@ import {
   methodSig,
 } from './grpcBank'
 
+import type { GrpcBlock, ManifestNode } from './types/manifest'
+import type { DiscoveredGrpcContract, GrpcMethodHistoryEntry } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
+
 // A history entry's ISO timestamp -> a short, local, human label (best-effort).
-function fmtAt(at) {
+function fmtAt(at?: string) {
   if (!at) return ''
   const d = new Date(at)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
@@ -17,7 +21,7 @@ function fmtAt(at) {
 // Collapsible, read-only changelog of a served method's description updates.
 // Entries are stored oldest-first; shown newest-first (the first-ever entry is
 // tagged "created"). Reuses the endpoint/consumer changelog styling.
-function MethodChangelog({ history }) {
+function MethodChangelog({ history }: { history?: GrpcMethodHistoryEntry[] }) {
   const [open, setOpen] = useState(false)
   if (!history?.length) return null
   return (
@@ -71,20 +75,34 @@ function MethodChangelog({ history }) {
  * which write the manifest `grpc.clients` block themselves. The Calls list
  * below is read-only visibility of that block.
  */
-export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, embedded = false, onBusyChange }) {
+interface GrpcServiceData {
+  grpc: GrpcBlock
+  contracts: DiscoveredGrpcContract[]
+}
+
+interface GrpcServiceModalProps {
+  systemId: string
+  node: ManifestNode
+  onClose: () => void
+  onLaunch: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, embedded = false, onBusyChange }: GrpcServiceModalProps) {
   const service = node.id
-  const [data, setData] = useState(null) // { grpc, contracts } | null
+  const [data, setData] = useState<GrpcServiceData | null>(null)
   const [attachName, setAttachName] = useState('')
-  const [attachDescs, setAttachDescs] = useState({}) // method -> description (attach form)
-  const [descEdits, setDescEdits] = useState({}) // `${contract}|${method}` -> new chunk
-  const [error, setError] = useState(null)
+  const [attachDescs, setAttachDescs] = useState<Record<string, string>>({}) // method -> description (attach form)
+  const [descEdits, setDescEdits] = useState<Record<string, string>>({}) // `${contract}|${method}` -> new chunk
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
   const load = useCallback(() => {
     return fetch(`/api/grpc-service?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(service)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<GrpcServiceData & { ok?: boolean }>)
       .then((d) => setData(d.ok ? d : { grpc: { servers: [], clients: [], overrides: [] }, contracts: [] }))
       .catch(() => setData({ grpc: { servers: [], clients: [], overrides: [] }, contracts: [] }))
   }, [systemId, service])
@@ -96,18 +114,20 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
   const g = data?.grpc || { servers: [], clients: [], overrides: [] }
   const contracts = data?.contracts || []
   const byName = new Map(contracts.map((c) => [c.name, c]))
-  const served = (g.servers || []).map((name) => byName.get(name)).filter(Boolean)
+  const served = (g.servers || [])
+    .map((name) => byName.get(name))
+    .filter((c): c is DiscoveredGrpcContract => !!c)
   // Attachable = unowned by anyone (custom multi-server contracts stay hidden).
   const attachable = contracts.filter((c) => !c.servers.length)
   const attaching = byName.get(attachName)
 
-  async function postJson(url, body) {
+  async function postJson(url: string, body: Record<string, unknown>) {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    const d = await res.json().catch(() => ({}))
+    const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
     if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
     return d
   }
@@ -118,7 +138,7 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
     setError(null)
     if (!attaching) return setError('Pick a contract')
     const conversationId = crypto.randomUUID()
-    const descriptions = {}
+    const descriptions: Record<string, string> = {}
     for (const m of attaching.methods) {
       const text = (attachDescs[m.name] || '').trim()
       if (text) descriptions[m.name] = text
@@ -138,14 +158,14 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
       }, { kind: 'grpc', target: service, title: `attach ${attaching.name}` })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
 
   // Persist appended descriptions for one served contract's edited methods,
   // then launch ONE session that edits those method bodies in place.
-  async function saveDescriptions(c) {
+  async function saveDescriptions(c: DiscoveredGrpcContract) {
     setError(null)
     const edited = c.methods
       .map((m) => ({ m, change: (descEdits[`${c.name}|${m.name}`] || '').trim() }))
@@ -176,14 +196,14 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
       }, { kind: 'grpc', target: service, title: `describe ${c.name}` })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
 
   // Detach (guarded server-side while other services still dial this one),
   // then launch the unwire session.
-  async function detach(contract) {
+  async function detach(contract: string) {
     setError(null)
     setBusy(true)
     try {
@@ -195,7 +215,7 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
       }, { kind: 'grpc', target: service, title: `detach ${contract}` })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
@@ -231,7 +251,7 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
                               <span className="grpc-sig">{methodSig(m)}</span>
                             </div>
                             {m.description && <p className="grpc-instruction"><span className="grpc-label">does</span> {m.description}</p>}
-                            {m.history?.length > 0 && <MethodChangelog history={m.history} />}
+                            {(m.history?.length ?? 0) > 0 && <MethodChangelog history={m.history} />}
                             <textarea
                               className="desc-input"
                               value={descEdits[key] || ''}
@@ -262,7 +282,7 @@ export default function GrpcServiceModal({ systemId, node, onClose, onLaunch, em
             <div className="form-section">
               <div className="form-section-head"><span>Calls</span></div>
               <ul className="grpc-attach-list">
-                {g.clients.map((c) => (
+                {(g.clients || []).map((c) => (
                   <li key={c.contract}>
                     <code>{c.contract}</code>
                     <span className="grpc-targets">→ {c.targets?.length ? c.targets.join(', ') : '(no targets)'}</span>

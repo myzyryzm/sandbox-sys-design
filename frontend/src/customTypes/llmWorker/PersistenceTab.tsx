@@ -13,20 +13,46 @@
 // "specialized implementation" spec. Scaling and later edits live on the reader
 // node's own Readers tab.
 import { useEffect, useState } from 'react'
+import type { EditTabProps } from '../../types/customTypes'
 import { nodeNameError, NODE_NAME_HINT } from '../../nodeName'
 import { buildPersistencePrompt } from '../persistenceReader/prompt'
+import type { PersistenceReaderState } from '../persistenceReader/ReadersTab'
 
-const STATE_URL = (sys) => `/api/custom/persistence-reader/state?system=${encodeURIComponent(sys)}`
+const STATE_URL = (sys: string) => `/api/custom/persistence-reader/state?system=${encodeURIComponent(sys)}`
 const DB_TYPES = new Set(['postgres', 'mongodb'])
 
-export default function PersistenceTab({ systemId, node, manifest, onClose, onLaunch, onBusyChange }) {
-  const [nodes, setNodes] = useState(null) // the state route's node map
+// The "add readers" form.
+interface AddForm {
+  name: string
+  db: string
+  table: string
+  field: string
+  freeform: string
+  description: string
+}
+
+// GET /api/db-schema introspection of the picked db's live container.
+interface SchemaField {
+  name: string
+  type?: string
+}
+interface SchemaEntity {
+  name: string
+  fields?: SchemaField[]
+}
+type SchemaState =
+  | { status: 'loading' }
+  | { status: 'error'; error: string }
+  | { status: 'ok'; entities: SchemaEntity[] }
+
+export default function PersistenceTab({ systemId, node, manifest, onClose, onLaunch, onBusyChange }: EditTabProps) {
+  const [nodes, setNodes] = useState<Record<string, PersistenceReaderState> | null>(null) // the state route's node map
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
-  const [form, setForm] = useState({ name: '', db: '', table: '', field: '', freeform: '', description: '' })
+  const [error, setError] = useState<string | null>(null)
+  const [form, setForm] = useState<AddForm>({ name: '', db: '', table: '', field: '', freeform: '', description: '' })
   const [specialized, setSpecialized] = useState(false)
-  const [schema, setSchema] = useState(null) // { status, entities } for the picked db
+  const [schema, setSchema] = useState<SchemaState | null>(null) // { status, entities } for the picked db
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
@@ -35,7 +61,7 @@ export default function PersistenceTab({ systemId, node, manifest, onClose, onLa
     const tick = async () => {
       try {
         const res = await fetch(STATE_URL(systemId))
-        const data = await res.json()
+        const data = (await res.json()) as { ok: boolean; nodes: Record<string, PersistenceReaderState> }
         if (!cancelled && data.ok) setNodes(data.nodes)
       } catch {
         /* keep last good */
@@ -53,7 +79,7 @@ export default function PersistenceTab({ systemId, node, manifest, onClose, onLa
     setSchema({ status: 'loading' })
     fetch(`/api/db-schema?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(form.db)}`)
       .then((r) => r.json())
-      .then((d) => {
+      .then((d: { ok?: boolean; error?: string; entities?: SchemaEntity[] }) => {
         if (cancelled) return
         if (!d.ok) setSchema({ status: 'error', error: d.error || 'schema introspection failed' })
         else setSchema({ status: 'ok', entities: d.entities || [] })
@@ -73,7 +99,7 @@ export default function PersistenceTab({ systemId, node, manifest, onClose, onLa
   const fields = entities.find((e) => e.name === form.table)?.fields || []
   const stream = node.llm?.stream
 
-  function set(patch) {
+  function set(patch: Partial<AddForm>) {
     setForm((f) => ({ ...f, ...patch }))
   }
 
@@ -114,10 +140,11 @@ export default function PersistenceTab({ systemId, node, manifest, onClose, onLa
           },
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
-      onLaunch({
+      // NodeEditModal always passes onLaunch (App wires it to enqueueSession).
+      onLaunch!({
         sessionId: conversationId,
         mode: 'new',
         prompt: buildPersistencePrompt({
@@ -135,7 +162,7 @@ export default function PersistenceTab({ systemId, node, manifest, onClose, onLa
       }, { kind: 'persistence', target: name, title: 'readers' })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
       setBusy(false)
     }
   }
@@ -171,7 +198,7 @@ export default function PersistenceTab({ systemId, node, manifest, onClose, onLa
               {entry?.conversationId && (
                 <button
                   type="button"
-                  onClick={() => { onLaunch({ sessionId: entry.conversationId, mode: 'resume' }, { kind: 'persistence', target: r.id, title: 'readers' }); onClose() }}
+                  onClick={() => { onLaunch!({ sessionId: entry.conversationId!, mode: 'resume' }, { kind: 'persistence', target: r.id, title: 'readers' }); onClose() }}
                   disabled={busy}
                 >
                   Resume

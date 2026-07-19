@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 import { referencedModels, buildDbSchemaPrompt } from './modelBank'
+import type { Manifest, ManifestNode } from './types/manifest'
+import type { ModelRecord } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * Per-database popup. Shows the node's CURRENT schema (fetched live from the
@@ -19,7 +22,12 @@ import { referencedModels, buildDbSchemaPrompt } from './modelBank'
  * cluster box are derived from each secondary's manifest `replicaOf`.
  */
 
-const WORDS = {
+interface EngineWords {
+  entity: string
+  empty: string
+}
+
+const WORDS: Record<string, EngineWords> = {
   postgres: { entity: 'Table', empty: 'No tables yet.' },
   mongodb: { entity: 'Collection', empty: 'No collections yet.' },
   redis: { entity: 'Namespace', empty: 'No keys yet.' },
@@ -38,8 +46,41 @@ const MODEL_ENGINES = ['postgres', 'mongodb', 'dynamodb', 'cassandra']
 // Postgres index access methods (mirrors PG_INDEX_METHODS in server/dbindexes.js).
 const INDEX_METHODS = ['btree', 'hash', 'gin', 'brin', 'gist', 'spgist']
 
+// Live-introspected schema shapes (GET /api/db-schema / POST /api/db-indexes).
+interface SchemaIndex {
+  name: string
+  method: string
+  unique?: boolean
+  constraint?: boolean
+}
+
+interface SchemaField {
+  name: string
+  type?: string
+  pk?: boolean
+  fk?: { table: string; column: string }
+  indexes?: SchemaIndex[]
+}
+
+interface SchemaEntity {
+  name: string
+  fields: SchemaField[]
+}
+
+interface SchemaState {
+  status: 'loading' | 'error' | 'ok'
+  error?: string
+  type?: string
+  entities?: SchemaEntity[]
+}
+
+interface IndexAddProps {
+  disabled: boolean
+  onAdd: (method: string) => void
+}
+
 /** Per-column "add index" control: a method picker + button. */
-function IndexAdd({ disabled, onAdd }) {
+function IndexAdd({ disabled, onAdd }: IndexAddProps) {
   const [method, setMethod] = useState('btree')
   return (
     <span className="schema-index-add">
@@ -55,12 +96,21 @@ function IndexAdd({ disabled, onAdd }) {
   )
 }
 
+interface TableRowProps {
+  entity: SchemaEntity
+  words: EngineWords
+  showIndexUI: boolean
+  busy: string | null
+  onAddIndex: (table: string, column: string, method: string) => void
+  onDropIndex: (table: string, column: string, name: string) => void
+}
+
 /**
  * One entity (table/collection/…): collapsed to `▶ TABLE name` by default,
  * expandable to its field list with PK/FK badges and — postgres primaries
  * only — per-column index chips + the add control.
  */
-function TableRow({ entity, words, showIndexUI, busy, onAddIndex, onDropIndex }) {
+function TableRow({ entity, words, showIndexUI, busy, onAddIndex, onDropIndex }: TableRowProps) {
   const [open, setOpen] = useState(false)
   return (
     <div className="schema-entity">
@@ -125,13 +175,23 @@ function TableRow({ entity, words, showIndexUI, busy, onAddIndex, onDropIndex })
   )
 }
 
-export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
-  const [state, setState] = useState({ status: 'loading' })
-  const [busy, setBusy] = useState(null) // 'add' | `del:<id>` | 'models' | null
-  const [opError, setOpError] = useState(null)
+interface DbSchemaProps {
+  systemId: string
+  node: ManifestNode
+  manifest: Manifest
+  onClose: () => void
+  onLaunch?: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }: DbSchemaProps) {
+  const [state, setState] = useState<SchemaState>({ status: 'loading' })
+  const [busy, setBusy] = useState<string | null>(null) // 'add' | `del:<id>` | 'models' | null
+  const [opError, setOpError] = useState<string | null>(null)
   // "Schema from models" picker (postgres/mongodb only).
-  const [models, setModels] = useState([]) // the system's model bank
-  const [modelSel, setModelSel] = useState([]) // model names to apply this round
+  const [models, setModels] = useState<ModelRecord[]>([]) // the system's model bank
+  const [modelSel, setModelSel] = useState<string[]>([]) // model names to apply this round
 
   const engine = node.type
   const isSecondary = !!node.replicaOf
@@ -144,13 +204,13 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
   useEffect(() => {
     let cancelled = false
     fetch(`/api/db-schema?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(node.id)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ ok?: boolean; error?: string; type?: string; entities?: SchemaEntity[] }>)
       .then((d) => {
         if (cancelled) return
         if (!d.ok) setState({ status: 'error', error: d.error })
         else setState({ status: 'ok', type: d.type, entities: d.entities })
       })
-      .catch((err) => !cancelled && setState({ status: 'error', error: err.message }))
+      .catch((err: Error) => !cancelled && setState({ status: 'error', error: err.message }))
     return () => {
       cancelled = true
     }
@@ -161,7 +221,7 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
     if (!modelCapable) return
     let cancelled = false
     fetch(`/api/models?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ models?: ModelRecord[] }>)
       .then((d) => !cancelled && setModels(Array.isArray(d.models) ? d.models : []))
       .catch(() => !cancelled && setModels([]))
     return () => {
@@ -178,7 +238,7 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
   // The replica nodes that stream from this primary (re-read every poll).
   const secondaries = (manifest?.nodes || []).filter((n) => n.replicaOf === node.id)
 
-  async function post(url, body, busyKey) {
+  async function post(url: string, body: unknown, busyKey: string) {
     setBusy(busyKey)
     setOpError(null)
     try {
@@ -187,10 +247,10 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
     } catch (err) {
-      setOpError(err.message)
+      setOpError((err as Error).message)
     } finally {
       setBusy(null)
     }
@@ -199,13 +259,13 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
   // Only mongo/cassandra reach this now (postgres + redis are Topology-managed), and both
   // stream asynchronously — there is no mode to pick.
   const addReplica = () => post('/api/db-replicas', { system: systemId, primary: node.id }, 'add')
-  const removeReplica = (id) => post('/api/delete', { system: systemId, id }, `del:${id}`)
+  const removeReplica = (id: string) => post('/api/delete', { system: systemId, id }, `del:${id}`)
 
   // Index add/drop is mechanical (live DDL + init.sql record) — the response carries
   // the refreshed schema, so the field list updates in the same round trip.
   const showIndexUI = engine === 'postgres' && !isSecondary
 
-  async function mutateIndex(payload, busyKey) {
+  async function mutateIndex(payload: Record<string, unknown>, busyKey: string) {
     setBusy(busyKey)
     setOpError(null)
     try {
@@ -214,22 +274,22 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: node.id, ...payload }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; entities?: SchemaEntity[] }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setState((s) => ({ ...s, entities: data.entities }))
     } catch (err) {
-      setOpError(err.message)
+      setOpError((err as Error).message)
     } finally {
       setBusy(null)
     }
   }
 
-  const addIndex = (table, column, method) =>
+  const addIndex = (table: string, column: string, method: string) =>
     mutateIndex({ action: 'add', table, column, method }, `idx:add:${table}.${column}`)
-  const dropIndex = (table, column, name) =>
+  const dropIndex = (table: string, column: string, name: string) =>
     mutateIndex({ action: 'drop', table, column, name }, `idx:drop:${name}`)
 
-  const toggleModel = (n) =>
+  const toggleModel = (n: string) =>
     setModelSel((s) => (s.includes(n) ? s.filter((x) => x !== n) : [...s, n]))
 
   // Record the selected models on the db node, then launch a Claude session to apply them
@@ -244,7 +304,7 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: node.id, models: modelSel }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onLaunch?.({
         sessionId: crypto.randomUUID(),
@@ -260,7 +320,7 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
       }, { kind: 'database', target: node.id, title: 'schema' })
       onClose()
     } catch (err) {
-      setOpError(err.message)
+      setOpError((err as Error).message)
       setBusy(null)
     }
   }
@@ -281,11 +341,11 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
       {state.status === 'error' && <p className="modal-error">{state.error}</p>}
 
       {state.status === 'ok' &&
-          (state.entities.length === 0 ? (
+          (state.entities!.length === 0 ? (
             <p className="sim-desc">{words.empty}</p>
           ) : (
             <div className="schema-list">
-              {state.entities.map((ent) => (
+              {state.entities!.map((ent) => (
                 <TableRow
                   key={ent.name}
                   entity={ent}
@@ -305,7 +365,7 @@ export default function DbSchema({ systemId, node, manifest, onClose, onLaunch, 
               <span>Schema from models</span>
             </div>
 
-            {node.schemaModels?.length > 0 && (
+            {node.schemaModels && node.schemaModels.length > 0 && (
               <p className="sim-desc">Built from models: {node.schemaModels.join(', ')}</p>
             )}
 

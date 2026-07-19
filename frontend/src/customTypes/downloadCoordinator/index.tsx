@@ -4,18 +4,21 @@
 // custom diagram body (bitmap grid + aggregate %), its live chain/source edges (star →
 // mesh), and its runtime poll. SystemDiagram + NodeEditModal + App stay type-agnostic and
 // drive all of this through these hooks.
+import type { Manifest } from '../../types/manifest'
+import type { CustomStateMap, CustomTypeModule, DiagramEdgeSpec } from '../../types/customTypes'
 import CoordinatorTab from './CoordinatorTab'
 import { DiagramBody, bodyHeight } from './DiagramBody'
+import type { DcNodeState } from './DiagramBody'
 
 // Live chunk-source edges: distinct (source → puller) among the most recent transfers the
 // coordinator recorded. Early on every edge originates at the coordinator (a star); as
 // workers finish chunks and seed peers, worker→worker edges appear (the mesh).
-function diagramEdges({ manifest, customState }) {
-  const edges = []
-  const seen = new Set()
+function diagramEdges({ manifest, customState }: { manifest: Manifest; customState: CustomStateMap }): DiagramEdgeSpec[] {
+  const edges: DiagramEdgeSpec[] = []
+  const seen = new Set<string>()
   for (const node of manifest.nodes) {
     if (node.service_type !== 'download_coordinator') continue
-    const recent = customState[node.id]?.recent
+    const recent = (customState[node.id] as DcNodeState | undefined)?.recent
     if (!recent || !recent.length) continue
     for (const r of recent.slice(-40)) {
       if (!r || r.from === r.to) continue
@@ -69,4 +72,4 @@ export default {
   DiagramBody,
   diagramHeight: bodyHeight,
   diagramEdges,
-}
+} satisfies CustomTypeModule

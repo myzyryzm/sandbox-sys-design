@@ -1,4 +1,62 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { ManifestNode } from './types/manifest'
+
+// The persistence block as /api/redis/persistence serves it (numbers, not form text).
+interface RedisPersistenceCfg {
+  rdb: { enabled: boolean; rules: Array<{ seconds: number; changes: number }> }
+  aof: { enabled: boolean; fsync: string; rewritePercent: number; rewriteMinMb: number }
+}
+
+interface RedisPersistenceLimits {
+  secondsMin: number
+  secondsMax: number
+  changesMin: number
+  changesMax: number
+  maxRules: number
+  rewritePercentMin: number
+  rewritePercentMax: number
+  rewriteMinMbMin: number
+  rewriteMinMbMax: number
+  fsync: string[]
+}
+
+interface RedisPersistenceStatus {
+  target?: string
+  rdb_last_save_time: number
+  rdb_changes_since_last_save?: number
+  rdb_bgsave_in_progress?: boolean
+  rdb_last_bgsave_status?: string
+  aof_enabled?: boolean
+  aof_rewrite_in_progress?: boolean
+  aof_last_bgrewrite_status?: string
+  aof_last_write_status?: string
+  live: { save?: string | null; appendonly?: string; appendfsync?: string }
+}
+
+interface RedisPersistenceResponse {
+  ok?: boolean
+  error?: string
+  persistence?: RedisPersistenceCfg | null
+  defaults: RedisPersistenceCfg
+  limits: RedisPersistenceLimits
+  targets: string[]
+  status?: RedisPersistenceStatus | null
+  statusError?: string
+}
+
+interface PersistenceActionResult {
+  target: string
+  ok?: boolean
+  message?: string
+}
+
+interface RedisPersistenceTabProps {
+  systemId: string
+  node: ManifestNode
+  onClose: () => void
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
 
 /**
  * A redis node's "Persistence" tab (create-database redis primaries only). Manages
@@ -15,19 +73,21 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  * container's compose command, and a Topology reshape re-derives them from the
  * manifest block). No Claude session is involved — persistence is server-side only.
  */
-export default function RedisPersistenceTab({ systemId, node, onClose, embedded = false, onBusyChange }) {
+export default function RedisPersistenceTab({ systemId, node, onClose, embedded = false, onBusyChange }: RedisPersistenceTabProps) {
   const redisId = node.id
-  const [cfg, setCfg] = useState(null) // last GET payload
-  const [error, setError] = useState(null)
+  const [cfg, setCfg] = useState<RedisPersistenceResponse | null>(null) // last GET payload
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState(null) // warnings of the last apply
-  const [actionResults, setActionResults] = useState(null)
+  // Warnings of the last apply.
+  const [result, setResult] = useState<{ label: string; warnings: string[] } | null>(null)
+  const [actionResults, setActionResults] = useState<PersistenceActionResult[] | null>(null)
 
   // Form state, seeded from the live block (or the image defaults) on first load
   // only — edits survive the poll.
   const seeded = useRef(false)
   const [rdbOn, setRdbOn] = useState(true)
-  const [rules, setRules] = useState([]) // [{ seconds, changes }] as strings while editing
+  // [{ seconds, changes }] as strings while editing.
+  const [rules, setRules] = useState<Array<{ seconds: string; changes: string }>>([])
   const [aofOn, setAofOn] = useState(false)
   const [fsync, setFsync] = useState('everysec')
   const [rewritePercent, setRewritePercent] = useState('100')
@@ -40,7 +100,7 @@ export default function RedisPersistenceTab({ systemId, node, onClose, embedded 
       const res = await fetch(
         `/api/redis/persistence?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(redisId)}`,
       )
-      const data = await res.json()
+      const data = (await res.json()) as RedisPersistenceResponse
       if (!data.ok) throw new Error(data.error || 'failed to load')
       setCfg(data)
       if (!seeded.current) {
@@ -54,7 +114,7 @@ export default function RedisPersistenceTab({ systemId, node, onClose, embedded 
         setRewriteMinMb(String(p.aof.rewriteMinMb))
       }
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }, [systemId, redisId])
 
@@ -99,7 +159,7 @@ export default function RedisPersistenceTab({ systemId, node, onClose, embedded 
   }
   const invalid = formError()
 
-  async function call(body) {
+  async function call(body: Record<string, unknown>) {
     setBusy(true)
     setError(null)
     setResult(null)
@@ -110,11 +170,11 @@ export default function RedisPersistenceTab({ systemId, node, onClose, embedded 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: redisId, ...body }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; warnings?: string[] }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       return data
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       return null
     } finally {
       setBusy(false)
@@ -141,7 +201,7 @@ export default function RedisPersistenceTab({ systemId, node, onClose, embedded 
     await load()
   }
 
-  async function runAction(action) {
+  async function runAction(action: string) {
     setBusy(true)
     setError(null)
     setActionResults(null)
@@ -151,22 +211,26 @@ export default function RedisPersistenceTab({ systemId, node, onClose, embedded 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: redisId, action }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean
+        error?: string
+        results?: PersistenceActionResult[]
+      }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      setActionResults(data.results)
+      setActionResults(data.results || null)
       await load()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  function setRule(i, key, value) {
+  function setRule(i: number, key: 'seconds' | 'changes', value: string) {
     setRules((rs) => rs.map((r, j) => (j === i ? { ...r, [key]: value } : r)))
   }
 
-  const ago = (unixSeconds) => {
+  const ago = (unixSeconds: number) => {
     const s = Math.max(0, Math.round(Date.now() / 1000 - unixSeconds))
     if (s < 60) return `${s}s ago`
     if (s < 3600) return `${Math.floor(s / 60)}m ago`

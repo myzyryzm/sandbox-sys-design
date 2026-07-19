@@ -48,6 +48,8 @@ export type EndpointsMap = Record<string, EndpointEntry[]>
 export interface DiscoveredEndpoint extends EndpointEntry {
   service: string
   downstreamMethods?: Record<string, string[]>
+  // true = served by the running container; false = registry-only (pending).
+  live?: boolean
 }
 
 // ─── models.json (the per-system model bank) ────────────────────────────────
@@ -97,6 +99,17 @@ export interface ScenariosFile {
 
 // ─── consumers.json (per-service Kafka consumer functions) ──────────────────
 
+// One history snapshot of a consumer's spec (written on every create/edit/rename).
+export interface ConsumerHistoryEntry {
+  at?: string
+  name?: string
+  renamedFrom?: string
+  description?: string
+  topic?: string
+  pollRate?: number
+  groupId?: string
+}
+
 export interface ConsumerEntry {
   service: string
   name: string
@@ -109,7 +122,7 @@ export interface ConsumerEntry {
   description?: string
   implemented?: boolean
   conversationId?: string
-  history?: unknown[]
+  history?: ConsumerHistoryEntry[]
   createdAt?: string
   updatedAt?: string
 }
@@ -143,6 +156,10 @@ export interface EtcdListener {
 export interface EtcdDiscoveryKeyspace {
   type?: 'discovery'
   service: string
+  // Never present on discovery keyspaces; declared so union-wide reads like
+  // `ks.name` / `ks.values` type-check (mirror of config's `service?: undefined`).
+  name?: undefined
+  values?: undefined
   prefix: string
   description?: string
   implemented?: boolean
@@ -158,9 +175,14 @@ export interface EtcdDiscoveryKeyspace {
 export interface EtcdConfigKeyspace {
   type: 'config'
   name: string
+  // Never present on config keyspaces (they have no owning service); declared so
+  // union-wide reads like `ks.service` type-check.
+  service?: undefined
   prefix: string
   description?: string
   values?: Array<{ key: string; value: string }>
+  implemented?: boolean
+  conversationId?: string
   listeners?: EtcdListener[]
   createdAt?: string
   updatedAt?: string
@@ -184,6 +206,8 @@ export interface TopicEntry {
   id: string
   producers?: string[]
   consumers?: TopicConsumer[]
+  // Partition count (null for broker-only topics whose count is unknown).
+  partitions?: number | null
   // Model-bank name used as the topic's message contract.
   schemaModel?: string
   enforceSchema?: boolean
@@ -194,7 +218,27 @@ export interface StreamsFile {
   consumersPaused?: boolean
 }
 
+// GET /api/event-stream normalizes each topic's membership arrays and adds a
+// broker-probe liveness flag (null until the ?live=1 probe returns).
+export interface DiscoveredTopicConsumer extends TopicConsumer {
+  members: string[]
+}
+
+export interface DiscoveredTopic extends TopicEntry {
+  producers: string[]
+  consumers: DiscoveredTopicConsumer[]
+  live?: boolean | null
+}
+
 // ─── grpc/_registry.json (the gRPC contract bank — pure shape) ──────────────
+
+// One changelog entry of a served method's description updates (grpc.js writes
+// { at, change, conversationId }; shown newest-first in the service tab).
+export interface GrpcMethodHistoryEntry {
+  at?: string
+  change?: string
+  conversationId?: string | null
+}
 
 export interface GrpcMethodRecord {
   name: string
@@ -206,6 +250,8 @@ export interface GrpcMethodRecord {
   responseStreaming?: boolean
   formAuthored?: boolean
   description?: string
+  conversationId?: string | null
+  history?: GrpcMethodHistoryEntry[]
 }
 
 export interface GrpcContract {
@@ -222,6 +268,25 @@ export interface GrpcRegistry {
   contracts: Record<string, GrpcContract>
 }
 
+// One caller of a contract, joined from the manifest (grpc.clients blocks).
+export interface GrpcCallerAttachment {
+  service: string
+  targets?: string[]
+}
+
+// GET /api/grpc-contracts and /api/grpc-service annotate each bank contract
+// with its name and its manifest attachments (owning server(s) + callers).
+export interface DiscoveredGrpcContract {
+  name: string
+  source?: string
+  methods: GrpcMethodRecord[]
+  conversationId?: string | null
+  createdAt?: string | null
+  server?: string | null
+  servers: string[]
+  clients: GrpcCallerAttachment[]
+}
+
 // ─── endtoend.json (end-to-end test processes) ──────────────────────────────
 
 // A stateless client row carries requestsPerSecond; a stateful one, instances.
@@ -234,19 +299,45 @@ export interface EndToEndClientRow {
   intervalSeconds?: number
 }
 
+// A websocket client-pool row of a process (pool clients to keep connected).
+export interface EndToEndWebsocketRow {
+  client: string
+  clientCount?: number
+  messagesPerSecond?: number
+}
+
+// The newest persisted run report for a process (GET /api/endtoend annotation).
+export interface EndToEndRunSummary {
+  verdict?: string | null
+  endedAt?: string | null
+  file?: string
+}
+
 export interface EndToEndProcess {
   id: string
   name: string
   client_list?: EndToEndClientRow[]
-  websocket_list?: unknown[]
+  websocket_list?: EndToEndWebsocketRow[]
   failure_list?: string[]
   constraint_list?: string[]
   createdAt?: string
   updatedAt?: string
+  // GET /api/endtoend joins each process with its last run's report.
+  lastRun?: EndToEndRunSummary | null
 }
 
 export interface EndToEndFile {
   processes: EndToEndProcess[]
+}
+
+// GET /api/endtoend's in-memory run marker (one run at a time per system).
+export interface EndToEndRunState {
+  running: boolean
+  id?: string
+  name?: string
+  startedAt?: number
+  durationSeconds?: number
+  remaining_seconds?: number
 }
 
 // ─── <db>/cdc.json (a database's Change-Data-Capture rules) ─────────────────
@@ -286,6 +377,46 @@ export type ModelUsageMap = Record<
     streams?: ModelUsageStream[]
   }
 >
+
+// ─── <lb>/websockets.json (the websocket tier registry) ─────────────────────
+
+// One additive behavior entry on a shared server method.
+export interface WsMethodEntry {
+  text: string
+  at?: string
+}
+
+// A shared server method (onMessage / onSend): fixed base + additive entries;
+// implemented flips true once the launched session authors the hook code.
+export interface WsMethodRecord {
+  base?: string
+  entries?: WsMethodEntry[]
+  implemented?: boolean
+  conversationId?: string
+  updatedAt?: string
+}
+
+export interface WebsocketsFile {
+  lb: string
+  algorithm?: string
+  hostPort?: number
+  wsPort?: number
+  statsPort?: number
+  metricsPort?: number
+  servers?: string[]
+  bus?: string
+  presence?: string
+  client?: string
+  methods?: Record<string, WsMethodRecord>
+}
+
+// ─── GET /api/outage (nodes temporarily shut down) ──────────────────────────
+
+export interface OutageInfo {
+  node: string
+  until?: number
+  remaining_seconds: number
+}
 
 // ─── Prometheus HTTP API (via the /api/prometheus proxy) ────────────────────
 

@@ -1,4 +1,41 @@
 import { useEffect, useState } from 'react'
+import type { ManifestNode } from './types/manifest'
+
+interface WsMethodArg {
+  name: string
+  type: string
+  default?: number | string
+  min?: number
+  max?: number
+}
+
+interface WsClientMethod {
+  name: string
+  builtin?: boolean
+  summary?: string
+  args?: WsMethodArg[]
+}
+
+// ws-clients/<id>.stats.json — the pool script's last-run delivery stats.
+interface WsPoolStats {
+  ts?: string | number
+  args?: { count?: number; durationSeconds?: number; rate?: number }
+  results?: {
+    spawned?: number
+    connected?: number
+    sent?: number
+    delivered?: number
+    duplicates?: number
+    errors?: number
+    latencyMs?: { p50?: number; p95?: number; max?: number }
+  }
+}
+
+interface WsInfoResponse {
+  ok?: boolean
+  clientMethods?: WsClientMethod[]
+  stats?: WsPoolStats | null
+}
 
 /**
  * Read-only "Functions" tab for a WEBSOCKET pool client (origin create-websockets).
@@ -13,7 +50,7 @@ import { useEffect, useState } from 'react'
  */
 
 // Shown until /api/websockets answers (and if an older backend omits clientMethods).
-const FALLBACK_METHODS = [
+const FALLBACK_METHODS: WsClientMethod[] = [
   {
     name: 'send',
     builtin: true,
@@ -34,19 +71,26 @@ const FALLBACK_METHODS = [
   },
 ]
 
-const sig = (m) =>
+const sig = (m: WsClientMethod) =>
   `${m.name}(${(m.args || [])
     .map((a) => `${a.name}: ${a.type}${a.default !== undefined ? ` = ${a.default}` : ''}`)
     .join(', ')})`
 
-const boundsNote = (m) => {
+const boundsNote = (m: WsClientMethod) => {
   const capped = (m.args || []).filter((a) => a.max !== undefined)
   if (!capped.length) return null
   return `bounds: ${capped.map((a) => `${a.name} ${a.min ?? 1}–${a.max}`).join(' · ')}`
 }
 
-export default function WsClientMethodsTab({ systemId, node, onClose, embedded = false }) {
-  const [info, setInfo] = useState(null) // last good GET /api/websockets response
+interface WsClientMethodsTabProps {
+  systemId: string
+  node: ManifestNode
+  onClose?: () => void
+  embedded?: boolean
+}
+
+export default function WsClientMethodsTab({ systemId, node, onClose, embedded = false }: WsClientMethodsTabProps) {
+  const [info, setInfo] = useState<WsInfoResponse | null>(null) // last good GET /api/websockets response
 
   // Poll while open (same 4s cadence as the app's registry polls) so the stats
   // section refreshes live when an end-to-end run finishes.
@@ -54,7 +98,7 @@ export default function WsClientMethodsTab({ systemId, node, onClose, embedded =
     let live = true
     const load = () =>
       fetch(`/api/websockets?system=${encodeURIComponent(systemId)}`)
-        .then((r) => r.json())
+        .then((r) => r.json() as Promise<WsInfoResponse>)
         .then((d) => { if (live && d?.ok) setInfo(d) })
         .catch(() => {}) // keep the last good response
     load()
@@ -100,8 +144,8 @@ export default function WsClientMethodsTab({ systemId, node, onClose, embedded =
         ) : (
           <>
             <p className="sim-desc">
-              {stats.ts ? new Date(stats.ts).toLocaleString() : 'time unknown'}
-              {stats.args && (
+              {stats?.ts ? new Date(stats.ts).toLocaleString() : 'time unknown'}
+              {stats?.args && (
                 <>
                   {' '}· count {stats.args.count} · {stats.args.durationSeconds}s · rate{' '}
                   {stats.args.rate}/s

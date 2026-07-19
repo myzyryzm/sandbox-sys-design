@@ -15,27 +15,71 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  *      ⌈N/2⌉ members loses quorum: writes fail, the node goes red — the Raft demo.
  */
 
+import type { ChangeEvent } from 'react'
+import type { ManifestNode } from './types/manifest'
+
 const SIZES = [3, 5, 7]
 const ELECTION_FACTOR = 5 // keep in sync with the backend's validation
 
-export default function EtcdClusterTab({ systemId, node, onClose, embedded = false, onBusyChange }) {
+interface EtcdMemberStatus {
+  id: string
+  healthy?: boolean
+  isLeader?: boolean
+}
+
+// GET /api/etcd's cluster block (registry config + derived quorum math).
+interface EtcdClusterInfo {
+  id: string
+  size: number
+  heartbeatMs: number
+  electionMs: number
+  leaseTtlSeconds: number
+  quorum: number
+  tolerates: number
+  members: string[]
+}
+
+interface EtcdInfo {
+  ok?: boolean
+  error?: string
+  cluster: EtcdClusterInfo
+  memberStatus?: EtcdMemberStatus[] | null
+}
+
+// Form fields hold the raw input text while editing (coerced with Number() on use).
+interface ClusterForm {
+  size: number | string
+  heartbeatMs: number | string
+  electionMs: number | string
+  leaseTtlSeconds: number | string
+}
+
+interface EtcdClusterTabProps {
+  systemId: string
+  node: ManifestNode
+  onClose?: () => void
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function EtcdClusterTab({ systemId, node, onClose, embedded = false, onBusyChange }: EtcdClusterTabProps) {
   const id = node.id
-  const [info, setInfo] = useState(null) // GET /api/etcd response (cluster + memberStatus)
-  const [error, setError] = useState(null)
+  const [info, setInfo] = useState<EtcdInfo | null>(null) // GET /api/etcd response (cluster + memberStatus)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [form, setForm] = useState(null) // { size, heartbeatMs, electionMs, leaseTtlSeconds }
+  const [form, setForm] = useState<ClusterForm | null>(null)
   const seededForm = useRef(false)
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
   // Fast registry-only paint, then the live member probe fills memberStatus in;
   // keep re-probing so a stopped member's dot flips without closing the modal.
-  const load = useCallback(async (live) => {
+  const load = useCallback(async (live: boolean) => {
     try {
       const res = await fetch(
         `/api/etcd?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(id)}&live=${live ? 1 : 0}`,
       )
-      const data = await res.json()
+      const data = (await res.json()) as EtcdInfo
       if (!data.ok) throw new Error(data.error || 'failed to load')
       setInfo((prev) => (live ? data : { ...data, memberStatus: prev?.memberStatus || null }))
       if (!seededForm.current) {
@@ -50,7 +94,7 @@ export default function EtcdClusterTab({ systemId, node, onClose, embedded = fal
       }
       return data
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       return null
     }
   }, [systemId, id])
@@ -80,7 +124,8 @@ export default function EtcdClusterTab({ systemId, node, onClose, embedded = fal
   const ttlChanged = Number(form.leaseTtlSeconds) !== cluster.leaseTtlSeconds
   const dirty = raftChanged || ttlChanged
 
-  const setField = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
+  const setField = (k: keyof ClusterForm) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setForm((f) => (f ? { ...f, [k]: e.target.value } : f))
 
   async function apply() {
     setBusy(true)
@@ -95,21 +140,21 @@ export default function EtcdClusterTab({ systemId, node, onClose, embedded = fal
           size,
           heartbeatMs: hb,
           electionMs: el,
-          leaseTtlSeconds: Number(form.leaseTtlSeconds),
+          leaseTtlSeconds: Number(form!.leaseTtlSeconds),
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       seededForm.current = false
       await load(true)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  async function memberAction(member, action) {
+  async function memberAction(member: string, action: 'stop' | 'start') {
     setBusy(true)
     setError(null)
     try {
@@ -118,17 +163,19 @@ export default function EtcdClusterTab({ systemId, node, onClose, embedded = fal
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id, member, action }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       await load(true)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  const statusOf = Object.fromEntries((info.memberStatus || []).map((m) => [m.id, m]))
+  const statusOf: Record<string, EtcdMemberStatus> = Object.fromEntries(
+    (info.memberStatus || []).map((m) => [m.id, m]),
+  )
   const upCount = (info.memberStatus || []).filter((m) => m.healthy).length
 
   const body = (

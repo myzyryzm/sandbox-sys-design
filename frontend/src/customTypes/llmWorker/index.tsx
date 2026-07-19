@@ -7,6 +7,7 @@
 // runtime poll. The worker→redis edge is STATIC in the manifest (written by onAdd),
 // so no diagramEdges hook is needed. The `<name>-scaler` sidecar node (scalerOf)
 // renders at the top of the group's stack carrying the group's Edit button.
+import type { CustomTypeModule } from '../../types/customTypes'
 import WorkerTab from './WorkerTab'
 import ScalingTab from './ScalingTab'
 import PersistenceTab from './PersistenceTab'
@@ -58,4 +59,4 @@ export default {
 
   DiagramBody,
   diagramHeight: bodyHeight,
-}
+} satisfies CustomTypeModule

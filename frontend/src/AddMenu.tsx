@@ -7,16 +7,31 @@ import { useEffect, useRef, useState } from 'react'
 //
 // Props:
 //   groups: [{ label, items: [{ label, onClick }] }]
-export default function AddMenu({ groups }) {
+
+interface AddMenuItem {
+  label: string
+  onClick: () => void
+}
+
+interface AddMenuGroup {
+  label: string
+  items: AddMenuItem[]
+}
+
+interface AddMenuProps {
+  groups: AddMenuGroup[]
+}
+
+export default function AddMenu({ groups }: AddMenuProps) {
   const [open, setOpen] = useState(false)
-  const ref = useRef(null)
+  const ref = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!open) return
-    const onDown = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false)
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
     }
-    const onKey = (e) => {
+    const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
     }
     document.addEventListener('mousedown', onDown)

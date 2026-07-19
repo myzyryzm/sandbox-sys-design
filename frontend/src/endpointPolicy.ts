@@ -15,24 +15,30 @@
 // classifies ITS OWN routes through the registry seam — `customTypeOf(node).endpointPolicy`
 // — so no type-specific paths (e.g. a Download Coordinator's /dc/*) leak into this
 // generic layer.
+import type { ManifestNode } from './types/manifest'
+import type { DiscoveredEndpoint } from './types/registries'
+import type { EndpointPolicyResult } from './types/customTypes'
 import { customTypeOf } from './customTypes/index'
 
 // The service-local path of a discovered endpoint, whose `.path` is LB-prefixed as
 // `/<service><local>`. Strips the prefix and any trailing slash: `/health/` -> `/health`.
-export function localPathOf(e) {
+export function localPathOf(e: Pick<DiscoveredEndpoint, 'service' | 'path'>): string {
   const prefix = `/${e.service}`
   let p = e.path && e.path.startsWith(prefix) ? e.path.slice(prefix.length) : e.path || '/'
   return p.replace(/\/+$/, '') || '/'
 }
 
 // Generic operational routes that are never part of the external client surface.
-function genericInternal(p) {
+function genericInternal(p: string): boolean {
   return p === '/health' || p.startsWith('/resilience/')
 }
 
 // Resolve the policy for one endpoint. `ownerNode` is the manifest node that SERVES
 // the endpoint (so its custom service type, if any, gets first say over its routes).
-export function endpointPolicy(endpoint, ownerNode) {
+export function endpointPolicy(
+  endpoint: DiscoveredEndpoint,
+  ownerNode: ManifestNode | null | undefined,
+): EndpointPolicyResult {
   const p = localPathOf(endpoint)
   const custom = ownerNode && customTypeOf(ownerNode)?.endpointPolicy?.(ownerNode, p, endpoint)
   if (custom) return { visibility: 'public', locked: false, ...custom }
@@ -64,5 +70,5 @@ export function endpointPolicy(endpoint, ownerNode) {
 // An external service's endpoints belong to a third party, not to us, so they're
 // never advertised on our load balancer — they're still managed in that node's own
 // Endpoints tab, just kept off the system's public surface.
-export const isExternalEndpoint = (e, owner) =>
+export const isExternalEndpoint = (e: DiscoveredEndpoint, owner: ManifestNode | null | undefined): boolean =>
   !owner?.external && endpointPolicy(e, owner).visibility === 'public'

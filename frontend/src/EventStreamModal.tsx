@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
 import { resolveModelTs } from './modelBank'
+import type { ManifestNode } from './types/manifest'
+import type { DiscoveredTopic, ModelRecord } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * View of an event stream's topics, fetched live from GET /api/event-stream
@@ -27,9 +31,30 @@ import { resolveModelTs } from './modelBank'
 
 const TOPIC_RE = /^[a-zA-Z0-9._-]+$/ // mirrors TOPIC_RE in server/eventstreams.js
 
+// GET /api/event-stream's payload (registry topics ⊕ live broker probe).
+interface EventStreamResponse {
+  ok?: boolean
+  error?: string
+  topics?: DiscoveredTopic[]
+  consumersPaused?: boolean
+}
+
+// The modal's three-phase view of that payload.
+type StreamState =
+  | { status: 'loading' }
+  | { status: 'ok'; topics: DiscoveredTopic[]; consumersPaused?: boolean }
+  | { status: 'error'; error?: string }
+
 // Prompt seeding the launched session. The procedure (broker create + streams.json
 // entry, no rebuild) lives in the sandbox-event-stream skill, so we point Claude at it.
-function buildAddTopicPrompt({ systemId, cluster, topic, partitions, schemaModel, enforceSchema }) {
+function buildAddTopicPrompt({ systemId, cluster, topic, partitions, schemaModel, enforceSchema }: {
+  systemId: string
+  cluster: string
+  topic: string
+  partitions: number | string
+  schemaModel: string
+  enforceSchema: boolean
+}): string {
   const parts = Math.max(1, Number(partitions) || 1)
   const compose = `systems/${systemId}/docker-compose.yml`
   const entry = schemaModel
@@ -66,7 +91,12 @@ function buildAddTopicPrompt({ systemId, cluster, topic, partitions, schemaModel
 // Prompt to wire runtime validation for an already-enforced topic that has producers/
 // consumers. The schema reference + enforceSchema flag are already saved in streams.json
 // by the POST; this session only edits the producing/consuming app.py and rebuilds them.
-function buildEnforceSchemaPrompt({ systemId, cluster, topic, model }) {
+function buildEnforceSchemaPrompt({ systemId, cluster, topic, model }: {
+  systemId: string
+  cluster: string
+  topic: string
+  model: string
+}): string {
   return [
     `Use the sandbox-event-stream skill to ENFORCE the message schema on topic "${topic}" of the Kafka cluster "${cluster}" in the "${systemId}" system.`,
     '',
@@ -83,8 +113,18 @@ function buildEnforceSchemaPrompt({ systemId, cluster, topic, model }) {
   ].join('\n')
 }
 
+interface TopicSchemaProps {
+  systemId: string
+  clusterId: string
+  topic: DiscoveredTopic
+  models: ModelRecord[]
+  onLaunch?: LaunchSession
+  onClose?: () => void
+  onSaved?: () => void
+}
+
 /** The per-topic message-schema contract: a model-bank picker + enforce checkbox. */
-function TopicSchema({ systemId, clusterId, topic, models, onLaunch, onClose, onSaved }) {
+function TopicSchema({ systemId, clusterId, topic, models, onLaunch, onClose, onSaved }: TopicSchemaProps) {
   const savedModel = topic.schemaModel || ''
   const savedEnforce = !!topic.enforceSchema
   const [sel, setSel] = useState(savedModel)
@@ -103,7 +143,7 @@ function TopicSchema({ systemId, clusterId, topic, models, onLaunch, onClose, on
 
   const dirty = sel !== savedModel || enforce !== savedEnforce
 
-  function pick(e) {
+  function pick(e: ChangeEvent<HTMLSelectElement>) {
     const v = e.target.value
     setSel(v)
     if (!v) setEnforce(false) // no model → nothing to enforce
@@ -124,7 +164,7 @@ function TopicSchema({ systemId, clusterId, topic, models, onLaunch, onClose, on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: clusterId, topic: topic.id, schemaModel: sel, enforceSchema: enforce }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       // The registry write is done. Enforcing on a topic that already has producers/
       // consumers needs code changes + a rebuild — hand that to a launched session.
@@ -136,7 +176,7 @@ function TopicSchema({ systemId, clusterId, topic, models, onLaunch, onClose, on
       }
       onSaved?.()
     } catch (e) {
-      setErr(e.message)
+      setErr((e as Error).message)
     } finally {
       setSaving(false)
     }
@@ -193,9 +233,16 @@ function TopicSchema({ systemId, clusterId, topic, models, onLaunch, onClose, on
  * grow is a mechanical broker `--alter` + registry write — no rebuild, no session;
  * consumer groups on the topic rebalance onto the new partitions automatically.
  */
-function TopicPartitions({ systemId, clusterId, topic, onSaved }) {
-  const current = Number.isInteger(topic.partitions) ? topic.partitions : null
-  const [value, setValue] = useState(current ?? 1)
+interface TopicPartitionsProps {
+  systemId: string
+  clusterId: string
+  topic: DiscoveredTopic
+  onSaved?: () => void
+}
+
+function TopicPartitions({ systemId, clusterId, topic, onSaved }: TopicPartitionsProps) {
+  const current = Number.isInteger(topic.partitions) ? (topic.partitions as number) : null
+  const [value, setValue] = useState<number | string>(current ?? 1)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState('')
 
@@ -219,11 +266,11 @@ function TopicPartitions({ systemId, clusterId, topic, onSaved }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: clusterId, topic: topic.id, partitions: n }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onSaved?.()
     } catch (e) {
-      setErr(e.message)
+      setErr((e as Error).message)
     } finally {
       setSaving(false)
     }
@@ -259,8 +306,18 @@ function TopicPartitions({ systemId, clusterId, topic, onSaved }) {
   )
 }
 
+interface TopicRowProps {
+  systemId: string
+  clusterId: string
+  topic: DiscoveredTopic
+  models: ModelRecord[]
+  onLaunch?: LaunchSession
+  onClose?: () => void
+  onSaved?: () => void
+}
+
 /** One topic row: id + partitions + live/pending tag, expandable to schema/producers/consumers. */
-function TopicRow({ systemId, clusterId, topic, models, onLaunch, onClose, onSaved }) {
+function TopicRow({ systemId, clusterId, topic, models, onLaunch, onClose, onSaved }: TopicRowProps) {
   const [open, setOpen] = useState(false)
   return (
     <div className="topic-item">
@@ -339,20 +396,28 @@ function TopicRow({ systemId, clusterId, topic, models, onLaunch, onClose, onSav
   )
 }
 
-export default function EventStreamModal({ systemId, node, onClose, onLaunch, embedded = false }) {
-  const [state, setState] = useState({ status: 'loading' })
-  const [models, setModels] = useState([])
+interface EventStreamModalProps {
+  systemId: string
+  node: ManifestNode
+  onClose?: () => void
+  onLaunch?: LaunchSession
+  embedded?: boolean
+}
+
+export default function EventStreamModal({ systemId, node, onClose, onLaunch, embedded = false }: EventStreamModalProps) {
+  const [state, setState] = useState<StreamState>({ status: 'loading' })
+  const [models, setModels] = useState<ModelRecord[]>([])
   const [reloadKey, setReloadKey] = useState(0)
   const [adding, setAdding] = useState(false)
   const [topicId, setTopicId] = useState('')
-  const [partitions, setPartitions] = useState(1)
+  const [partitions, setPartitions] = useState<number | string>(1)
   const [schemaModel, setSchemaModel] = useState('')
   const [enforceSchema, setEnforceSchema] = useState(false)
 
   // The model bank — populates the per-topic schema picker (same source endpoints use).
   useEffect(() => {
     fetch(`/api/models?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ models?: ModelRecord[] }>)
       .then((d) => setModels(Array.isArray(d.models) ? d.models : []))
       .catch(() => setModels([]))
   }, [systemId])
@@ -399,7 +464,7 @@ export default function EventStreamModal({ systemId, node, onClose, onLaunch, em
   const [pauseBusy, setPauseBusy] = useState(false)
   const [pauseErr, setPauseErr] = useState('')
 
-  async function togglePause(next) {
+  async function togglePause(next: boolean) {
     setPauseBusy(true)
     setPauseErr('')
     setState((s) => (s.status === 'ok' ? { ...s, consumersPaused: next } : s))
@@ -409,10 +474,10 @@ export default function EventStreamModal({ systemId, node, onClose, onLaunch, em
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: node.id, consumersPaused: next }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
     } catch (e) {
-      setPauseErr(e.message)
+      setPauseErr(e instanceof Error ? e.message : String(e))
       setState((s) => (s.status === 'ok' ? { ...s, consumersPaused: !next } : s))
     } finally {
       setPauseBusy(false)
@@ -437,7 +502,7 @@ export default function EventStreamModal({ systemId, node, onClose, onLaunch, em
     setEnforceSchema(false)
   }
 
-  function submitTopic(e) {
+  function submitTopic(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!trimmed || topicErr || !onLaunch) return
     const prompt = buildAddTopicPrompt({ systemId, cluster: node.id, topic: trimmed, partitions, schemaModel, enforceSchema })

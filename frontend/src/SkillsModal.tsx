@@ -1,10 +1,21 @@
 import { useEffect, useState } from 'react'
 
+interface Skill {
+  name: string
+  description?: string
+  body?: string
+}
+
+type SkillsState =
+  | { status: 'loading' }
+  | { status: 'error'; error?: string }
+  | { status: 'ok'; skills: Skill[] }
+
 /**
  * One skill: name + description always visible; the full SKILL.md procedure is
  * collapsed behind a disclosure arrow to save vertical space, expanded on click.
  */
-function SkillItem({ skill }) {
+function SkillItem({ skill }: { skill: Skill }) {
   const [open, setOpen] = useState(false)
   return (
     <div className="skill-item">
@@ -35,19 +46,19 @@ function SkillItem({ skill }) {
  * modal is a window into what Claude already knows how to do here. Each skill
  * shows its name + description plus the full SKILL.md procedure verbatim.
  */
-export default function SkillsModal({ onClose }) {
-  const [state, setState] = useState({ status: 'loading' })
+export default function SkillsModal({ onClose }: { onClose: () => void }) {
+  const [state, setState] = useState<SkillsState>({ status: 'loading' })
 
   useEffect(() => {
     let cancelled = false
     fetch('/api/skills')
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ ok?: boolean; error?: string; skills?: Skill[] }>)
       .then((d) => {
         if (cancelled) return
         if (!d.ok) setState({ status: 'error', error: d.error })
-        else setState({ status: 'ok', skills: d.skills })
+        else setState({ status: 'ok', skills: d.skills || [] })
       })
-      .catch((err) => !cancelled && setState({ status: 'error', error: err.message }))
+      .catch((err: Error) => !cancelled && setState({ status: 'error', error: err.message }))
     return () => {
       cancelled = true
     }

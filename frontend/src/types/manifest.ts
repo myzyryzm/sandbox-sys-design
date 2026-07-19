@@ -56,6 +56,9 @@ export interface RedisWriteMode {
   mode?: string // 'wait'
   numreplicas?: number
   timeoutMs?: number
+  // Scan-owned: whether a WAIT call was found in the writer's source.
+  implemented?: boolean
+  updatedAt?: string
 }
 
 // A redis node's live-edited typed key namespaces (managed by /api/redis, no rebuild).
@@ -81,7 +84,8 @@ export interface RedisKeyspace {
 // Per-service load-balancer cluster entry (`type: "service-lb"` nodes).
 export interface SvcLbBlock {
   algorithm: string
-  instances: number
+  // Instance node ids ('<name>-1'…) — serviceLb.js writes the id list, not a count.
+  instances: string[]
 }
 
 // Replicated-with-Sentinel redis topology (primary + replicas + 3 sentinels).
@@ -129,17 +133,56 @@ export interface EtcdBlock {
   members: string[]
 }
 
+// One grpc.clients entry: a contract this service dials + its target node ids
+// (as server/grpc.js writes it and the gRPC service tab reads it).
+export interface GrpcClientEntry {
+  contract: string
+  targets?: string[]
+}
+
 // gRPC attachments: contracts this service serves / calls (bank-owned shapes).
 export interface GrpcBlock {
   servers?: string[]
-  clients?: unknown[]
+  clients?: GrpcClientEntry[]
   overrides?: unknown[]
 }
 
+// Circuit-breaker half of a connection's resilience policy, as the
+// ConnectionResilienceModal writes it (edges[].resilience.circuit_breaker).
+export interface CircuitBreakerConfig {
+  enabled?: boolean
+  failure_threshold?: number
+  pause_duration_seconds?: number
+  half_open_trial_calls?: number
+  open_behavior?: string // 'fail_fast' | 'fallback'
+  fallback_response?: string
+}
+
+// Retry half of a connection's resilience policy.
+export interface RetryConfig {
+  enabled?: boolean
+  max_attempts?: number
+  strategy?: string // 'exponential_backoff' | 'exponential_backoff_jitter'
+  base_delay_seconds?: number
+  max_delay_seconds?: number
+}
+
 // Per-connection resilience policy / connection pool blocks, keyed as the
-// resilience & connection-pool flows write them (read whole by their modals).
-export type ResilienceBlock = Record<string, unknown>
-export type ConnectionPoolBlock = Record<string, unknown>
+// resilience & connection-pool flows write them.
+export interface ResilienceBlock {
+  circuit_breaker?: CircuitBreakerConfig
+  retry?: RetryConfig
+  instruction?: string
+}
+
+export interface ConnectionPoolBlock {
+  enabled?: boolean
+  max_connections?: number
+  min_idle?: number
+  idle_timeout_seconds?: number
+  max_lifetime_seconds?: number
+  instruction?: string
+}
 
 // Kafka consumer-group custom node's link back to its cluster + group.
 export interface ConsumerGroupBlock {
@@ -185,7 +228,16 @@ export interface ManifestNode {
   cdcOf?: string
   scalerOf?: string
   streamOf?: string
+  // Replica-group members (`<id>-2..N`) written by the shared replica reconciler
+  // (server/replicaGroup.js) when a custom service scales.
+  replicas?: { instances: string[] }
+  // Download coordinator's distribution config (chunk size in bytes).
+  coordinator?: { chunk_size: number }
+  // Download worker → the coordinator node it registers with.
+  coordinatorId?: string
   replication?: 'sync' | 'async'
+  // False on a cluster member that accepts writes (e.g. a cassandra ring peer).
+  readonly?: boolean
   // Model-bank names backing a database's schema.
   schemaModels?: string[]
   svcLb?: SvcLbBlock
@@ -210,6 +262,10 @@ export interface ManifestEdge {
   to: string
   // e.g. 'consumer-fn' for a Kafka consumer-function edge.
   origin?: string
+  // Per-connection policy blocks the resilience / connection-pool flows write
+  // on the edge (App reads them to seed ConnectionResilienceModal).
+  resilience?: ResilienceBlock
+  connection_pool?: ConnectionPoolBlock
 }
 
 export interface Manifest {

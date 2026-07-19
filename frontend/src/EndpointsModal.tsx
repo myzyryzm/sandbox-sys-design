@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { ChangeEvent, KeyboardEvent, ReactElement } from 'react'
 import { endpointPolicy } from './endpointPolicy'
 import { resolveModelTs } from './modelBank'
+import type { ManifestNode } from './types/manifest'
+import type { DiscoveredEndpoint, EndpointHistoryEntry, ModelRecord } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * Per-service endpoint manager. Lists a service's endpoints and lets the user add
@@ -21,7 +25,24 @@ const PROTOCOLS = [
   { value: 'sse', label: 'SSE (text/event-stream)' },
 ]
 
-function blankForm() {
+// The add/edit form's fields (all text inputs except the live-saved internal flag).
+interface EndpointForm {
+  method: string
+  path: string
+  protocol: string
+  alias: string
+  request: string
+  response: string
+  requestModel: string
+  responseModel: string
+  description: string
+  internal: boolean
+}
+
+// The string-valued form fields the generic `set(k)` change handler may target.
+type EndpointFormTextKey = Exclude<keyof EndpointForm, 'internal'>
+
+function blankForm(): EndpointForm {
   return {
     method: 'GET',
     // The part AFTER the fixed `/<service>/` prefix shown in the form (no leading
@@ -46,18 +67,23 @@ function blankForm() {
 }
 
 // A history entry's ISO timestamp -> a short, local, human label (best-effort).
-function fmtAt(at) {
+function fmtAt(at?: string): string {
   if (!at) return ''
   const d = new Date(at)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
 }
 
+// A flat {key: type} schema map (the inline request/response form value).
+type SchemaMap = Record<string, string>
+
+type SchemaParse = { value: SchemaMap; error?: undefined } | { value?: undefined; error: string }
+
 // Parse a "key -> type" schema textarea. Empty -> {}. Must be a flat JSON object
 // of string values. Returns { value } or { error }.
-function parseSchema(text, label) {
+function parseSchema(text: string, label: string): SchemaParse {
   const t = text.trim()
   if (!t) return { value: {} }
-  let obj
+  let obj: unknown
   try {
     obj = JSON.parse(t)
   } catch {
@@ -69,14 +95,14 @@ function parseSchema(text, label) {
   for (const v of Object.values(obj)) {
     if (typeof v !== 'string') return { error: `${label} values must be type names (strings)` }
   }
-  return { value: obj }
+  return { value: obj as SchemaMap }
 }
 
 // Extra lines appended to the seed prompt when the endpoint's protocol is SSE, so the launched
 // session authors (or keeps) a streaming `text/event-stream` handler. The full procedure lives in
 // the sandbox-endpoint skill's SSE section — this just flags it and names the load-bearing rules.
 // Returns [] for non-SSE endpoints (spread into the prompt array, so it disappears cleanly).
-function sseGuidance(protocol) {
+function sseGuidance(protocol: string): string[] {
   if (protocol !== 'sse') return []
   return [
     ``,
@@ -99,9 +125,22 @@ function sseGuidance(protocol) {
 // in the `sandbox-endpoint` skill (.claude/skills/), so we just point Claude at it.
 // A request/response that references a model inlines that model's TypeScript (with
 // its transitive deps) instead of the flat key->type line.
-function buildEndpointPrompt({ systemId, service, method, path, protocol, alias, request, response, requestModel, responseModel, description, models }) {
-  const schema = (o) => (Object.keys(o).length ? JSON.stringify(o) : 'none')
-  const bodyLine = (label, model, inline) =>
+function buildEndpointPrompt({ systemId, service, method, path, protocol, alias, request, response, requestModel, responseModel, description, models }: {
+  systemId: string
+  service: string
+  method: string
+  path: string
+  protocol: string
+  alias: string
+  request: SchemaMap
+  response: SchemaMap
+  requestModel: string
+  responseModel: string
+  description: string
+  models: ModelRecord[]
+}): string {
+  const schema = (o: SchemaMap) => (Object.keys(o).length ? JSON.stringify(o) : 'none')
+  const bodyLine = (label: string, model: string, inline: SchemaMap) =>
     model
       ? `${label} body type — model "${model}" (TypeScript):\n\`\`\`ts\n${resolveModelTs(model, models)}\n\`\`\``
       : `${label} body schema (key -> type): ${schema(inline)}`
@@ -131,9 +170,24 @@ function buildEndpointPrompt({ systemId, service, method, path, protocol, alias,
 // rebuild), and it separates the endpoint's existing behavior from the new change so an
 // incremental edit stays incremental. The durable "edit in place" discipline also lives in
 // the sandbox-endpoint skill, so it survives a Resume (which seeds no prompt).
-function buildEndpointEditPrompt({ systemId, service, method, path, protocol, alias, request, response, requestModel, responseModel, priorDescription, newDescription, schemaChanged, models }) {
-  const schema = (o) => (Object.keys(o).length ? JSON.stringify(o) : 'none')
-  const bodyLine = (label, model, inline) =>
+function buildEndpointEditPrompt({ systemId, service, method, path, protocol, alias, request, response, requestModel, responseModel, priorDescription, newDescription, schemaChanged, models }: {
+  systemId: string
+  service: string
+  method: string
+  path: string
+  protocol: string
+  alias: string
+  request: SchemaMap
+  response: SchemaMap
+  requestModel: string
+  responseModel: string
+  priorDescription: string
+  newDescription: string
+  schemaChanged: boolean
+  models: ModelRecord[]
+}): string {
+  const schema = (o: SchemaMap) => (Object.keys(o).length ? JSON.stringify(o) : 'none')
+  const bodyLine = (label: string, model: string, inline: SchemaMap) =>
     model
       ? `${label} body type — model "${model}" (TypeScript):\n\`\`\`ts\n${resolveModelTs(model, models)}\n\`\`\``
       : `${label} body schema (key -> type): ${schema(inline)}`
@@ -179,9 +233,25 @@ function buildEndpointEditPrompt({ systemId, service, method, path, protocol, al
 // rebuild the owner + callers. It partitions owner vs caller edits so behavior never leaks into
 // callers, and scopes the change to the exact route (not prefix-sibling routes). The alias is
 // registry-only, so it's mentioned but is NOT a code change.
-function buildEndpointRenamePrompt({ systemId, service, method, oldPath, newPath, alias, callers, request, response, requestModel, responseModel, priorDescription, newDescription, schemaChanged, models }) {
-  const schema = (o) => (Object.keys(o).length ? JSON.stringify(o) : 'none')
-  const bodyLine = (label, model, inline) =>
+function buildEndpointRenamePrompt({ systemId, service, method, oldPath, newPath, alias, callers, request, response, requestModel, responseModel, priorDescription, newDescription, schemaChanged, models }: {
+  systemId: string
+  service: string
+  method: string
+  oldPath: string
+  newPath: string
+  alias: string
+  callers: string[]
+  request: SchemaMap
+  response: SchemaMap
+  requestModel: string
+  responseModel: string
+  priorDescription: string
+  newDescription: string
+  schemaChanged: boolean
+  models: ModelRecord[]
+}): string {
+  const schema = (o: SchemaMap) => (Object.keys(o).length ? JSON.stringify(o) : 'none')
+  const bodyLine = (label: string, model: string, inline: SchemaMap) =>
     model
       ? `${label} body type — model "${model}" (TypeScript):\n\`\`\`ts\n${resolveModelTs(model, models)}\n\`\`\``
       : `${label} body schema (key -> type): ${schema(inline)}`
@@ -241,7 +311,14 @@ function buildEndpointRenamePrompt({ systemId, service, method, oldPath, newPath
 // `downstreamMethods` call map — a pure endpoints.json edit, no code change and no rebuild.
 // This is also the backfill path for endpoints created before downstreamMethods existed.
 // The procedure lives in the sandbox-endpoint skill.
-function buildDescriptionsPrompt({ systemId, service, method, path, alias, downstream }) {
+function buildDescriptionsPrompt({ systemId, service, method, path, alias, downstream }: {
+  systemId: string
+  service: string
+  method: string
+  path: string
+  alias: string
+  downstream: string[]
+}): string {
   const list = (downstream || []).length ? downstream.join(', ') : '(none)'
   return [
     `Use the sandbox-endpoint skill to UPDATE the connection metadata for an HTTP endpoint`,
@@ -265,7 +342,12 @@ function buildDescriptionsPrompt({ systemId, service, method, path, alias, downs
 // Prompt for deleting a live endpoint: its registry entry is already removed by the
 // time this runs (see remove()); Claude only needs to strip the route from app.py and
 // rebuild. The procedure lives in the sandbox-endpoint skill.
-function buildDeletePrompt({ systemId, service, method, path }) {
+function buildDeletePrompt({ systemId, service, method, path }: {
+  systemId: string
+  service: string
+  method: string
+  path: string
+}): string {
   return [
     `Use the sandbox-endpoint skill to DELETE an HTTP endpoint from the "${systemId}" system.`,
     ``,
@@ -281,19 +363,19 @@ function buildDeletePrompt({ systemId, service, method, path }) {
 
 // The service-local path (what the registry/backend key on). `/api/endpoints`
 // returns the LB-prefixed path `/<service><local>`, so strip the prefix back off.
-function localPath(e) {
+function localPath(e: DiscoveredEndpoint): string {
   const prefix = `/${e.service}`
   return e.path.startsWith(prefix) ? e.path.slice(prefix.length) || '/' : e.path
 }
 
-function schemaToText(obj) {
+function schemaToText(obj?: Record<string, unknown> | null): string {
   return obj && Object.keys(obj).length ? JSON.stringify(obj) : ''
 }
 
 // When editing, a new Describe entry is APPENDED to the endpoint's existing
 // description rather than replacing it (an empty entry leaves it unchanged), so the
 // description accumulates over successive edits.
-function joinDescription(base, addition) {
+function joinDescription(base?: string | null, addition?: string | null): string {
   const b = (base || '').trim()
   const a = (addition || '').trim()
   if (!b) return a
@@ -305,7 +387,7 @@ function joinDescription(base, addition) {
 // model reference wins over the inline schema, and an empty schema renders as a dash.
 // Diffing on this (rather than the raw request/requestModel pair) treats model↔inline
 // and inline↔empty transitions as a single "changed" signal.
-function bodyText(h, kind) {
+function bodyText(h: EndpointHistoryEntry, kind: 'request' | 'response'): string {
   return kind === 'request'
     ? h.requestModel || schemaToText(h.request) || '—'
     : h.responseModel || schemaToText(h.response) || '—'
@@ -317,7 +399,29 @@ function bodyText(h, kind) {
 // (joinDescription), so a later description is the previous one plus "\n\n<chunk>" — we
 // surface only that appended chunk. The slice math runs on the RAW stored strings (trim
 // only the extracted chunk, never `prev` first — that would corrupt the offset).
-function diffHistoryEntry(curr, prev) {
+interface InitialHistoryDiff {
+  initial: true
+  alias: string
+  path: string
+  request: string
+  response: string
+  description: string
+}
+
+interface ChangeHistoryDiff {
+  initial?: false
+  description?: string
+  descriptionReplaced?: boolean
+  path?: { from: string; to: string }
+  alias?: { from: string; to: string }
+  request?: { from: string; to: string }
+  response?: { from: string; to: string }
+  empty?: boolean
+}
+
+type HistoryDiff = InitialHistoryDiff | ChangeHistoryDiff
+
+function diffHistoryEntry(curr: EndpointHistoryEntry, prev: EndpointHistoryEntry | null): HistoryDiff {
   if (!prev) {
     return {
       initial: true,
@@ -328,7 +432,7 @@ function diffHistoryEntry(curr, prev) {
       description: (curr.description || '').trim(),
     }
   }
-  const diff = {}
+  const diff: ChangeHistoryDiff = {}
   const cd = curr.description || ''
   const pd = prev.description || ''
   if (cd !== pd) {
@@ -350,26 +454,51 @@ function diffHistoryEntry(curr, prev) {
   return diff
 }
 
-export default function EndpointsModal({ systemId, service, node, onClose, onLaunch, embedded = false, onBusyChange }) {
-  const [endpoints, setEndpoints] = useState(null) // null = loading
-  const [models, setModels] = useState([]) // the system's models bank (for the ref dropdowns)
+// The endpoint identity captured when an edit starts (service-local path).
+interface EditingOriginal {
+  method: string
+  path: string
+  alias: string
+}
+
+// The code-affecting spec fields as the edit form first showed them.
+interface EditingBaseline {
+  request: string
+  response: string
+  requestModel: string
+  responseModel: string
+}
+
+interface EndpointsModalProps {
+  systemId: string
+  service: string
+  node: ManifestNode
+  onClose: () => void
+  onLaunch: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function EndpointsModal({ systemId, service, node, onClose, onLaunch, embedded = false, onBusyChange }: EndpointsModalProps) {
+  const [endpoints, setEndpoints] = useState<DiscoveredEndpoint[] | null>(null) // null = loading
+  const [models, setModels] = useState<ModelRecord[]>([]) // the system's models bank (for the ref dropdowns)
   const [adding, setAdding] = useState(false)
-  const [editingOriginal, setEditingOriginal] = useState(null) // { method, path, alias } when editing
-  const [editingHistory, setEditingHistory] = useState([]) // saved update snapshots (read-only)
+  const [editingOriginal, setEditingOriginal] = useState<EditingOriginal | null>(null) // { method, path, alias } when editing
+  const [editingHistory, setEditingHistory] = useState<EndpointHistoryEntry[]>([]) // saved update snapshots (read-only)
   const [editingDescription, setEditingDescription] = useState('') // current accumulated description (read-only); new entries append to it
-  const [editingDownstream, setEditingDownstream] = useState([]) // downstream node ids of the endpoint being edited
-  const [editingDownstreamDescriptions, setEditingDownstreamDescriptions] = useState({}) // node id -> connection description (read-only)
-  const [editingBaseline, setEditingBaseline] = useState(null) // original request/response spec (text form) for change detection
-  const [form, setForm] = useState(blankForm)
-  const [error, setError] = useState(null)
+  const [editingDownstream, setEditingDownstream] = useState<string[]>([]) // downstream node ids of the endpoint being edited
+  const [editingDownstreamDescriptions, setEditingDownstreamDescriptions] = useState<Record<string, string>>({}) // node id -> connection description (read-only)
+  const [editingBaseline, setEditingBaseline] = useState<EditingBaseline | null>(null) // original request/response spec (text form) for change detection
+  const [form, setForm] = useState<EndpointForm>(blankForm)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [confirmKey, setConfirmKey] = useState(null) // row pending delete confirm
+  const [confirmKey, setConfirmKey] = useState<string | null>(null) // row pending delete confirm
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
   const loadEndpoints = useCallback(() => {
     return fetch(`/api/endpoints?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ endpoints?: DiscoveredEndpoint[] }>)
       .then((d) => setEndpoints((d.endpoints || []).filter((e) => e.service === service)))
       .catch(() => setEndpoints([]))
   }, [systemId, service])
@@ -381,12 +510,13 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
   // The models bank powers the request/response "reference a model" dropdowns.
   useEffect(() => {
     fetch(`/api/models?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ models?: ModelRecord[] }>)
       .then((d) => setModels(Array.isArray(d.models) ? d.models : []))
       .catch(() => setModels([]))
   }, [systemId])
 
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
+  const set = (k: EndpointFormTextKey) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
+    setForm((f) => ({ ...f, [k]: e.target.value }))
 
   const editing = editingOriginal !== null
 
@@ -412,8 +542,8 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
   // owner's route decorator and every caller's call URL, then rebuild. An ALIAS-only rename is
   // registry-only (alias never appears in code), so it can save instantly with no session.
   const newLocalPath = '/' + form.path.trim().replace(/^\/+/, '')
-  const pathChanged = editing && newLocalPath !== editingOriginal.path
-  const aliasChanged = editing && form.alias.trim() !== (editingOriginal.alias || '')
+  const pathChanged = editing && newLocalPath !== editingOriginal!.path
+  const aliasChanged = editing && form.alias.trim() !== (editingOriginal!.alias || '')
   const renamed = pathChanged || aliasChanged
 
   function startAdd() {
@@ -428,7 +558,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
     setAdding(true)
   }
 
-  function startEdit(e) {
+  function startEdit(e: DiscoveredEndpoint) {
     // Pre-fill the form with whatever this endpoint currently is (method, path,
     // alias, request/response schemas) so editing starts from the live spec rather
     // than a blank form. The Describe field is intentionally left EMPTY: anything
@@ -497,7 +627,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
   // route from the load balancer's advertised surface (or restores it) with NO rebuild and
   // no Claude session — so it persists immediately (optimistic UI) and also updates the
   // in-memory list so the badge and the diagram's LB reflect it before the next poll.
-  async function toggleInternal(next) {
+  async function toggleInternal(next: boolean) {
     if (!editingOriginal) return
     setForm((f) => ({ ...f, internal: next }))
     setError(null)
@@ -513,7 +643,12 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
           internal: next,
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean
+        error?: string
+        nginxReloaded?: boolean
+        warning?: string
+      }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setEndpoints((list) =>
         (list || []).map((e) =>
@@ -529,11 +664,11 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
       }
     } catch (err) {
       setForm((f) => ({ ...f, internal: !next })) // revert the optimistic flip
-      setError(err.message)
+      setError((err as Error).message)
     }
   }
 
-  async function remove(e) {
+  async function remove(e: DiscoveredEndpoint) {
     setBusy(true)
     setError(null)
     const path = localPath(e)
@@ -545,7 +680,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, service, method: e.method, path }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setConfirmKey(null)
 
@@ -559,7 +694,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
       }
       await loadEndpoints()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -586,17 +721,17 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
     // schema when no model is chosen (then the inline map stays {}).
     const requestModel = form.requestModel || ''
     const responseModel = form.responseModel || ''
-    let reqValue = {}
+    let reqValue: SchemaMap = {}
     if (!requestModel) {
       const req = parseSchema(form.request, 'Request schema')
       if (req.error) return setError(req.error)
-      reqValue = req.value
+      reqValue = req.value! // no error → value present
     }
-    let respValue = {}
+    let respValue: SchemaMap = {}
     if (!responseModel) {
       const resp = parseSchema(form.response, 'Response schema')
       if (resp.error) return setError(resp.error)
-      respValue = resp.value
+      respValue = resp.value! // no error → value present
     }
 
     const alias = form.alias.trim()
@@ -628,7 +763,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
             system: systemId,
             service,
             method: form.method,
-            oldPath: editingOriginal.path,
+            oldPath: editingOriginal!.path,
             newPath: path,
             newAlias: alias,
             protocol: form.protocol,
@@ -640,7 +775,12 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
             conversationId,
           }),
         })
-        const data = await res.json().catch(() => ({}))
+        const data = (await res.json().catch(() => ({}))) as {
+          ok?: boolean
+          error?: string
+          callers?: string[]
+          scenarioWarnings?: string[]
+        }
         if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
         // A PATH change needs code edits (owner decorator + each caller's call URL) + rebuild —
@@ -654,7 +794,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
               systemId,
               service,
               method: form.method,
-              oldPath: editingOriginal.path,
+              oldPath: editingOriginal!.path,
               newPath: path,
               alias,
               callers: Array.isArray(data.callers) ? data.callers : [],
@@ -724,7 +864,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(record),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
       // Editing: tell the session the handler already exists and to modify it in place
@@ -765,12 +905,12 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
       onClose()
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError((err as Error).message)
     }
   }
 
   // Enter in the description submits (Shift+Enter = newline).
-  function onDescriptionKeyDown(e) {
+  function onDescriptionKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       submit()
@@ -780,7 +920,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
   // Render a request/response field: a "reference a model" dropdown plus, when no
   // model is chosen, the inline {key: type} JSON textarea (today's behavior). Picking
   // a model hides the textarea and shows the model's TypeScript as a read-only preview.
-  function schemaField(kind, label, placeholder) {
+  function schemaField(kind: 'request' | 'response', label: string, placeholder: string): ReactElement {
     const modelKey = kind === 'request' ? 'requestModel' : 'responseModel'
     const modelName = form[modelKey]
     const model = models.find((m) => m.name === modelName)
@@ -869,7 +1009,7 @@ export default function EndpointsModal({ systemId, service, node, onClose, onLau
                           disabled={busy}
                           title="Resume this endpoint’s Claude session"
                           onClick={() => {
-                            onLaunch({ sessionId: e.conversationId, mode: 'resume', prompt: '' })
+                            onLaunch({ sessionId: e.conversationId!, mode: 'resume', prompt: '' })
                             onClose()
                           }}
                         >

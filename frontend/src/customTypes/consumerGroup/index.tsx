@@ -7,6 +7,7 @@
 // dotted box, member cards stacked in columns — via the shared workerGroup predicate
 // SystemDiagram reads; its `<base>-scaler` sidecar node (scalerOf) renders at the top
 // of the stack as the group header, carrying the group's Edit button.
+import type { CustomTypeModule } from '../../types/customTypes'
 import ScalingTab from './ScalingTab'
 import { DiagramBody, bodyHeight } from './DiagramBody'
 
@@ -53,4 +54,4 @@ export default {
 
   DiagramBody,
   diagramHeight: bodyHeight,
-}
+} satisfies CustomTypeModule

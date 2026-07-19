@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import ConfirmDelete from './ConfirmDelete'
+import type { Manifest } from './types/manifest'
+import type { OutageInfo, WebsocketsFile, WsMethodEntry, WsMethodRecord } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * The websocket tier's SHARED editing surface, opened from the shared-methods panel
@@ -19,7 +22,7 @@ import ConfirmDelete from './ConfirmDelete'
  */
 
 // Hook signatures shown on the method headers (mirrors ws-shared/hooks.js).
-const METHOD_SIG = {
+const METHOD_SIG: Record<string, string> = {
   onMessage: 'onMessage(msg, ctx)',
   onSend: 'onSend(clientId, payload, ctx)',
 }
@@ -28,7 +31,21 @@ const METHOD_SIG = {
 // lives in the sandbox-websocket skill ("Shared methods"), so this stays short. The
 // registry entry (implemented:false) is already written by POST /api/websockets/methods;
 // the session writes ws-shared/hooks.js, restarts the servers, and flips the flag.
-function buildWsMethodPrompt({ systemId, lb, servers, method, base, entries }) {
+function buildWsMethodPrompt({
+  systemId,
+  lb,
+  servers,
+  method,
+  base,
+  entries,
+}: {
+  systemId: string
+  lb: string
+  servers: string[]
+  method: string
+  base?: string
+  entries: WsMethodEntry[]
+}): string {
   const lines = [
     `Use the sandbox-websocket skill to IMPLEMENT the shared "${method}" hook for the "${lb}" websocket tier in the "${systemId}" system.`,
     '',
@@ -62,16 +79,25 @@ const TABS = [
   { id: 'delete', label: 'Delete', danger: true },
 ]
 
-export default function WsSharedMethodsModal({ systemId, tier, manifest, outages = {}, onClose, onLaunch }) {
+interface WsSharedMethodsModalProps {
+  systemId: string
+  tier: WebsocketsFile
+  manifest?: Manifest | null
+  outages?: Record<string, OutageInfo>
+  onClose: () => void
+  onLaunch?: LaunchSession
+}
+
+export default function WsSharedMethodsModal({ systemId, tier, manifest, outages = {}, onClose, onLaunch }: WsSharedMethodsModalProps) {
   const [active, setActive] = useState('methods')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   // Methods tab: which method's "add behavior" editor is open, and its draft text.
-  const [adding, setAdding] = useState(null)
+  const [adding, setAdding] = useState<string | null>(null)
   const [text, setText] = useState('')
-  // Shutdown tab: picked server ids + outage duration.
-  const [picked, setPicked] = useState(() => new Set())
-  const [seconds, setSeconds] = useState(30)
+  // Shutdown tab: picked server ids + outage duration (raw input text while editing).
+  const [picked, setPicked] = useState<Set<string>>(() => new Set())
+  const [seconds, setSeconds] = useState<number | string>(30)
 
   const methods = tier.methods || {}
   const methodNames = Object.keys(METHOD_SIG)
@@ -81,7 +107,7 @@ export default function WsSharedMethodsModal({ systemId, tier, manifest, outages
   const dismiss = busy ? undefined : onClose
 
   // ------------------------------------------------------------------ Methods
-  async function saveEntry(method) {
+  async function saveEntry(method: string) {
     const t = text.trim()
     if (!t) {
       setError('Describe the behavior to add first.')
@@ -96,7 +122,11 @@ export default function WsSharedMethodsModal({ systemId, tier, manifest, outages
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, method, text: t, conversationId }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean
+        error?: string
+        methods?: Record<string, WsMethodRecord>
+      }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       // The response carries the updated methods block — prompt with the FULL entry
       // list so the session converges the hook on everything accumulated so far.
@@ -119,7 +149,7 @@ export default function WsSharedMethodsModal({ systemId, tier, manifest, outages
       onClose()
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -154,7 +184,7 @@ export default function WsSharedMethodsModal({ systemId, tier, manifest, outages
                     type="button"
                     className="link"
                     disabled={busy}
-                    onClick={() => onLaunch?.({ sessionId: m.conversationId, mode: 'resume', prompt: '' })}
+                    onClick={() => onLaunch?.({ sessionId: m.conversationId!, mode: 'resume', prompt: '' })}
                   >
                     Resume
                   </button>
@@ -234,7 +264,7 @@ export default function WsSharedMethodsModal({ systemId, tier, manifest, outages
   }
 
   // ----------------------------------------------------------------- Shutdown
-  function togglePick(sid) {
+  function togglePick(sid: string) {
     setPicked((prev) => {
       const next = new Set(prev)
       if (next.has(sid)) next.delete(sid)
@@ -263,17 +293,17 @@ export default function WsSharedMethodsModal({ systemId, tier, manifest, outages
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ system: systemId, node: sid, duration_seconds: n }),
         })
-        const data = await res.json().catch(() => ({}))
+        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
         if (!res.ok || !data.ok) throw new Error(`${sid}: ${data.error || `HTTP ${res.status}`}`)
       }
       onClose() // the outage poll paints them orange on the diagram
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
-  async function bringBack(sid) {
+  async function bringBack(sid: string) {
     setBusy(true)
     setError(null)
     try {
@@ -282,12 +312,12 @@ export default function WsSharedMethodsModal({ systemId, tier, manifest, outages
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, node: sid }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setBusy(false)
     } catch (err) {
       setBusy(false)
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -376,7 +406,7 @@ export default function WsSharedMethodsModal({ systemId, tier, manifest, outages
           embedded
           systemId={systemId}
           node={lbNode}
-          manifest={manifest}
+          manifest={manifest!}
           onClose={onClose}
           onBusyChange={setBusy}
         />

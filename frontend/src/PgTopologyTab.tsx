@@ -1,6 +1,36 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { queryVector } from './prometheus'
 import { buildPgTopologyRetrofitPrompt } from './pgTopologyPrompts'
+import type { ManifestNode, PostgresHaBlock } from './types/manifest'
+import type { LaunchSession } from './types/customTypes'
+
+interface PgReplica {
+  id: string
+  ordinal: number
+  replication?: 'sync' | 'async'
+}
+
+// GET/POST /api/postgres/topology response.
+interface PgTopoState {
+  ok?: boolean
+  error?: string
+  mode: 'standalone' | 'replicated'
+  replicas: PgReplica[]
+  ha?: PostgresHaBlock | null
+  limits?: { replicasMin: number; replicasMax: number; commitLevels?: string[] }
+  services?: string[]
+  node?: ManifestNode | null
+  dsn?: { readWrite?: string; readOnly?: string }
+  warnings?: string[]
+}
+
+// Per-member live role read from the watcher's pg_ha_* series.
+interface PgLiveMember {
+  up?: boolean
+  primary?: boolean
+  fenced?: boolean
+  lag?: number
+}
 
 /**
  * A postgres node's "Topology" tab (create-database primaries only). Reconciles the node
@@ -21,19 +51,28 @@ import { buildPgTopologyRetrofitPrompt } from './pgTopologyPrompts'
  * below reads the watcher's pg_ha_* series from Prometheus rather than trusting the
  * manifest — that is also what powers the Promote / Rejoin actions.
  */
-export default function PgTopologyTab({ systemId, node, onClose, onLaunch, embedded = false, onBusyChange }) {
+interface PgTopologyTabProps {
+  systemId: string
+  node: ManifestNode
+  onClose: () => void
+  onLaunch?: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function PgTopologyTab({ systemId, node, onClose, onLaunch, embedded = false, onBusyChange }: PgTopologyTabProps) {
   const dbId = node.id
-  const [topo, setTopo] = useState(null)
-  const [live, setLive] = useState(null) // member -> { up, primary, fenced, lag }
-  const [error, setError] = useState(null)
-  const [busy, setBusy] = useState(null) // 'apply' | `promote:<id>` | `rejoin:<id>` | null
-  const [result, setResult] = useState(null)
+  const [topo, setTopo] = useState<PgTopoState | null>(null)
+  const [live, setLive] = useState<Record<string, PgLiveMember> | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null) // 'apply' | `promote:<id>` | `rejoin:<id>` | null
+  const [result, setResult] = useState<{ mode: string; warnings: string[] } | null>(null)
 
   // Form state, seeded from the live topology on first load only (edits survive polls).
   const seeded = useRef(false)
-  const [mode, setMode] = useState('standalone')
+  const [mode, setMode] = useState<'standalone' | 'replicated'>('standalone')
   const [replicas, setReplicas] = useState(2)
-  const [syncOrdinals, setSyncOrdinals] = useState([])
+  const [syncOrdinals, setSyncOrdinals] = useState<number[]>([])
   const [quorum, setQuorum] = useState(1)
   const [commitLevel, setCommitLevel] = useState('on')
   const [foEnabled, setFoEnabled] = useState(true)
@@ -47,7 +86,7 @@ export default function PgTopologyTab({ systemId, node, onClose, onLaunch, embed
       const res = await fetch(
         `/api/postgres/topology?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(dbId)}`,
       )
-      const data = await res.json()
+      const data = (await res.json()) as PgTopoState
       if (!data.ok) throw new Error(data.error || 'failed to load')
       setTopo(data)
       if (!seeded.current) {
@@ -73,7 +112,7 @@ export default function PgTopologyTab({ systemId, node, onClose, onLaunch, embed
           queryVector('/api/prometheus', `pg_ha_is_fenced{job="${job}"}`),
           queryVector('/api/prometheus', `pg_ha_replay_lag_seconds{job="${job}"}`),
         ])
-        const m = {}
+        const m: Record<string, PgLiveMember> = {}
         for (const s of ups) if (s.labels.member) m[s.labels.member] = { up: s.value === 1 }
         for (const s of prim) if (m[s.labels.member]) m[s.labels.member].primary = s.value === 1
         for (const s of fenced) if (m[s.labels.member]) m[s.labels.member].fenced = s.value === 1
@@ -83,7 +122,7 @@ export default function PgTopologyTab({ systemId, node, onClose, onLaunch, embed
         setLive(null)
       }
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }, [systemId, dbId])
 
@@ -115,14 +154,14 @@ export default function PgTopologyTab({ systemId, node, onClose, onLaunch, embed
   const stale = live ? Object.keys(live).filter((m) => live[m].fenced) : []
 
   const ordinals = Array.from({ length: replicas }, (_, i) => i + 1)
-  const toggleSync = (o) =>
+  const toggleSync = (o: number) =>
     setSyncOrdinals((s) => (s.includes(o) ? s.filter((x) => x !== o) : [...s, o].sort((a, b) => a - b)))
   // A quorum bigger than the sync set would block every commit — the backend rejects it,
   // so keep the picker honest instead of letting them submit it.
   const maxQuorum = Math.max(1, syncOrdinals.length)
   const effQuorum = Math.min(quorum, maxQuorum)
 
-  async function call(url, body, busyKey) {
+  async function call(url: string, body: Record<string, unknown>, busyKey: string) {
     setBusy(busyKey)
     setError(null)
     setResult(null)
@@ -132,21 +171,21 @@ export default function PgTopologyTab({ systemId, node, onClose, onLaunch, embed
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as PgTopoState
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       await load()
       return data
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       return null
     } finally {
       setBusy(null)
     }
   }
 
-  const promote = (member) =>
+  const promote = (member: string) =>
     call('/api/postgres/failover', { system: systemId, id: dbId, target: member }, `promote:${member}`)
-  const rejoin = (member) =>
+  const rejoin = (member: string) =>
     call('/api/postgres/rejoin', { system: systemId, id: dbId, member }, `rejoin:${member}`)
 
   async function apply() {
@@ -432,6 +471,6 @@ export default function PgTopologyTab({ systemId, node, onClose, onLaunch, embed
   )
 }
 
-function sameSet(a, b) {
+function sameSet(a: number[], b: number[]) {
   return a.length === b.length && a.every((x) => b.includes(x))
 }

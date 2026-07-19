@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import type { SessionLaunch } from './types/customTypes'
 
 /**
  * Browser terminal wired to a Claude Code session for the given system.
@@ -19,9 +20,16 @@ import '@xterm/xterm/css/xterm.css'
  * socket opens so the parent can flip a 'new' session to 'resume' (re-running
  * --session-id on the same id would error).
  */
-export default function Terminal({ systemId, session = null, onLaunched, onSessionDone }) {
-  const containerRef = useRef(null)
-  const [status, setStatus] = useState('connecting')
+interface TerminalProps {
+  systemId: string
+  session?: SessionLaunch | null
+  onLaunched?: (sessionId: string) => void
+  onSessionDone?: (sessionId: string | null) => void
+}
+
+export default function Terminal({ systemId, session = null, onLaunched, onSessionDone }: TerminalProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
 
   const sessionId = session?.sessionId || null
   const mode = session?.mode || null
@@ -43,10 +51,10 @@ export default function Terminal({ systemId, session = null, onLaunched, onSessi
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
-    term.open(containerRef.current)
+    term.open(containerRef.current!)
     fit.fit()
 
-    let ws = null
+    let ws: WebSocket | null = null
     let cancelled = false
 
     const sendResize = () => {
@@ -89,7 +97,7 @@ export default function Terminal({ systemId, session = null, onLaunched, onSessi
         }
         // Binary control frame from the server (e.g. the completion sentinel).
         try {
-          const msg = JSON.parse(new TextDecoder().decode(e.data))
+          const msg = JSON.parse(new TextDecoder().decode(e.data as ArrayBuffer)) as { type?: string }
           if (msg?.type === 'done') onDoneRef.current?.(sessionId)
         } catch {
           /* ignore malformed control frames */
@@ -114,7 +122,7 @@ export default function Terminal({ systemId, session = null, onLaunched, onSessi
     })
 
     const ro = new ResizeObserver(sendResize)
-    ro.observe(containerRef.current)
+    ro.observe(containerRef.current!)
 
     return () => {
       cancelled = true

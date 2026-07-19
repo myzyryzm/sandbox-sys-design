@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 
 /**
@@ -19,15 +19,22 @@ const ALGORITHMS = [
   { value: 'source', label: 'Source hash' },
 ]
 
-export default function CreateWebsockets({ systemId, onClose }) {
+interface CreateWebsocketsProps {
+  systemId: string
+  onClose: () => void
+}
+
+export default function CreateWebsockets({ systemId, onClose }: CreateWebsocketsProps) {
   const [name, setName] = useState('ws')
-  const [servers, setServers] = useState(2)
+  // Holds the raw input text while editing (coerced with Number() on use).
+  const [servers, setServers] = useState<number | string>(2)
   const [algorithm, setAlgorithm] = useState('leastconn')
   const [bus, setBus] = useState('redis')
   const [presence, setPresence] = useState('redis')
-  const [existing, setExisting] = useState(null) // tier registry when one already exists
-  const [status, setStatus] = useState('idle') // idle | submitting | error
-  const [error, setError] = useState(null)
+  // Tier registry when one already exists.
+  const [existing, setExisting] = useState<{ lb: string } | null>(null)
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
 
   const busy = status === 'submitting'
   const nameErr =
@@ -40,14 +47,14 @@ export default function CreateWebsockets({ systemId, onClose }) {
 
   useEffect(() => {
     fetch(`/api/websockets?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ ok?: boolean; tier?: { lb: string } | null }>)
       .then((d) => {
         if (d.ok && d.tier) setExisting(d.tier)
       })
       .catch(() => {})
   }, [systemId])
 
-  async function submit(e) {
+  async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setStatus('submitting')
     setError(null)
@@ -64,12 +71,12 @@ export default function CreateWebsockets({ systemId, onClose }) {
           presence,
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
       setStatus('error')
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 

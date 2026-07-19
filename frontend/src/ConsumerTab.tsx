@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { ChangeEvent, KeyboardEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'
+import type { Manifest, ManifestNode } from './types/manifest'
+import type { ConsumerEntry, ConsumerHistoryEntry } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * An event stream's "Consumers" tab (embedded in NodeEditModal for a Kafka cluster node). It
@@ -27,18 +31,29 @@ const GROUP_RE = /^[a-zA-Z0-9._-]+$/ // mirrors GROUP_RE in server/consumers.js
 const POLL_MIN = 100
 const POLL_MAX = 600_000
 
-function blankForm() {
+// pollRate holds the raw input text while editing (coerced on submit).
+interface ConsumerForm {
+  name: string
+  service: string
+  serviceName: string
+  topic: string
+  pollRate: number | string
+  groupId: string
+  description: string
+}
+
+function blankForm(): ConsumerForm {
   return { name: '', service: '', serviceName: '', topic: '', pollRate: 1000, groupId: '', description: '' }
 }
 
 // The default Kafka group id for a function — mirrors groupIdFor in server/consumers.js.
 // Shown live in the group field until the user takes it over.
-function defaultGroupId(service, name) {
+function defaultGroupId(service?: string | null, name?: string | null) {
   return service && name ? `${service}-${name}` : ''
 }
 
 // A history entry's ISO timestamp -> a short, local, human label (best-effort).
-function fmtAt(at) {
+function fmtAt(at?: string) {
   if (!at) return ''
   const d = new Date(at)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
@@ -46,7 +61,7 @@ function fmtAt(at) {
 
 // When editing, a new description entry is APPENDED to the existing one (an empty entry leaves it
 // unchanged), so the description accumulates over successive edits. (Same rule as the other tabs.)
-function joinDescription(base, addition) {
+function joinDescription(base?: string | null, addition?: string | null) {
   const b = (base || '').trim()
   const a = (addition || '').trim()
   if (!b) return a
@@ -57,11 +72,31 @@ function joinDescription(base, addition) {
 // Reduce a history snapshot to just what changed vs the previous one, so the trail reads like a
 // changelog. First snapshot (prev == null) is the creation. Descriptions accumulate by append, so a
 // later description is the previous one plus "\n\n<chunk>" — surface only that appended chunk.
-function diffEntry(curr, prev) {
+interface HistoryDiffInitial {
+  initial: true
+  description: string
+  topic?: string
+  pollRate?: number
+}
+
+interface HistoryDiffChange {
+  initial?: false
+  description?: string
+  descriptionReplaced?: boolean
+  topic?: { from?: string; to?: string }
+  pollRate?: { from?: number; to?: number }
+  group?: { from?: string; to?: string }
+  rename?: { from?: string; to?: string }
+  empty?: boolean
+}
+
+type HistoryDiff = HistoryDiffInitial | HistoryDiffChange
+
+function diffEntry(curr: ConsumerHistoryEntry, prev: ConsumerHistoryEntry | null): HistoryDiff {
   if (!prev) {
     return { initial: true, description: (curr.description || '').trim(), topic: curr.topic, pollRate: curr.pollRate }
   }
-  const diff = {}
+  const diff: HistoryDiffChange = {}
   const cd = curr.description || ''
   const pd = prev.description || ''
   if (cd !== pd) {
@@ -86,7 +121,37 @@ function diffEntry(curr, prev) {
 // repeatable procedure lives in the sandbox-event-stream skill, so this stays short. The
 // consumers.json entry, the streams.json consumer group, and the cluster→service edge already
 // exist (written by POST /api/consumers); the session writes the code + rebuilds the service.
-function buildConsumerPrompt({ systemId, service, cluster, name, topic, pollRate, groupId, description, editing, created, priorDescription, priorTopic, priorPollRate, priorGroupId }) {
+function buildConsumerPrompt({
+  systemId,
+  service,
+  cluster,
+  name,
+  topic,
+  pollRate,
+  groupId,
+  description,
+  editing,
+  created,
+  priorDescription,
+  priorTopic,
+  priorPollRate,
+  priorGroupId,
+}: {
+  systemId: string
+  service: string
+  cluster: string
+  name: string
+  topic: string
+  pollRate: number
+  groupId: string
+  description?: string
+  editing?: boolean
+  created?: boolean
+  priorDescription?: string | null
+  priorTopic?: string
+  priorPollRate?: number
+  priorGroupId?: string
+}): string {
   const lines = [
     `Use the sandbox-event-stream skill to ${editing ? 'UPDATE' : 'IMPLEMENT'} a Kafka CONSUMER FUNCTION in the "${systemId}" system.`,
     '',
@@ -149,8 +214,22 @@ function buildConsumerPrompt({ systemId, service, cluster, name, topic, pollRate
 // connection metadata — the `downstream` list and its `downstreamDescriptions` text map — a pure
 // consumers.json edit, no code change and no rebuild. Also the backfill path for consumers created
 // before downstreamDescriptions existed. The procedure lives in the sandbox-event-stream skill.
-function buildConsumerDescriptionsPrompt({ systemId, service, cluster, name, topic, downstream }) {
-  const list = (downstream || []).length ? downstream.join(', ') : '(none recorded yet)'
+function buildConsumerDescriptionsPrompt({
+  systemId,
+  service,
+  cluster,
+  name,
+  topic,
+  downstream,
+}: {
+  systemId: string
+  service: string
+  cluster: string
+  name: string
+  topic: string
+  downstream?: string[]
+}): string {
+  const list = downstream?.length ? downstream.join(', ') : '(none recorded yet)'
   return [
     `Use the sandbox-event-stream skill to UPDATE the connection metadata for the Kafka consumer`,
     `function "${name}" — owned by service "${service}", consuming topic "${topic}" on cluster "${cluster}" —`,
@@ -170,7 +249,25 @@ function buildConsumerDescriptionsPrompt({ systemId, service, cluster, name, top
 // Prompt for renaming an IMPLEMENTED consumer: the consumers.json entry + streams.json group are
 // already renamed by the PUT; this session renames the poll loop + its group id in app.py and
 // rebuilds. (A pending consumer is registry-only — no session.)
-function buildConsumerRenamePrompt({ systemId, service, cluster, oldName, newName, topic, oldGroupId, newGroupId }) {
+function buildConsumerRenamePrompt({
+  systemId,
+  service,
+  cluster,
+  oldName,
+  newName,
+  topic,
+  oldGroupId,
+  newGroupId,
+}: {
+  systemId: string
+  service: string
+  cluster: string
+  oldName: string
+  newName: string
+  topic: string
+  oldGroupId?: string
+  newGroupId?: string
+}): string {
   const groupChanged = oldGroupId !== newGroupId
   return [
     `Use the sandbox-event-stream skill to RENAME a Kafka consumer function in the "${systemId}" system.`,
@@ -198,7 +295,21 @@ function buildConsumerRenamePrompt({ systemId, service, cluster, oldName, newNam
 
 // Prompt for deleting an implemented consumer: its consumers.json entry + streams.json group + edge
 // are already removed by the DELETE; this session strips the poll loop from app.py and rebuilds.
-function buildConsumerDeletePrompt({ systemId, service, cluster, name, topic, groupId }) {
+function buildConsumerDeletePrompt({
+  systemId,
+  service,
+  cluster,
+  name,
+  topic,
+  groupId,
+}: {
+  systemId: string
+  service: string
+  cluster: string
+  name: string
+  topic: string
+  groupId?: string
+}): string {
   return [
     `Use the sandbox-event-stream skill to DELETE the Kafka consumer function "${name}" from service`,
     `"${service}" in the "${systemId}" system (it consumed topic "${topic}" on cluster "${cluster}").`,
@@ -211,35 +322,49 @@ function buildConsumerDeletePrompt({ systemId, service, cluster, name, topic, gr
   ].join('\n')
 }
 
-export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }) {
+interface ConsumerTabProps {
+  systemId: string
+  node: ManifestNode
+  manifest?: Manifest | null
+  onClose: () => void
+  onLaunch: LaunchSession
+  embedded?: boolean
+  onBusyChange?: (busy: boolean) => void
+}
+
+export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunch, embedded = false, onBusyChange }: ConsumerTabProps) {
   const cluster = node.id
-  const [consumers, setConsumers] = useState(null) // this cluster's consumer functions; null = loading
-  const [topics, setTopics] = useState([]) // this cluster's topic ids (for the picker)
-  const [error, setError] = useState(null)
+  const [consumers, setConsumers] = useState<ConsumerEntry[] | null>(null) // this cluster's consumer functions; null = loading
+  const [topics, setTopics] = useState<string[]>([]) // this cluster's topic ids (for the picker)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   // Define / edit form.
   const [adding, setAdding] = useState(false)
-  const [editingName, setEditingName] = useState(null) // (service,name) of the function being edited
-  const [editingService, setEditingService] = useState(null)
+  const [editingName, setEditingName] = useState<string | null>(null) // (service,name) of the function being edited
+  const [editingService, setEditingService] = useState<string | null>(null)
   const [editingDescription, setEditingDescription] = useState('') // current accumulated description (read-only)
-  const [editingDownstream, setEditingDownstream] = useState([]) // Claude-managed node ids this loop calls/reads/writes
-  const [editingDownstreamDescriptions, setEditingDownstreamDescriptions] = useState({}) // node id -> connection blurb
-  const [editingHistory, setEditingHistory] = useState([])
-  const [editingOriginal, setEditingOriginal] = useState(null) // { topic, pollRate, groupId } baseline for change detection
+  const [editingDownstream, setEditingDownstream] = useState<string[]>([]) // Claude-managed node ids this loop calls/reads/writes
+  const [editingDownstreamDescriptions, setEditingDownstreamDescriptions] = useState<Record<string, string>>({}) // node id -> connection blurb
+  const [editingHistory, setEditingHistory] = useState<ConsumerHistoryEntry[]>([])
+  // { topic, pollRate, groupId } baseline for change detection.
+  const [editingOriginal, setEditingOriginal] = useState<{ topic: string; pollRate?: number; groupId: string } | null>(null)
   const [groupTouched, setGroupTouched] = useState(false) // once the user edits the group field it stops tracking service+name
-  const [form, setForm] = useState(blankForm)
-  const [confirmKey, setConfirmKey] = useState(null) // function pending delete confirm
-  const [renamingKey, setRenamingKey] = useState(null) // function whose name is being edited inline
+  const [form, setForm] = useState<ConsumerForm>(blankForm)
+  const [confirmKey, setConfirmKey] = useState<string | null>(null) // function pending delete confirm
+  const [renamingKey, setRenamingKey] = useState<string | null>(null) // function whose name is being edited inline
   const [renameValue, setRenameValue] = useState('')
 
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange])
 
   const load = useCallback(() => {
     return Promise.all([
-      fetch(`/api/consumers?system=${encodeURIComponent(systemId)}`).then((r) => r.json()).catch(() => ({})),
+      fetch(`/api/consumers?system=${encodeURIComponent(systemId)}`)
+        .then((r) => r.json() as Promise<{ ok?: boolean; consumers?: ConsumerEntry[] }>)
+        .catch(() => ({}) as { ok?: boolean; consumers?: ConsumerEntry[] }),
       fetch(`/api/event-stream?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(cluster)}&live=0`)
-        .then((r) => r.json()).catch(() => ({})),
+        .then((r) => r.json() as Promise<{ ok?: boolean; topics?: Array<{ id: string }> }>)
+        .catch(() => ({}) as { ok?: boolean; topics?: Array<{ id: string }> }),
     ]).then(([cons, streams]) => {
       const mine = cons.ok ? (cons.consumers || []).filter((c) => c.cluster === cluster) : []
       setConsumers(mine)
@@ -250,8 +375,9 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
   useEffect(() => { load() }, [load])
 
   const editing = editingName !== null
-  const setField = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
-  const key = (c) => `${c.service} ${c.name}`
+  const setField = (k: keyof ConsumerForm) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
+    setForm((f) => ({ ...f, [k]: e.target.value }))
+  const key = (c: ConsumerEntry) => `${c.service} ${c.name}`
 
   function startAdd() {
     setForm({ ...blankForm(), topic: topics[0] || '' })
@@ -267,8 +393,8 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
     setAdding(true)
   }
 
-  function startEdit(c) {
-    setForm({ name: c.name, service: c.service, topic: c.topic, pollRate: c.pollRate, groupId: c.groupId || defaultGroupId(c.service, c.name), description: '' })
+  function startEdit(c: ConsumerEntry) {
+    setForm({ name: c.name, service: c.service, serviceName: '', topic: c.topic, pollRate: c.pollRate ?? 1000, groupId: c.groupId || defaultGroupId(c.service, c.name), description: '' })
     setGroupTouched(true) // an existing group id never auto-tracks; it's edited deliberately
     setEditingName(c.name)
     setEditingService(c.service)
@@ -277,7 +403,8 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
     // downstream doesn't linger in the Connections list. Mirrors the endpoint modal.
     const nodeIds = new Set((manifest?.nodes || []).map((n) => n.id))
     const ds = (Array.isArray(c.downstream) ? c.downstream : []).filter((d) => nodeIds.has(d))
-    const dd = c.downstreamDescriptions && typeof c.downstreamDescriptions === 'object' ? c.downstreamDescriptions : {}
+    const dd: Record<string, string> =
+      c.downstreamDescriptions && typeof c.downstreamDescriptions === 'object' ? c.downstreamDescriptions : {}
     setEditingDownstream(ds)
     setEditingDownstreamDescriptions(Object.fromEntries(ds.filter((d) => typeof dd[d] === 'string').map((d) => [d, dd[d]])))
     setEditingHistory(Array.isArray(c.history) ? c.history : [])
@@ -301,8 +428,8 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
 
   async function submit() {
     setError(null)
-    const name = editing ? editingName : form.name.trim()
-    const service = editing ? editingService : form.serviceName.trim()
+    const name = editing ? editingName! : form.name.trim()
+    const service = editing ? editingService! : form.serviceName.trim()
     if (!editing) {
       if (!name) return setError('Function name is required')
       if (!IDENT_RE.test(name)) {
@@ -333,9 +460,9 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
     // poll rate / group id. A description-only edit is registry-only (no session).
     const dirtyCode =
       !editing ||
-      form.topic !== editingOriginal.topic ||
-      pollRate !== editingOriginal.pollRate ||
-      groupId !== editingOriginal.groupId
+      form.topic !== editingOriginal!.topic ||
+      pollRate !== editingOriginal!.pollRate ||
+      groupId !== editingOriginal!.groupId
     const conversationId = crypto.randomUUID()
 
     setBusy(true)
@@ -354,7 +481,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
             options: { cluster, topic: form.topic, fn: name, groupId, pollRate, description, conversationId },
           }),
         })
-        const data = await res.json().catch(() => ({}))
+        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
         if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       } else {
         const res = await fetch('/api/consumers', {
@@ -362,7 +489,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ system: systemId, service, name, cluster, topic: form.topic, pollRate, groupId, description, conversationId }),
         })
-        const data = await res.json().catch(() => ({}))
+        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
         if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       }
 
@@ -387,13 +514,13 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
       cancelForm()
       await load()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  function onDescriptionKeyDown(e) {
+  function onDescriptionKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       submit()
@@ -409,17 +536,17 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
       mode: 'new',
       prompt: buildConsumerDescriptionsPrompt({
         systemId,
-        service: editingService,
+        service: editingService!,
         cluster,
-        name: editingName,
+        name: editingName!,
         topic: editingOriginal?.topic || form.topic,
         downstream: editingDownstream,
       }),
-    }, { kind: 'consumer', target: editingService, title: 'descriptions' })
+    }, { kind: 'consumer', target: editingService ?? undefined, title: 'descriptions' })
     onClose()
   }
 
-  function startRename(c) {
+  function startRename(c: ConsumerEntry) {
     setRenamingKey(key(c))
     setRenameValue(c.name)
     setConfirmKey(null)
@@ -435,7 +562,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
   // Rename a consumer function (its name is the permanent id, so this is a dedicated PUT, not an
   // upsert). Registry + streams.json group move happen server-side; an implemented consumer also
   // needs its app.py loop + group id renamed, which a launched session does (then we close).
-  async function renameConsumer(c) {
+  async function renameConsumer(c: ConsumerEntry) {
     const newName = renameValue.trim()
     if (newName === c.name) return cancelRename()
     if (!IDENT_RE.test(newName) || newName.length > 60) {
@@ -452,7 +579,13 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, service: c.service, oldName: c.name, newName }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean
+        error?: string
+        wasImplemented?: boolean
+        oldGroupId?: string
+        consumer?: ConsumerEntry
+      }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setRenamingKey(null)
       // An implemented consumer has a live loop + group id in app.py — rename them + rebuild via a session.
@@ -471,13 +604,13 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
       }
       await load()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  function onRenameKeyDown(e, c) {
+  function onRenameKeyDown(e: KeyboardEvent<HTMLInputElement>, c: ConsumerEntry) {
     if (e.key === 'Enter') {
       e.preventDefault()
       renameConsumer(c)
@@ -487,7 +620,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
     }
   }
 
-  async function removeConsumer(c) {
+  async function removeConsumer(c: ConsumerEntry) {
     setBusy(true)
     setError(null)
     try {
@@ -496,7 +629,12 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, service: c.service, name: c.name }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean
+        error?: string
+        wasImplemented?: boolean
+        groupId?: string
+      }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setConfirmKey(null)
       // An implemented consumer has a live poll loop in the service — strip it + rebuild via a session.
@@ -511,7 +649,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
       }
       await load()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -575,7 +713,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
                         disabled={busy}
                         title="Resume this consumer's Claude session"
                         onClick={() => {
-                          onLaunch({ sessionId: c.conversationId, mode: 'resume', prompt: '' })
+                          onLaunch({ sessionId: c.conversationId!, mode: 'resume', prompt: '' })
                           onClose()
                         }}
                       >
@@ -694,7 +832,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
           <label className="form-row">
             <span>Name</span>
             <input
-              value={editing ? editingName : form.name}
+              value={editing ? editingName || '' : form.name}
               onChange={setField('name')}
               placeholder="processRefunds  (a function name — unique to this service)"
               disabled={busy || editing}
@@ -704,7 +842,7 @@ export default function ConsumerTab({ systemId, node, manifest, onClose, onLaunc
           {editing ? (
             <label className="form-row">
               <span>Service</span>
-              <input value={editingService} disabled />
+              <input value={editingService || ''} disabled />
             </label>
           ) : (
             <>

@@ -16,11 +16,39 @@ import { useEffect, useState } from 'react'
  * Toggling OFF leaves the file inert on disk (the runner just stops pointing at it); use Clear to
  * discard it. `state.set(...)` in a stateless run works in-memory for that run only.
  */
-export default function ClientStateTab({ systemId, node, onClose, onBusyChange, embedded = false }) {
-  const [info, setInfo] = useState(null) // { ok, stateful, state:{ values, history } }
-  const [error, setError] = useState(null)
+import type { ManifestNode } from './types/manifest'
 
-  const setBusy = (v) => onBusyChange?.(v)
+// One auto-recorded call in clients/<module>.state.json's history.
+interface ClientCallRecord {
+  ok?: boolean
+  method?: string
+  path?: string
+  status?: number | string
+  at?: number
+}
+
+interface ClientStateInfo {
+  ok?: boolean
+  stateful?: boolean
+  state?: {
+    values?: Record<string, unknown>
+    history?: ClientCallRecord[]
+  }
+}
+
+interface ClientStateTabProps {
+  systemId: string
+  node: ManifestNode
+  onClose?: () => void
+  onBusyChange?: (busy: boolean) => void
+  embedded?: boolean
+}
+
+export default function ClientStateTab({ systemId, node, onClose, onBusyChange, embedded = false }: ClientStateTabProps) {
+  const [info, setInfo] = useState<ClientStateInfo | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const setBusy = (v: boolean) => onBusyChange?.(v)
 
   // Poll the client's store + current mode (the backend reads `stateful` off the manifest, so this
   // also reflects a toggle done elsewhere).
@@ -28,7 +56,7 @@ export default function ClientStateTab({ systemId, node, onClose, onBusyChange, 
     let live = true
     const load = () =>
       fetch(`/api/clients/state?system=${encodeURIComponent(systemId)}&id=${encodeURIComponent(node.id)}`)
-        .then((r) => r.json())
+        .then((r) => r.json() as Promise<ClientStateInfo>)
         .then((d) => { if (live && d?.ok) setInfo(d) })
         .catch(() => {}) // keep the last good response
     load()
@@ -42,7 +70,7 @@ export default function ClientStateTab({ systemId, node, onClose, onBusyChange, 
   const valueKeys = Object.keys(values)
   const hasStore = valueKeys.length > 0 || history.length > 0
 
-  async function setMode(next) {
+  async function setMode(next: boolean) {
     if (next === stateful) return
     setBusy(true); setError(null)
     try {
@@ -51,11 +79,11 @@ export default function ClientStateTab({ systemId, node, onClose, onBusyChange, 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: node.id, stateful: next }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       setInfo((prev) => (prev ? { ...prev, stateful: next } : { ok: true, stateful: next, state: { values: {}, history: [] } }))
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -69,21 +97,21 @@ export default function ClientStateTab({ systemId, node, onClose, onBusyChange, 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, id: node.id }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       setInfo((prev) => (prev ? { ...prev, state: { values: {}, history: [] } } : prev))
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  const fmtTime = (at) => {
+  const fmtTime = (at: unknown) => {
     if (typeof at !== 'number') return ''
     try { return new Date(at * 1000).toLocaleTimeString() } catch { return '' }
   }
-  const fmtVal = (v) => (typeof v === 'string' ? v : JSON.stringify(v))
+  const fmtVal = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v))
 
   const body = (
     <>

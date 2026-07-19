@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { endpointPolicy, localPathOf } from './endpointPolicy'
+import type { ManifestNode } from './types/manifest'
+import type { DiscoveredEndpoint } from './types/registries'
 
 /**
  * Read-only "Calls" tab for a service (in-system or external). Lists the service's
@@ -14,10 +16,26 @@ import { endpointPolicy, localPathOf } from './endpointPolicy'
 // The human label for an endpoint's request/response schema: the referenced bank
 // model name when set, else a generic "request"/"response" when an inline schema
 // exists, else '' (nothing to show — that arrow is hidden).
-function schemaLabel(model, inline, fallback) {
+function schemaLabel(
+  model: string | null | undefined,
+  inline: Record<string, unknown> | undefined,
+  fallback: string,
+): string {
   if (model) return model
   if (inline && Object.keys(inline).length) return fallback
   return ''
+}
+
+interface ServiceCallsTabProps {
+  systemId: string
+  service: string
+  node: ManifestNode
+  onTrace?: (e: DiscoveredEndpoint) => void
+  embedded?: boolean
+  onClose?: () => void
+  // Accepted for parity with the other embedded tabs; this tab never mutates, so it
+  // stays "not busy" and never locks tab-switching.
+  onBusyChange?: (busy: boolean) => void
 }
 
 export default function ServiceCallsTab({
@@ -27,16 +45,15 @@ export default function ServiceCallsTab({
   onTrace,
   embedded = false,
   onClose,
-  // Accepted for parity with the other embedded tabs; this tab never mutates, so it
-  // stays "not busy" and never locks tab-switching.
-  onBusyChange, // eslint-disable-line no-unused-vars
-}) {
-  const [endpoints, setEndpoints] = useState(null) // null = loading
+  onBusyChange,
+}: ServiceCallsTabProps) {
+  void onBusyChange
+  const [endpoints, setEndpoints] = useState<DiscoveredEndpoint[] | null>(null) // null = loading
 
   useEffect(() => {
     let cancelled = false
     fetch(`/api/endpoints?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ endpoints?: DiscoveredEndpoint[] }>)
       .then((d) => {
         if (!cancelled) setEndpoints((d.endpoints || []).filter((e) => e.service === service))
       })

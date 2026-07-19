@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
+import type { FormEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'
 import { referencedModels, buildDbSchemaPrompt } from './modelBank'
 import { REDIS_KS_TYPES, REDIS_BADGE } from './redisKeyspaceMeta'
+import type { ModelRecord } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * Modal form for "Add database". Lets the user pick a database engine and
@@ -10,7 +13,16 @@ import { REDIS_KS_TYPES, REDIS_BADGE } from './redisKeyspaceMeta'
  * container + exporter, scrapes it, and adds a node to the live diagram.
  */
 
-const TYPE_META = {
+interface DbTypeMeta {
+  label: string
+  entityWord: string
+  hasFields: boolean
+  fieldTypes?: string[]
+  isRedis?: boolean
+  defaultName: string
+}
+
+const TYPE_META: Record<string, DbTypeMeta> = {
   postgres: {
     label: 'PostgreSQL (SQL)',
     entityWord: 'Table',
@@ -58,29 +70,50 @@ const TYPE_META = {
 // turns selected models into tables/collections). Others use manual entities only.
 const MODEL_ENGINES = ['postgres', 'mongodb', 'dynamodb', 'cassandra']
 
-function blankEntity(meta) {
+// One editable entity row: redis rows carry the keyspace shape (match/ksType/shorthand),
+// field-bearing engines carry `fields`.
+interface EntityField {
+  name: string
+  type: string
+}
+
+interface EntityDraft {
+  name: string
+  fields: EntityField[]
+  match?: string
+  ksType?: string
+  shorthand?: string
+}
+
+function blankEntity(meta: DbTypeMeta): EntityDraft {
   if (meta.isRedis) return { name: '', match: 'prefix', ksType: 'string', shorthand: '', fields: [] }
-  return { name: '', fields: meta.hasFields ? [{ name: '', type: meta.fieldTypes[0] }] : [] }
+  return { name: '', fields: meta.hasFields ? [{ name: '', type: meta.fieldTypes![0] }] : [] }
 }
 
 // Redis keyspaces are optional (the cache can be provisioned bare and get its key
 // namespaces later from the node's Keyspaces tab), so it opens with no rows; every
 // other engine needs at least one entity, so it opens with one to fill in.
-function initialEntities(meta) {
+function initialEntities(meta: DbTypeMeta): EntityDraft[] {
   return meta.isRedis ? [] : [blankEntity(meta)]
 }
 
-export default function CreateDatabase({ systemId, onClose, onLaunch }) {
+interface CreateDatabaseProps {
+  systemId: string
+  onClose: () => void
+  onLaunch?: LaunchSession
+}
+
+export default function CreateDatabase({ systemId, onClose, onLaunch }: CreateDatabaseProps) {
   const [type, setType] = useState('postgres')
   const [name, setName] = useState(TYPE_META.postgres.defaultName)
-  const [entities, setEntities] = useState(initialEntities(TYPE_META.postgres))
-  const [status, setStatus] = useState('idle') // idle | submitting | error
-  const [error, setError] = useState(null)
+  const [entities, setEntities] = useState<EntityDraft[]>(initialEntities(TYPE_META.postgres))
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
   // Schema-from-models (postgres/mongodb only): pick bank models instead of typing
   // entities; a Claude session then authors the tables/collections + foreign keys.
-  const [schemaSource, setSchemaSource] = useState('manual') // 'manual' | 'models'
-  const [models, setModels] = useState([]) // the system's model bank
-  const [selected, setSelected] = useState([]) // selected model names
+  const [schemaSource, setSchemaSource] = useState<'manual' | 'models'>('manual')
+  const [models, setModels] = useState<ModelRecord[]>([]) // the system's model bank
+  const [selected, setSelected] = useState<string[]>([]) // selected model names
 
   const meta = TYPE_META[type]
   const busy = status === 'submitting'
@@ -91,12 +124,12 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
   // The model bank powers the "From model bank" picker.
   useEffect(() => {
     fetch(`/api/models?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ models?: ModelRecord[] }>)
       .then((d) => setModels(Array.isArray(d.models) ? d.models : []))
       .catch(() => setModels([]))
   }, [systemId])
 
-  function changeType(next) {
+  function changeType(next: string) {
     setType(next)
     setName(TYPE_META[next].defaultName)
     setEntities(initialEntities(TYPE_META[next]))
@@ -105,29 +138,29 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
     if (!MODEL_ENGINES.includes(next)) setSchemaSource('manual')
   }
 
-  const toggleModel = (n) =>
+  const toggleModel = (n: string) =>
     setSelected((s) => (s.includes(n) ? s.filter((x) => x !== n) : [...s, n]))
 
   // Entity / field editing helpers operate on copies so React sees new refs.
-  const updateEntity = (i, patch) =>
+  const updateEntity = (i: number, patch: Partial<EntityDraft>) =>
     setEntities((es) => es.map((e, j) => (j === i ? { ...e, ...patch } : e)))
   const addEntity = () => setEntities((es) => [...es, blankEntity(meta)])
-  const removeEntity = (i) => setEntities((es) => es.filter((_, j) => j !== i))
+  const removeEntity = (i: number) => setEntities((es) => es.filter((_, j) => j !== i))
 
-  const updateField = (ei, fi, patch) =>
+  const updateField = (ei: number, fi: number, patch: Partial<EntityField>) =>
     setEntities((es) => es.map((e, j) => (j === ei
       ? { ...e, fields: e.fields.map((f, k) => (k === fi ? { ...f, ...patch } : f)) }
       : e)))
-  const addField = (ei) =>
+  const addField = (ei: number) =>
     setEntities((es) => es.map((e, j) => (j === ei
-      ? { ...e, fields: [...e.fields, { name: '', type: meta.fieldTypes[0] }] }
+      ? { ...e, fields: [...e.fields, { name: '', type: meta.fieldTypes![0] }] }
       : e)))
-  const removeField = (ei, fi) =>
+  const removeField = (ei: number, fi: number) =>
     setEntities((es) => es.map((e, j) => (j === ei
       ? { ...e, fields: e.fields.filter((_, k) => k !== fi) }
       : e)))
 
-  async function submit(e) {
+  async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setStatus('submitting')
     setError(null)
@@ -139,7 +172,7 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ system: systemId, type, name: name.trim(), models: selected }),
         })
-        const data = await res.json().catch(() => ({}))
+        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
         if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
         // The container was provisioned empty — launch Claude to author the schema
         // (tables/collections + FKs) from the selected models.
@@ -173,12 +206,12 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, type, name: name.trim(), entities: payloadEntities }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
       setStatus('error')
-      setError(err.message)
+      setError((err as Error).message)
     }
   }
 
@@ -216,7 +249,7 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
           {supportsModels && (
             <label className="form-row">
               <span>Schema</span>
-              <select value={schemaSource} onChange={(e) => setSchemaSource(e.target.value)} disabled={busy}>
+              <select value={schemaSource} onChange={(e) => setSchemaSource(e.target.value as 'manual' | 'models')} disabled={busy}>
                 <option value="manual">Manual entities</option>
                 <option value="models">From model bank</option>
               </select>
@@ -321,7 +354,7 @@ export default function CreateDatabase({ systemId, onClose, onLaunch }) {
                           disabled={busy}
                         />
                         <select value={f.type} onChange={(e) => updateField(ei, fi, { type: e.target.value })} disabled={busy}>
-                          {meta.fieldTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                          {meta.fieldTypes!.map((t) => <option key={t} value={t}>{t}</option>)}
                         </select>
                         <button type="button" className="link-danger" onClick={() => removeField(ei, fi)} disabled={busy}>×</button>
                       </div>

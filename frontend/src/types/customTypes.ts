@@ -5,6 +5,7 @@
 
 import type { ComponentType } from 'react'
 import type { Manifest, ManifestNode } from './manifest'
+import type { DiscoveredEndpoint } from './registries'
 
 // ─── Launched Claude sessions (App's edit queue) ────────────────────────────
 
@@ -89,8 +90,15 @@ export interface CustomTypeModule {
   editTabs?: (node: ManifestNode) => EditTabSpec[]
   // Live runtime poll App merges into the customState map.
   runtime?: CustomRuntime
-  // Endpoint visibility/lock policy for this type's own routes.
-  endpointPolicy?: (node: ManifestNode, path: string) => EndpointPolicyResult | null
+  // Endpoint visibility/lock policy for this type's own routes. The generic seam
+  // (src/endpointPolicy.ts) also passes the full endpoint row; current modules
+  // classify by service-local path alone. The result may be partial — the seam
+  // spreads it over the public/unlocked defaults.
+  endpointPolicy?: (
+    node: ManifestNode,
+    path: string,
+    endpoint?: DiscoveredEndpoint,
+  ) => Partial<EndpointPolicyResult> | null
   DiagramBody?: ComponentType<DiagramBodyProps>
   // Height (px) the custom body needs; MUST match what DiagramBody draws.
   diagramHeight?: (node: ManifestNode, runtime: CustomNodeState | undefined, width: number) => number

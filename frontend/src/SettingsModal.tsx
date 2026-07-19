@@ -26,12 +26,25 @@ const NODE_ORDER = ['load_balancer']
  *    Claude session the app launches.
  * More settings will slot in here later.
  */
-export default function SettingsModal({ settings, onSave, onClose }) {
+// The repo-root settings.json shape (served + saved by /api/settings).
+export interface AppSettings {
+  prefixColors?: Record<string, string>
+  nodeColors?: Record<string, string>
+  dangerouslySkipPermissions?: boolean
+}
+
+interface SettingsModalProps {
+  settings?: AppSettings | null
+  onSave?: (settings: AppSettings) => void
+  onClose?: () => void
+}
+
+export default function SettingsModal({ settings, onSave, onClose }: SettingsModalProps) {
   const prefix = useColorMap(DEFAULT_PREFIX_COLORS, settings?.prefixColors)
   const nodes = useColorMap(DEFAULT_NODE_COLORS, settings?.nodeColors)
   const [skipPerms, setSkipPerms] = useState(!!settings?.dangerouslySkipPermissions)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
 
   // Block Save while any hex field in either section is mid-edit / invalid.
   const hasInvalid = prefix.hasInvalid || nodes.hasInvalid
@@ -49,13 +62,14 @@ export default function SettingsModal({ settings, onSave, onClose }) {
           dangerouslySkipPermissions: skipPerms,
         }),
       })
-      const data = await res.json()
+      const data = (await res.json()) as { ok?: boolean; error?: string; settings?: AppSettings }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      applyBadgeColors(data.settings.prefixColors) // re-tint badges immediately
-      onSave?.(data.settings) // lift into App state so the diagram edges + nodes re-render too
+      const saved = data.settings || {}
+      applyBadgeColors(saved.prefixColors) // re-tint badges immediately
+      onSave?.(saved) // lift into App state so the diagram edges + nodes re-render too
       onClose?.()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
     }
   }
@@ -129,7 +143,20 @@ export default function SettingsModal({ settings, onSave, onClose }) {
  * Both start merged over the defaults, so a settings object missing a role still renders every
  * picker.
  */
-function useColorMap(defaults, initial) {
+interface ColorMap {
+  colors: Record<string, string>
+  drafts: Record<string, string>
+  defaults: Record<string, string>
+  hasInvalid: boolean
+  set(role: string, value: string): void
+  reset(role: string): void
+  resetAll(): void
+}
+
+function useColorMap(
+  defaults: Record<string, string>,
+  initial?: Record<string, string> | null,
+): ColorMap {
   const [colors, setColors] = useState(() => ({ ...defaults, ...(initial || {}) }))
   const [drafts, setDrafts] = useState(() => ({ ...defaults, ...(initial || {}) }))
 
@@ -153,8 +180,17 @@ function useColorMap(defaults, initial) {
   }
 }
 
+interface ColorSectionProps {
+  title: string
+  hint: string
+  order: string[]
+  labels: Record<string, string>
+  map: ColorMap
+  busy: boolean
+}
+
 /** One section of swatch + hex + revert rows over a useColorMap. */
-function ColorSection({ title, hint, order, labels, map, busy }) {
+function ColorSection({ title, hint, order, labels, map, busy }: ColorSectionProps) {
   return (
     <section className="settings-section">
       <div className="settings-section-head">

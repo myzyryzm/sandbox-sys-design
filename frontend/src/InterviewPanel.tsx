@@ -14,18 +14,70 @@ import { useEffect, useRef, useState } from 'react'
 // edit session; only RUNNING an authored test uses the normal edit queue (onLaunch),
 // because a run drives the system without designing it.
 import { buildEndToEndRunPrompt } from './endToEndBank'
+import type { EndToEndProcess } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 const RUN_DURATION_SECONDS = 60
 
+// ─── systems/<id>/interview.json (polled by App, passed down) ───────────────
+
+export interface InterviewMessage {
+  role: 'user' | 'assistant' | 'status' | (string & {})
+  text: string
+}
+
+export interface InterviewRequirement {
+  id: string
+  text: string
+  // Linked end-to-end process (the requirement's authored "unit test").
+  processId?: string | null
+}
+
+export interface InterviewQuestion {
+  title?: string
+  statement?: string
+  source?: { url?: string; name?: string }
+}
+
+export interface InterviewState {
+  status?: string // 'active' | 'ended'
+  phase?: string
+  conversationId?: string
+  question?: InterviewQuestion
+  messages?: InterviewMessage[]
+  functionalRequirements?: InterviewRequirement[]
+  nonFunctionalRequirements?: InterviewRequirement[]
+}
+
+// One NDJSON event of the streamed interviewer turn.
+interface TurnEvent {
+  type?: string
+  text?: string
+  summary?: string
+  message?: string
+  ok?: boolean
+  error?: string
+}
+
 // Minimal chat-text renderer: **bold** and `code` spans (the interviewer writes light
 // markdown even when asked not to). Everything else stays plain text (pre-wrap).
-function renderChatText(text) {
+function renderChatText(text: string) {
   const parts = String(text).split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
   return parts.map((p, i) => {
     if (p.startsWith('**') && p.endsWith('**')) return <strong key={i}>{p.slice(2, -2)}</strong>
     if (p.startsWith('`') && p.endsWith('`')) return <code key={i}>{p.slice(1, -1)}</code>
     return p
   })
+}
+
+interface InterviewPanelProps {
+  systemId: string
+  interview?: InterviewState | null
+  turnInFlight?: boolean
+  skipPermissions?: boolean
+  onRefresh?: () => void
+  onLaunch: LaunchSession
+  onClose: () => void
 }
 
 export default function InterviewPanel({
@@ -36,7 +88,7 @@ export default function InterviewPanel({
   onRefresh,
   onLaunch,
   onClose,
-}) {
+}: InterviewPanelProps) {
   const [draft, setDraft] = useState('')
   // Local turn-in-flight (this tab is streaming a turn). The polled `turnInFlight`
   // covers the reload-mid-turn case where no local stream exists.
@@ -45,14 +97,14 @@ export default function InterviewPanel({
   // The rendered transcript. Reconciled from the polled interview.messages whenever no
   // local turn is streaming; appended-to locally (user bubble + streamed events) during
   // one, so the chat feels live while the server file stays the source of truth.
-  const [messages, setMessages] = useState(interview?.messages || [])
-  const [error, setError] = useState(null)
+  const [messages, setMessages] = useState<InterviewMessage[]>(interview?.messages || [])
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false) // start/end lifecycle actions
   const [confirmStart, setConfirmStart] = useState(false)
   const [confirmEnd, setConfirmEnd] = useState(false)
   // endtoend.json processes (their lastRun carries a linked requirement's verdict).
-  const [processes, setProcesses] = useState([])
-  const scrollRef = useRef(null)
+  const [processes, setProcesses] = useState<EndToEndProcess[]>([])
+  const scrollRef = useRef<HTMLDivElement | null>(null)
 
   const active = interview?.status === 'active'
   const locked = sending || turnInFlight
@@ -73,7 +125,7 @@ export default function InterviewPanel({
     const tick = async () => {
       try {
         const res = await fetch(`/api/endtoend?system=${systemId}`)
-        const data = await res.json()
+        const data = (await res.json()) as { ok?: boolean; processes?: EndToEndProcess[] }
         if (!cancelled && data.ok) setProcesses(data.processes || [])
       } catch {
         /* keep the last good list */
@@ -93,7 +145,7 @@ export default function InterviewPanel({
     if (el) el.scrollTop = el.scrollHeight
   }, [messages.length])
 
-  async function sendMessage(text) {
+  async function sendMessage(text: string) {
     const trimmed = text.trim()
     if (!trimmed || sendingRef.current) return
     setSending(true)
@@ -108,7 +160,7 @@ export default function InterviewPanel({
         body: JSON.stringify({ system: systemId, text: trimmed }),
       })
       if (!res.ok || !res.body) {
-        const d = await res.json().catch(() => ({}))
+        const d = (await res.json().catch(() => ({}))) as { error?: string }
         throw new Error(d.error || `HTTP ${res.status}`)
       }
       const reader = res.body.getReader()
@@ -123,25 +175,25 @@ export default function InterviewPanel({
           const line = buf.slice(0, i)
           buf = buf.slice(i + 1)
           if (!line.trim()) continue
-          let evt
+          let evt: TurnEvent
           try {
-            evt = JSON.parse(line)
+            evt = JSON.parse(line) as TurnEvent
           } catch {
             continue
           }
           if (evt.type === 'assistant_text') {
-            setMessages((m) => [...m, { role: 'assistant', text: evt.text }])
+            setMessages((m) => [...m, { role: 'assistant', text: evt.text || '' }])
           } else if (evt.type === 'tool_use') {
-            setMessages((m) => [...m, { role: 'status', text: evt.summary }])
+            setMessages((m) => [...m, { role: 'status', text: evt.summary || '' }])
           } else if (evt.type === 'error') {
-            setError(evt.message)
+            setError(evt.message || 'turn error')
           } else if (evt.type === 'result' && !evt.ok) {
             setError(`The turn ended with an error (${evt.error}). Send again to retry.`)
           }
         }
       }
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSending(false)
       sendingRef.current = false
@@ -158,7 +210,7 @@ export default function InterviewPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       setConfirmStart(false)
       setMessages([])
@@ -166,7 +218,7 @@ export default function InterviewPanel({
       // Kick off the first interviewer turn as an honest, visible user message.
       sendMessage('Begin the interview.')
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -181,12 +233,12 @@ export default function InterviewPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       setConfirmEnd(false)
       onRefresh?.()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -205,7 +257,7 @@ export default function InterviewPanel({
     onRefresh?.()
   }
 
-  function generateTest(req, kind) {
+  function generateTest(req: InterviewRequirement, kind: string) {
     sendMessage(
       `Generate an end-to-end test for requirement ${req.id}: "${req.text}". ` +
         `Author it as an end-to-end process (POST /api/endtoend — create any missing client ` +
@@ -217,7 +269,7 @@ export default function InterviewPanel({
 
   // Same start flow as EndToEndModal.startProcess: mark running, then enqueue the
   // normal sandbox-end-to-end-process run session.
-  async function runTest(proc) {
+  async function runTest(proc: EndToEndProcess) {
     setBusy(true)
     setError(null)
     try {
@@ -231,7 +283,7 @@ export default function InterviewPanel({
           duration_seconds: RUN_DURATION_SECONDS,
         }),
       })
-      const d = await res.json().catch(() => ({}))
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`)
       onLaunch(
         {
@@ -248,13 +300,13 @@ export default function InterviewPanel({
         { kind: 'e2e', target: proc.id, title: proc.name },
       )
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  function requirementRow(req, kind) {
+  function requirementRow(req: InterviewRequirement, kind: string) {
     const proc = req.processId ? processes.find((p) => p.id === req.processId) : null
     const verdict = proc?.lastRun?.verdict || null
     return (
@@ -380,19 +432,19 @@ export default function InterviewPanel({
             {locked && <div className="iv-msg-status iv-thinking">interviewer is working…</div>}
           </div>
 
-          {(interview.functionalRequirements?.length > 0 ||
-            interview.nonFunctionalRequirements?.length > 0) && (
+          {((interview.functionalRequirements?.length ?? 0) > 0 ||
+            (interview.nonFunctionalRequirements?.length ?? 0) > 0) && (
             <div className="iv-reqs">
-              {interview.functionalRequirements?.length > 0 && (
+              {(interview.functionalRequirements?.length ?? 0) > 0 && (
                 <>
                   <div className="iv-reqs-title">Functional requirements</div>
-                  {interview.functionalRequirements.map((r) => requirementRow(r, 'functional'))}
+                  {interview.functionalRequirements!.map((r) => requirementRow(r, 'functional'))}
                 </>
               )}
-              {interview.nonFunctionalRequirements?.length > 0 && (
+              {(interview.nonFunctionalRequirements?.length ?? 0) > 0 && (
                 <>
                   <div className="iv-reqs-title">Non-functional requirements</div>
-                  {interview.nonFunctionalRequirements.map((r) =>
+                  {interview.nonFunctionalRequirements!.map((r) =>
                     requirementRow(r, 'nonfunctional'),
                   )}
                 </>

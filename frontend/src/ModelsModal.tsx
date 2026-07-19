@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import { modelImpact, buildModelUpdatePrompt } from './modelBank'
+import type { Manifest } from './types/manifest'
+import type { ModelRecord, ModelUsageMap } from './types/registries'
+import type { LaunchSession } from './types/customTypes'
 
 /**
  * Per-system "models bank". Lists reusable TypeScript model interfaces and lets the
@@ -18,7 +22,20 @@ import { modelImpact, buildModelUpdatePrompt } from './modelBank'
 // A model name is a TypeScript identifier (mirrors MODEL_NAME_RE in server/models.js).
 const MODEL_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
-function blankForm() {
+// The add/edit form (name is immutable while editing).
+interface ModelForm {
+  name: string
+  ts: string
+  description: string
+}
+
+// A staged (unsaved) edit to an existing model.
+interface ModelDraft {
+  ts: string
+  description: string
+}
+
+function blankForm(): ModelForm {
   return { name: '', ts: '', description: '' }
 }
 
@@ -29,21 +46,28 @@ interface Order {
   items: OrderItem[]   // reference another model by name
 }`
 
-export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
+interface ModelsModalProps {
+  systemId: string
+  manifest: Manifest
+  onLaunch?: LaunchSession
+  onClose: () => void
+}
+
+export default function ModelsModal({ systemId, onClose, onLaunch, manifest }: ModelsModalProps) {
   void manifest // available for future cross-checks; impact data comes from /api/model-usage
-  const [models, setModels] = useState(null) // null = loading
-  const [form, setForm] = useState(blankForm)
-  const [editingName, setEditingName] = useState(null) // non-null while editing an existing model
-  const [error, setError] = useState(null)
+  const [models, setModels] = useState<ModelRecord[] | null>(null) // null = loading
+  const [form, setForm] = useState<ModelForm>(blankForm)
+  const [editingName, setEditingName] = useState<string | null>(null) // non-null while editing an existing model
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [confirmName, setConfirmName] = useState(null) // row pending delete confirm
-  const [drafts, setDrafts] = useState({}) // staged edits to EXISTING models: { name: { ts, description } }
-  const [usage, setUsage] = useState({}) // GET /api/model-usage — where each model is used
+  const [confirmName, setConfirmName] = useState<string | null>(null) // row pending delete confirm
+  const [drafts, setDrafts] = useState<Record<string, ModelDraft>>({}) // staged edits to EXISTING models: { name: { ts, description } }
+  const [usage, setUsage] = useState<ModelUsageMap>({}) // GET /api/model-usage — where each model is used
   const [review, setReview] = useState(false) // showing the impact-review panel
 
   const load = useCallback(() => {
     return fetch(`/api/models?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ models?: ModelRecord[] }>)
       .then((d) => setModels(Array.isArray(d.models) ? d.models : []))
       .catch(() => setModels([]))
   }, [systemId])
@@ -51,7 +75,7 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
   // Where each model is referenced (endpoints/databases) — powers the impact review.
   const loadUsage = useCallback(() => {
     return fetch(`/api/model-usage?system=${encodeURIComponent(systemId)}`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ usage?: ModelUsageMap }>)
       .then((d) => setUsage(d && d.usage ? d.usage : {}))
       .catch(() => setUsage({}))
   }, [systemId])
@@ -61,7 +85,8 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
     loadUsage()
   }, [load, loadUsage])
 
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
+  const set = (k: keyof ModelForm) => (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+    setForm((f) => ({ ...f, [k]: e.target.value }))
   const editing = editingName !== null
   const dirtyCount = Object.keys(drafts).length
 
@@ -79,7 +104,7 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
     return null
   })()
 
-  function startEdit(m) {
+  function startEdit(m: ModelRecord) {
     // Re-editing a model with a staged draft resumes from the draft, not the saved text.
     const draft = drafts[m.name]
     setForm({
@@ -104,7 +129,7 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
   function stageEdit() {
     setError(null)
     if (!form.ts.trim()) return setError('Definition (TypeScript) is required')
-    const name = editingName
+    const name = editingName! // stageEdit only runs while editing
     const original = (models || []).find((m) => m.name === name)
     const ts = form.ts
     const description = form.description
@@ -134,13 +159,13 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, name, ts: form.ts, description: form.description }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       await load()
       await loadUsage()
       resetForm()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -171,7 +196,7 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, models: payload }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
       const merged = (models || []).map((m) => (drafts[m.name] ? { ...m, ...drafts[m.name] } : m))
@@ -197,12 +222,12 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
       }, { kind: 'model', target: 'models', title: edited.length === 1 ? edited[0] : 'update' })
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
       setBusy(false)
     }
   }
 
-  async function remove(m) {
+  async function remove(m: ModelRecord) {
     setBusy(true)
     setError(null)
     try {
@@ -211,7 +236,7 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, name: m.name }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setConfirmName(null)
       if (editingName === m.name) resetForm()
@@ -225,7 +250,7 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
       await load()
       await loadUsage()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -298,15 +323,15 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
               {edited.join(', ')}) and applies the new shape to everything below.
             </p>
 
-            {impact.endpoints.length === 0 && impact.databases.length === 0 && impact.streams.length === 0 ? (
+            {impact!.endpoints.length === 0 && impact!.databases.length === 0 && impact!.streams.length === 0 ? (
               <p className="sim-desc">No services, databases or event-stream topics are affected — changes will just be saved.</p>
             ) : (
               <>
-                {impact.endpoints.length > 0 && (
+                {impact!.endpoints.length > 0 && (
                   <div className="impact-group">
                     <div className="impact-group-head">Affected services</div>
                     <ul className="impact-list">
-                      {impact.endpoints.map((e) => (
+                      {impact!.endpoints.map((e) => (
                         <li key={`${e.service}|${e.method}|${e.path}|${e.field}`}>
                           <code>{e.service}</code> {e.method} /{e.service}{e.path}{' '}
                           <span className="impact-field">({e.field})</span>
@@ -315,11 +340,11 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
                     </ul>
                   </div>
                 )}
-                {impact.databases.length > 0 && (
+                {impact!.databases.length > 0 && (
                   <div className="impact-group">
                     <div className="impact-group-head">Affected databases</div>
                     <ul className="impact-list">
-                      {impact.databases.map((d) => (
+                      {impact!.databases.map((d) => (
                         <li key={d.id}>
                           <code>{d.id}</code> ({d.engine})
                         </li>
@@ -327,11 +352,11 @@ export default function ModelsModal({ systemId, onClose, onLaunch, manifest }) {
                     </ul>
                   </div>
                 )}
-                {impact.streams.length > 0 && (
+                {impact!.streams.length > 0 && (
                   <div className="impact-group">
                     <div className="impact-group-head">Affected event-stream topics</div>
                     <ul className="impact-list">
-                      {impact.streams.map((s) => (
+                      {impact!.streams.map((s) => (
                         <li key={`${s.cluster}|${s.topic}`}>
                           <code>{s.cluster}</code> / {s.topic}{' '}
                           <span className="impact-field">({s.enforce ? 'enforced' : 'documented'})</span>

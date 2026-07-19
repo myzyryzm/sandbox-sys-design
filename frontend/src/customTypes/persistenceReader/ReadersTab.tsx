@@ -11,16 +11,47 @@
 //   3. Members — the manual "set member count" input (the shared replica reconciler;
 //      no autoscaler for this type — redis divides announcements across members).
 import { useEffect, useState } from 'react'
+import type { EditTabProps } from '../../types/customTypes'
 import { buildPersistencePrompt } from './prompt'
 
-const STATE_URL = (sys) => `/api/custom/persistence-reader/state?system=${encodeURIComponent(sys)}`
+// ─── The state route's per-node runtime entry this module reads ─────────────
+
+// The node's persistence.json registry entry.
+export interface PersistenceRegistryEntry {
+  service?: string
+  worker?: string
+  stream?: string
+  group?: string
+  db?: string
+  table?: string
+  field?: string
+  freeform?: string | null
+  description?: string
+  implemented?: boolean
+  conversationId?: string
+}
+
+// A member's live /reader/state counters (authored by the session).
+export interface PersistenceReaderLive {
+  active?: number
+  persisted?: number
+  runs?: number
+  consumer?: string
+}
+
+export interface PersistenceReaderState {
+  registry?: PersistenceRegistryEntry | null
+  live?: PersistenceReaderLive | null
+}
+
+const STATE_URL = (sys: string) => `/api/custom/persistence-reader/state?system=${encodeURIComponent(sys)}`
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_.-]*$/
 
-export default function ReadersTab({ systemId, node, onClose, onLaunch, onBusyChange }) {
-  const [nodes, setNodes] = useState(null) // the state route's full node map
+export default function ReadersTab({ systemId, node, onClose, onLaunch, onBusyChange }: EditTabProps) {
+  const [nodes, setNodes] = useState<Record<string, PersistenceReaderState> | null>(null) // the state route's full node map
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
-  const [memberCount, setMemberCount] = useState(1 + (node.replicas?.instances?.length || 0))
+  const [error, setError] = useState<string | null>(null)
+  const [memberCount, setMemberCount] = useState<number | string>(1 + (node.replicas?.instances?.length || 0))
   const [addDescription, setAddDescription] = useState('')
   const [table, setTable] = useState(node.persistence?.table || '')
   const [field, setField] = useState(node.persistence?.field || '')
@@ -32,7 +63,7 @@ export default function ReadersTab({ systemId, node, onClose, onLaunch, onBusyCh
     const tick = async () => {
       try {
         const res = await fetch(STATE_URL(systemId))
-        const data = await res.json()
+        const data = (await res.json()) as { ok: boolean; nodes: Record<string, PersistenceReaderState> }
         if (!cancelled && data.ok) setNodes(data.nodes)
       } catch {
         /* keep last good */
@@ -73,26 +104,28 @@ export default function ReadersTab({ systemId, node, onClose, onLaunch, onBusyCh
           ...(targetChanged ? { conversationId } : {}),
         }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       // Moving the persist target is a CODE change — re-author via a session.
+      // (targetChanged implies the registry entry loaded; NodeEditModal always
+      // passes onLaunch.)
       if (targetChanged) {
-        onLaunch({
+        onLaunch!({
           sessionId: conversationId,
           mode: 'new',
           prompt: buildPersistencePrompt({
             systemId,
             service: node.id,
-            worker: entry.worker,
-            stream: entry.stream,
-            group: entry.group,
-            db: entry.db,
+            worker: entry!.worker,
+            stream: entry!.stream,
+            group: entry!.group,
+            db: entry!.db,
             table,
             field,
-            freeform: entry.freeform,
+            freeform: entry!.freeform,
             description,
             editing: true,
-            priorDescription: entry.description,
+            priorDescription: entry!.description,
           }),
         }, { kind: 'persistence', target: node.id, title: 'update readers' })
         onClose()
@@ -100,7 +133,7 @@ export default function ReadersTab({ systemId, node, onClose, onLaunch, onBusyCh
       }
       setAddDescription('')
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
     } finally {
       setBusy(false)
     }
@@ -115,11 +148,11 @@ export default function ReadersTab({ systemId, node, onClose, onLaunch, onBusyCh
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system: systemId, node: node.id, instances: mc }),
       })
-      const data = await res.json().catch(() => ({}))
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
       onClose()
     } catch (err) {
-      setError(err.message)
+      setError((err as Error).message)
       setBusy(false)
     }
   }
@@ -169,7 +202,7 @@ export default function ReadersTab({ systemId, node, onClose, onLaunch, onBusyCh
               <div className="modal-actions">
                 <button
                   type="button"
-                  onClick={() => { onLaunch({ sessionId: entry.conversationId, mode: 'resume' }, { kind: 'persistence', target: node.id, title: 'readers' }); onClose() }}
+                  onClick={() => { onLaunch!({ sessionId: entry.conversationId!, mode: 'resume' }, { kind: 'persistence', target: node.id, title: 'readers' }); onClose() }}
                   disabled={busy}
                 >
                   Resume session
