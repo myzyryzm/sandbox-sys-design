@@ -1,0 +1,72 @@
+/* Full-screen "Starting…" / error states shown while a system's docker stack is
+   brought up, before the diagram App mounts. */
+
+.system-page-state {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.system-page-card {
+  background: var(--panel);
+  border: 1px solid #2a2e37;
+  border-radius: 12px;
+  padding: 32px 40px;
+  max-width: 560px;
+  text-align: center;
+}
+
+.system-page-card h1 {
+  font-size: 20px;
+  margin: 0 0 12px;
+}
+
+.system-page-card code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #6ea8fe;
+}
+
+.system-page-note {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 20px;
+}
+
+.system-page-error {
+  color: #ff6b6b;
+  font-size: 13px;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+  background: #14161c;
+  border: 1px solid #2a2e37;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.system-page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+/* Indeterminate spinner while docker compose runs. */
+.system-page-spinner {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto;
+  border: 3px solid #2a2e37;
+  border-top-color: #6ea8fe;
+  border-radius: 50%;
+  animation: system-page-spin 0.9s linear infinite;
+}
+
+@keyframes system-page-spin {
+  to { transform: rotate(360deg); }
+}

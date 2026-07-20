@@ -37,6 +37,7 @@ import redisPersistence from './server/redisPersistence.js'
 import postgresTopology from './server/postgresTopology.js'
 import settings from './server/settings.js'
 import interview from './server/interview.js'
+import systemsApi from './server/systemsApi.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -49,17 +50,24 @@ const systemsDir = path.resolve(__dirname, '../systems')
  * manifest.json without any CORS setup or a separate static server — it's
  * same-origin with the Vite dev server. Adding a new system (a new
  * systems/<id>/ folder) is served automatically; no frontend changes needed.
+ *
+ * Only file-looking paths (a dot in the last segment) are served — everything
+ * else falls through to Vite's SPA fallback, so the client route /systems/<id>
+ * always gets index.html and can never collide with an on-disk name.
  */
 function serveSystems() {
   return {
     name: 'serve-systems',
     configureServer(server) {
       server.middlewares.use('/systems', (req, res, next) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') return next()
         const rel = decodeURIComponent((req.url || '').split('?')[0])
+        const last = rel.split('/').pop() || ''
+        if (!last.includes('.')) return next()
         const filePath = path.join(systemsDir, rel)
 
         // Prevent path traversal outside the systems directory.
-        if (!filePath.startsWith(systemsDir)) {
+        if (!filePath.startsWith(systemsDir + path.sep)) {
           res.statusCode = 403
           return res.end('Forbidden')
         }
@@ -76,7 +84,7 @@ function serveSystems() {
 }
 
 export default defineConfig({
-  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), dbIndexes(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin(), redisKeyspaces(), redisTopology(), redisPersistence(), postgresTopology(), settings(), interview()],
+  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), dbIndexes(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin(), redisKeyspaces(), redisTopology(), redisPersistence(), postgresTopology(), settings(), interview(), systemsApi()],
   server: {
     proxy: {
       // Browser -> /api/prometheus/api/v1/query?...  proxied to Prometheus.

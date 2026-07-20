@@ -22,9 +22,11 @@ Two cooperating processes:
 
 ## CRITICAL operational rules
 
-- **NEVER run `./start.sh` / `./stop.sh` / `./create_new.sh` when working inside an attached session.**
-  Those scripts tear down and restart the Vite dev server you (and the user's browser terminal) are
-  running inside. They are for a human starting the app from a fresh shell only.
+- **NEVER run `./start.sh` / `./stop.sh` when working inside an attached session.** Those scripts
+  tear down and restart the Vite dev server you (and the user's browser terminal) are running inside.
+  They are for a human starting the app from a fresh shell only. Likewise never call
+  `POST /api/systems/activate` (the entry screen's "load this system" route) — it downs the running
+  stack to switch systems, which is the user's move, not a session's.
 - **Rebuild via `docker compose -f systems/<id>/docker-compose.yml …`, never the root scripts.** The
   canonical single-service rebuild after editing a service's `app.py` / `Dockerfile` / `requirements.txt`:
   ```
@@ -54,8 +56,10 @@ There is no test runner or linter configured. "Verifying" a change means: rebuil
 container with `docker compose`, then `curl` it through the lb / check the Prometheus target / watch
 the node on the diagram. The skills' `## Verify` sections give the exact commands per feature.
 
-Point the frontend at a different system by editing `VITE_SYSTEM_ID` in `frontend/.env` (a single env
-var today; no in-app selector yet).
+The entry screen at `http://localhost:5173/` lists all systems and creates new ones; a system's page
+is `/systems/<id>`. Opening a system POSTs `/api/systems/activate` (`frontend/server/systemsApi.js`),
+which downs the previously active stack (they share host ports 8080/9090), runs
+`docker compose up --build -d`, and records the winner in `.run/active_system`.
 
 ## The manifest is the core abstraction
 
@@ -241,8 +245,8 @@ button + `EditQueuePanel.jsx`) that runs pending sessions sequentially in the on
 
 ## Layout pointers
 
-- `systems/<id>/` — one self-contained system. `hello-lb` is the minimal seed (lb → `service-1`);
-  `payment-service` is a richer worked example (~15 nodes: services, two postgres DBs with model-backed
+- `systems/<id>/` — one self-contained system. The entry screen's "New system" scaffolds the minimal
+  seed (lb → `service-1`); `payment-service` is a richer worked example (~15 nodes: services, two postgres DBs with model-backed
   schemas, two Kafka clusters + a CDC worker feeding them, external services, clients, and an end-to-end
   test process). A service template lives at `frontend/server/templates/service/` ("Add service" clones
   it); `templates/client/` and `templates/download-coordinator/` back the client + coordinator flows.
@@ -251,7 +255,8 @@ button + `EditQueuePanel.jsx`) that runs pending sessions sequentially in the on
   `redisTopology`, `postgresTopology`), `endpoints`, `models`,
   `eventstreams` + `consumers`, `etcd`, `grpc` (+ `grpcInstall`), `resilience`, `serviceLb`, `outage`, `externalServices`,
   `clients` + `scenarios` (+ `clientScript` helper), `customServices` (+ `customTypes/` recipes),
-  `endtoend`, `layout`, `skills`, `remove`, `terminal`. Shared primitives live in
+  `endtoend`, `layout`, `skills`, `remove`, `terminal`, `systemsApi` (the entry screen's
+  list/create/activate — system-level, not node-level). Shared primitives live in
   `scaffold.js` + `systems.js`. `remove.js` **blocks deleting a node another still depends on**
   (`findDependents` reverse-scans endpoints `downstream`/gRPC targets/Kafka producers-consumers/consumer
   functions/scenario steps/etcd registrants-listeners; replicas + CDC workers are excluded as they

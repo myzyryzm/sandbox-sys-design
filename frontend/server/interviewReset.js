@@ -1,10 +1,11 @@
 // Mechanical whole-system reset for Interview mode: rewrite systems/<id>/ back to the
 // smallest observable canvas — the nginx lb + Prometheus, NO services — delete every
 // other node folder and registry, and reconcile docker. The seed files mirror what
-// create_new.sh generates minus service-1, regenerated IN PLACE so the running dev
-// server (and the browser's 3s manifest poll) never see the system disappear.
+// the New-system scaffold (systemsApi.js) generates minus service-1, regenerated IN
+// PLACE so the running dev server (and the browser's 3s manifest poll) never see the
+// system disappear.
 //
-// Unlike create_new.sh the seed manifest INCLUDES the Prometheus node (the exact
+// Unlike that scaffold the seed manifest INCLUDES the Prometheus node (the exact
 // shape /api/prom-node adds): the compose stack runs Prometheus anyway, and the
 // frontend only polls metrics at all when a type:"prometheus" node exists — so the
 // reset canvas is immediately observable instead of dead until the user adds it.

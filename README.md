@@ -60,7 +60,7 @@ consumer loop — is delegated to a launched **Claude Code** session following a
 **The `systems/` folder holds example systems that have been built with the sandbox** —
 today `payment-service`, `llm-app`, and `chat-app`. They're worked examples to poke at and
 learn from, not part of the machinery; each carries its own `README.md`. You'll normally
-start your own with `./create_new.sh <id>`.
+create your own from the entry screen at <http://localhost:5173/>.
 
 ---
 
@@ -71,7 +71,7 @@ repo-root/
   systems/
     payment-service/           # example systems built with the sandbox
     llm-app/                   #   (each has its own README.md;
-    chat-app/                  #    create your own with ./create_new.sh)
+    chat-app/                  #    create your own from the entry screen)
     <id>/                      # one self-contained system:
       docker-compose.yml       # runs the whole system (one container per node)
       manifest.json            # topology + per-node PromQL + boundary (the frontend reads this)
@@ -117,10 +117,10 @@ repo-root/
 ```
 
 **Adding a new system later = create a new `systems/<id>/` folder** with its own compose
-file + `manifest.json`. The frontend never needs editing — it renders whatever the selected
-system's manifest describes. Point the frontend at a different system by changing
-`VITE_SYSTEM_ID` in `frontend/.env` (or just use `./start.sh <id>`, which sets it). There is
-no in-app system selector yet.
+file + `manifest.json` (the entry screen's **New system** button does exactly this). The
+frontend never needs editing — it renders whatever the selected system's manifest describes.
+The entry screen at `/` lists every system; a system's page is `/systems/<id>`, and opening
+one starts its docker stack (stopping whichever system previously held the shared ports).
 
 ---
 
@@ -138,33 +138,28 @@ no in-app system selector yet.
 
 ## Quick start (root scripts)
 
-From the repo root, start/stop a system by id — this brings up its Docker stack **and** the
-shared frontend pointed at it:
+From the repo root:
 
 ```bash
-./start.sh payment-service   # docker compose up + frontend dev server (VITE_SYSTEM_ID=payment-service)
+./start.sh                   # frontend only — pick (or create) a system at http://localhost:5173/
+./start.sh payment-service   # bring that system's docker stack up first, then the frontend
 ./stop.sh  payment-service   # docker compose down + stop the frontend
 ```
 
 - `./start.sh <id> --no-frontend` — start only the Docker stack.
 - `./stop.sh <id> --keep-frontend` — tear down Docker but leave the frontend up.
-- Run with no args to list available systems.
+- Run `./start.sh --help` to list available systems.
 
-Create a **new system** from scratch — it starts immediately:
-
-```bash
-./create_new.sh my-system     # fresh minimal systems/my-system/, then ./start.sh my-system
-```
-
-The id must be lowercase letters/digits/hyphens. It generates a **fresh minimal system** — an
-nginx LB → one generic `service-1`, scraped by Prometheus, no databases or edges — copying the
-service files (`app.py`, `requirements.txt`, `Dockerfile`) from the same
-`frontend/server/templates/service/` template the UI's "Add service" uses (it does **not**
-clone an example system), then brings it up. Grow it from the browser.
+Create a **new system** from the entry screen's **New system** button (system ids are lowercase
+letters/digits/hyphens). It scaffolds a **fresh minimal system** — an nginx LB → one generic
+`service-1`, scraped by Prometheus, no databases or edges — copying the service files
+(`app.py`, `requirements.txt`, `Dockerfile`) from the same `frontend/server/templates/service/`
+template the UI's "Add service" uses (it does **not** clone an example system), then opening it
+brings it up. Grow it from the browser.
 
 Only one system holds the shared host ports (8080 lb / 9090 prometheus / 8090 websockets) at a
-time, so `start.sh` (and `create_new.sh`) automatically stops the previously active system
-before starting the new one.
+time, so opening a system (or `./start.sh <id>`) automatically stops the previously active
+system before starting the new one.
 
 Runtime state (frontend pid/log, active system) lives in `.run/` (gitignored). The sections
 below describe the same steps run manually.
@@ -201,7 +196,8 @@ npm install        # first time only
 npm run dev        # serves on http://localhost:5173
 ```
 
-Open <http://localhost:5173>. It loads the selected system's manifest and draws the diagram.
+Open <http://localhost:5173>. The entry screen lists every system; opening one loads its
+manifest at `/systems/<id>` and draws the diagram.
 
 ### The frontend IS the backend
 
@@ -1072,7 +1068,8 @@ data and drives the already-running system.
 ## Smoke test — prove the pipeline end to end
 
 The pipeline is: **service exposes metrics → Prometheus pulls them → frontend queries Prometheus**. If
-all four checks below agree, it's proven. (Run it on a fresh system: `./create_new.sh demo`.)
+all four checks below agree, it's proven. (Run it on a fresh system: create `demo` from the
+entry screen and open it.)
 
 **1. Generate load** through the load balancer (leave it running in a terminal):
 

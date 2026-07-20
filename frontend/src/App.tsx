@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import AddMenu from "./AddMenu";
 import ConnectionResilienceModal from "./ConnectionResilienceModal";
 import CreateClient from "./CreateClient";
@@ -58,8 +59,6 @@ import type { InterviewState } from "./InterviewPanel";
 import type { AppSettings } from "./SettingsModal";
 import type { EditQueueItem } from "./EditQueuePanel";
 import type { WsMethodRecord } from "./types/registries";
-
-const SYSTEM_ID = import.meta.env.VITE_SYSTEM_ID;
 
 // GET /api/websockets: the tier registry + the pool client's builtin method
 // descriptors + its last run's delivery stats.
@@ -260,7 +259,10 @@ async function pollSystem(manifest: Manifest): Promise<Record<string, NodeLiveDa
   return state;
 }
 
-export default function App() {
+// The system id comes from the /systems/:systemId route (SystemPage). The
+// destructure-rename keeps the historical SYSTEM_ID name every reference below
+// uses; SystemPage keys App on the id, so it's constant for a mounted instance.
+export default function App({ systemId: SYSTEM_ID }: { systemId: string }) {
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [nodeData, setNodeData] = useState<Record<string, NodeLiveData>>({});
   const [error, setError] = useState<string | null>(null);
@@ -974,6 +976,9 @@ export default function App() {
       <div className="app">
         <h1>Distributed Systems Sandbox</h1>
         <p className="error">{error}</p>
+        <p>
+          <Link className="back-link" to="/">← Systems</Link>
+        </p>
       </div>
     );
   }
@@ -1061,6 +1066,7 @@ export default function App() {
   return (
     <div className="app">
       <header>
+        <Link className="back-link" to="/" title="All systems">← Systems</Link>
         <h1>{manifest.name}</h1>
         <span className="system-id">{manifest.system_id}</span>
         <button

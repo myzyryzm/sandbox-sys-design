@@ -91,6 +91,18 @@ h1 {
   font-size: 13px;
 }
 
+/* "← Systems" link back to the entry screen (header + error/start states). */
+.back-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.back-link:hover {
+  color: var(--text);
+}
+
 .error {
   color: #ff6b6b;
 }
