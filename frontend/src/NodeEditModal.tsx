@@ -21,11 +21,35 @@ import ServiceSubscribersTab from './ServiceSubscribersTab'
 import ServiceCallsTab from './ServiceCallsTab'
 import ServiceLbTab from './ServiceLbTab'
 import { customTypeOf } from './customTypes/index'
+import type { ComponentType } from 'react'
+import type { Manifest, ManifestNode } from './types/manifest'
+import type { DiscoveredEndpoint, OutageInfo } from './types/registries'
+import type { EditTabProps, LaunchSession } from './types/customTypes'
 
 // Which database engines expose the CDC / Seed tabs (must match the backend's
 // CDC_ENGINES in cdc.js and SEED_ENGINES in dbseed.js).
 const CDC_ENGINES = ['postgres', 'mongodb', 'dynamodb', 'cassandra']
 const SEED_ENGINES = ['postgres', 'mongodb', 'cassandra', 'dynamodb']
+
+// One side-menu tab: a kind tab rendered by the switch below, or a generic
+// Component tab (custom-type injected tabs + the Component-carrying kind tabs).
+interface TabEntry {
+  id: string
+  label: string
+  danger?: boolean
+  Component?: ComponentType<EditTabProps>
+}
+
+interface NodeEditModalProps {
+  systemId: string
+  node: ManifestNode
+  manifest: Manifest
+  // The node's live outage entry (null when the container is up).
+  current?: OutageInfo | null
+  onClose: () => void
+  onLaunch: LaunchSession
+  onTraceMethod?: (ep: DiscoveredEndpoint) => void
+}
 
 /**
  * Single "Edit" modal for a service / database / event-stream node. It replaces the
@@ -48,7 +72,7 @@ const SEED_ENGINES = ['postgres', 'mongodb', 'cassandra', 'dynamodb']
  * `busy` is lifted from the active tab (via each child's `onBusyChange`) so we can lock
  * tab-switching and dismissal while a delete / shutdown / rebuild is in flight.
  */
-export default function NodeEditModal({ systemId, node, manifest, current, onClose, onLaunch, onTraceMethod }) {
+export default function NodeEditModal({ systemId, node, manifest, current, onClose, onLaunch, onTraceMethod }: NodeEditModalProps) {
   // A load-balanced service's cluster ENTRY (`service-lb`) still owns its endpoints/gRPC
   // under its `<name>` id, so it gets the same feature tabs as a plain service plus the
   // Load Balancing tab. Its INSTANCES (`instanceOf`) are managed only from that tab —
@@ -66,7 +90,7 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
   // container every other node's metrics depend on.
   const isPrometheus = node.type === 'prometheus'
 
-  const tabs = []
+  const tabs: TabEntry[] = []
   if (isService || isServiceLb) {
     tabs.push({ id: 'endpoints', label: 'Endpoints' })
     tabs.push({ id: 'grpc', label: 'gRPC' })
@@ -171,9 +195,10 @@ export default function NodeEditModal({ systemId, node, manifest, current, onClo
     // Custom service-type tabs render their own component (embedded). They get the full
     // prop set so each can fetch/control what it needs.
     const custom = tabs.find((t) => t.id === active && t.Component)
-    if (custom) {
+    if (custom?.Component) {
+      const CustomTab = custom.Component
       return (
-        <custom.Component
+        <CustomTab
           embedded
           systemId={systemId}
           node={node}

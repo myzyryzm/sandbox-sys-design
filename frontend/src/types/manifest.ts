@@ -205,6 +205,26 @@ export interface PersistenceBlock {
   db: string
   table: string
   field: string
+  // Never present on the reader block; declared so union-wide reads type-check
+  // (a redis node reuses the `persistence` key for its RDB/AOF settings).
+  rdb?: undefined
+  aof?: undefined
+}
+
+// Redis RDB/AOF persistence settings (the Persistence tab writes this on a
+// redis node — same manifest key as the persistence-reader block above).
+export interface RedisPersistenceBlock {
+  rdb: { enabled: boolean; rules: Array<{ seconds: number; changes: number }> }
+  aof: { enabled: boolean; fsync: string; rewritePercent?: number; rewriteMinMb?: number }
+  // Never present on the RDB/AOF block; declared so union-wide reads type-check.
+  worker?: undefined
+  stream?: undefined
+  announce?: undefined
+  group?: undefined
+  fn?: undefined
+  db?: undefined
+  table?: undefined
+  field?: undefined
 }
 
 export interface ManifestNode {
@@ -251,7 +271,7 @@ export interface ManifestNode {
   etcd?: EtcdBlock
   consumerGroup?: ConsumerGroupBlock
   llm?: LlmBlock
-  persistence?: PersistenceBlock
+  persistence?: PersistenceBlock | RedisPersistenceBlock
   // WebSocket tier roles ('lb' | 'server') + which tier a node belongs to.
   wsRole?: string
   wsTier?: string

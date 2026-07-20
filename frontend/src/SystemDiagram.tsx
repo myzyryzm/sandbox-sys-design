@@ -16,12 +16,227 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { customTypeOf, CUSTOM_TYPES } from './customTypes/index'
 import { isExternalEndpoint, endpointPolicy, localPathOf } from './endpointPolicy'
 import { deriveFunctionTrace } from './scenarioBank'
+import type { FunctionTrace } from './scenarioBank'
 import { REDIS_BADGE, keyspaceLabel, keyspaceEdgeLabel } from './redisKeyspaceMeta'
 import { CDC_BADGE, CDC_BADGE_CLASS, cdcOpsOf, cdcRuleKey, cdcEdgeLabel } from './cdcMeta'
 import { DEFAULT_NODE_COLORS } from './nodeColors'
+import type {
+  Boundary,
+  Manifest,
+  ManifestNode,
+  MetricSpec,
+  Position,
+  RedisKeyspace,
+  RedisPersistenceBlock,
+  ResilienceBlock,
+} from './types/manifest'
+import type {
+  CdcRule,
+  ConsumerEntry,
+  DiscoveredEndpoint,
+  DiscoveredGrpcContract,
+  EtcdKeyspace,
+  GrpcMethodRecord,
+  OutageInfo,
+  ScenarioFunction,
+  WsMethodRecord,
+} from './types/registries'
+import type { CustomNodeState, CustomStateMap, DiagramEdgeSpec } from './types/customTypes'
+import type { InterviewRequirement, InterviewState } from './InterviewPanel'
+
+// ─── Local shapes ─────────────────────────────────────────────────────────────
+// Rects/points reuse the manifest's shapes (the boundary box + node positions).
+type Rect = Boundary
+type Point = Position
+
+// A node as the diagram renders it: a manifest node, or a render-only virtual
+// group-member card (`<base>::1`) that reads the base container's live data.
+interface RenderNode extends ManifestNode {
+  // The id whose live data (nodeData / customState / outages) this card shows.
+  stateKey?: string
+  groupVirtual?: boolean
+}
+
+// One member's live up/leader state in a topology strip (the etcd / redis /
+// postgres dots under the node), from App's per-member Prometheus reads.
+export interface MemberLiveState {
+  up: boolean
+  leader?: boolean
+  fenced?: boolean
+}
+
+// A node's polled metric/health data (the shape App's pollSystem produces).
+export interface NodeLiveData {
+  metrics: Record<string, number | null>
+  color: string
+  members?: Record<string, MemberLiveState>
+}
+
+// Live in-memory breaker/retry state for one connection (`from->to`), from the
+// fast /api/resilience-state poll.
+export interface ConnectionResilienceLive {
+  circuit_breaker?: {
+    state?: string // 'closed' | 'open' | 'half_open'
+    open_behavior?: string
+    trial?: { done: number; required: number } | null
+  }
+  retry?: {
+    active?: boolean
+    attempt?: number
+    max?: number
+    next_backoff_seconds?: number
+    exhausted?: boolean
+  }
+}
+
+// Live pool counters for one connection, from /api/connection-pool-state.
+export interface ConnectionPoolLive {
+  active?: number
+  max?: number
+  idle?: number
+}
+
+// The subset of the Settings prefix colors the diagram reads (edge tints).
+export interface DiagramEdgeColors {
+  function?: string
+  grpc?: string
+  consumer?: string
+  etcdEdge?: string
+}
+
+// A client's ƒ row: a bank function (with authored steps) or a websocket pool
+// client's builtin method (wsBuiltin, no steps) — see App's clientFunctions.
+export type DiagramClientFunction = ScenarioFunction & { wsBuiltin?: boolean }
+
+// A CONS row's record: a Kafka consumer function (consumers.json) or a
+// persistence reader's synthesized pull row, which carries no owning `service`
+// (the map key / node id is the owner).
+export type DiagramConsumerFn = Omit<ConsumerEntry, 'service'> & { service?: string }
+
+// The ws pool client's last-run delivery stats (ws-clients/<id>.stats.json).
+export interface WsClientStats {
+  ts?: number
+  args?: unknown
+  results?: {
+    sent?: number
+    delivered?: number
+    duplicates?: number
+    errors?: number
+    latencyMs?: { p50?: number | null; p95?: number | null }
+  }
+}
+
+// ─── Trace props (exactly what App's onSelect* setters store) ─────────────────
+
+// A selected client function: a derived bank trace (deriveFunctionTrace) or the
+// ws-builtin variant App builds inline ({ wsBuiltin: true, methods: [] }).
+export interface DiagramFunctionTrace extends FunctionTrace {
+  wsBuiltin?: boolean
+}
+
+// A selected consumer function (service → cluster + its downstream hops).
+export interface ConsumerTraceState {
+  cluster: string
+  service: string
+  topic: string
+  name: string
+  downstream?: string[]
+  downstreamDescriptions?: Record<string, string>
+}
+
+// A selected etcd keyspace (KEY row) or single subscription (SUB row → `focus`).
+export interface KeyspaceTraceState {
+  etcd: string
+  type: 'discovery' | 'config'
+  service?: string // the registrant — always present on a discovery trace
+  name?: string // the config keyspace identity
+  prefix: string
+  listeners: string[]
+  focus?: string
+}
+
+// A selected served gRPC method (each caller → this server).
+export interface RpcTraceState {
+  service: string
+  contract: string
+  method: string
+}
+
+// A selected redis keyspace: the keyspace fields plus the owning redis node.
+export interface RedisTraceState extends RedisKeyspace {
+  redis: string
+}
+
+// A selected CDC rule: the rule fields plus the capture worker's node id.
+export interface CdcTraceState {
+  cdc: string
+  table: string
+  operations: string[]
+  stream: string
+  topic: string
+}
+
+// ─── Internal geometry / drag state ───────────────────────────────────────────
+
+type IvBoxKey = 'frBox' | 'nfrBox'
+
+type DragGesture =
+  | { kind: 'node'; nodeId: string; startPos: Point }
+  | { kind: 'ws-fleet'; tier: string; startPositions: Record<string, Point> }
+  | { kind: 'iv-box'; box: IvBoxKey; startRect: Rect }
+  | { kind: 'iv-box-resize'; box: IvBoxKey; startRect: Rect }
+  | { kind: 'boundary-move'; startRect: Rect }
+  | { kind: 'boundary-resize'; handle: string; startRect: Rect }
+
+// The active gesture: the drag payload + the pointer bookkeeping beginDrag adds.
+// Distributed over the union member-by-member (a plain `DragGesture & {…}`
+// intersection would defeat discriminant narrowing on `kind`).
+type ActiveGesture = {
+  [K in DragGesture['kind']]: Extract<DragGesture, { kind: K }> & {
+    pointerId: number
+    startClientX: number
+    startClientY: number
+    moved: boolean
+  }
+}[DragGesture['kind']]
+
+// One clickable/read-only row a node lists under its metrics (see rowsOf).
+type NodeRow =
+  | { kind: 'method'; e: DiscoveredEndpoint }
+  | { kind: 'rpc'; contract: string; method: string }
+  | { kind: 'fn'; fn: DiagramClientFunction }
+  | { kind: 'cons'; c: DiagramConsumerFn }
+  | { kind: 'ks'; ks: EtcdKeyspace }
+  | { kind: 'sub'; etcdId: string; ks: EtcdKeyspace }
+  | { kind: 'redisks'; ks: RedisKeyspace }
+  | { kind: 'cdcrule'; r: CdcRule }
+  | { kind: 'wsstat'; label: string; value: string }
+
+// A trace hop: [fromId, toId, optional info-popup description].
+type TraceEdge = [string, string, string?]
+
+// A dotted group box (svc-lb cluster / worker group), labelled top-left.
+interface GroupBox extends Rect {
+  entryId: string
+  label: string
+  group?: boolean
+}
+
+// The dotted box around a websocket tier's servers + shared-methods panel.
+interface FleetBox extends Rect {
+  tier: string
+  groupLabel: string
+}
+
+// A websocket tier's shared-methods panel (the bottom card of the fleet stack).
+interface WsPanel extends Rect {
+  tier: string
+  methodNames: string[]
+}
 
 const NODE_W = 190
 const HEADER_H = 30
@@ -51,9 +266,10 @@ const METHOD_GAP = 8
 // this many characters fit before it spills past the card's right edge. Rows that can carry SEVERAL
 // badges (a CDC rule badges every operation that fires it) budget against it and truncate the name.
 const ROW_CHARS = Math.floor((NODE_W - 2 * PAD) / 6.6)
-const truncate = (s, max) => (s.length > max ? s.slice(0, Math.max(1, max - 1)) + '…' : s)
+const truncate = (s: string, max: number): string =>
+  s.length > max ? s.slice(0, Math.max(1, max - 1)) + '…' : s
 
-const COLOR_HEX = {
+const COLOR_HEX: Record<string, string> = {
   green: '#2e7d32',
   yellow: '#f9a825',
   red: '#c62828',
@@ -90,18 +306,19 @@ const EDGE_PARALLEL_OFFSET = 7
 // out per downstream — matching the collapsed base edges. Not a real manifest node id.
 // An etcd node's KEY row labels its keyspace by the registrant service's name,
 // camelCased (`llm-worker` → `llmWorker`) — friendlier than the /services/<name>/ prefix.
-const camelName = (id) => id.replace(/-+([a-z0-9])/g, (_, c) => c.toUpperCase())
+const camelName = (id: string): string =>
+  id.replace(/-+([a-z0-9])/g, (_, c: string) => c.toUpperCase())
 // A listening service's SUB row names its subscription after the etcd KEY it watches,
 // `on`-prefixed like an event handler (`llm-worker` → `onLlmWorker`, `app-settings` → `onAppSettings`).
-const onName = (id) => {
+const onName = (id: string): string => {
   const c = camelName(id)
   return 'on' + c.charAt(0).toUpperCase() + c.slice(1)
 }
 
 const WS_FLEET_PREFIX = 'ws-fleet:'
-const wsFleetId = (tier) => `${WS_FLEET_PREFIX}${tier}`
-const isFleetId = (id) => typeof id === 'string' && id.startsWith(WS_FLEET_PREFIX)
-const fleetTierOf = (id) => id.slice(WS_FLEET_PREFIX.length)
+const wsFleetId = (tier: string): string => `${WS_FLEET_PREFIX}${tier}`
+const isFleetId = (id: string): boolean => typeof id === 'string' && id.startsWith(WS_FLEET_PREFIX)
+const fleetTierOf = (id: string): string => id.slice(WS_FLEET_PREFIX.length)
 
 // Auto-generated hop descriptions for a websocket pool client's builtin tier trace
 // (client → L4 lb → relay fleet → presence + bus). The path has no authored steps — it's
@@ -110,7 +327,7 @@ const fleetTierOf = (id) => id.slice(WS_FLEET_PREFIX.length)
 // shown in the same trace-hop info popup. The LB → server phrasing reflects the live lb
 // algorithm; the presence lookup is numbered before the bus publish because that's the
 // order the routing actually happens (find the target's server, then relay to it).
-const WS_ALGO_PHRASE = {
+const WS_ALGO_PHRASE: Record<string, string> = {
   leastconn: 'least connections',
   roundrobin: 'round-robin',
   source: 'source-IP hashing',
@@ -118,13 +335,13 @@ const WS_ALGO_PHRASE = {
 const WS_HOP_DESC = {
   clientToLb:
     'User sends a chat message over its long-lived WebSocket connection to the L4 (TCP) load balancer. Because it balances at layer 4 — forwarding the raw TCP stream without terminating the WebSocket — the persistent connection stays pinned to one relay server for its whole lifetime, instead of being re-routed per message.',
-  lbToServer: (algo) =>
+  lbToServer: (algo: string): string =>
     `Load balancer routes the message to a websocket server via ${WS_ALGO_PHRASE[algo] || 'least connections'}.`,
   serverToPresence:
     "Receiving server looks up the recipient in the presence cache to find which server that client is connected to — needed only when the recipient isn't already connected to the same server as the sender.",
   serverToBus:
     "Receiving server publishes the message to the redis pub/sub bus on the recipient's server channel — done only when the target client is connected to a different server than the one that received the message, so that server can deliver it to its locally-connected client.",
-  serverToSink: (node) =>
+  serverToSink: (node: ManifestNode | undefined): string =>
     `When the recipient is offline — not connected to any relay server per the presence cache — the receiving server persists the undelivered message to ${node?.label || node?.id} (${node?.type || 'datastore'}) so it can be delivered or retrieved later.`,
 }
 
@@ -145,7 +362,7 @@ const MIN_BOUNDARY = 40
 
 // Resize a rect by dragging one named handle (n/s/e/w/ne/nw/se/sw) by (dx,dy) in user
 // units, keeping the opposite edge anchored and never shrinking below MIN_BOUNDARY.
-function resizeRect(rect, handle, dx, dy) {
+function resizeRect(rect: Rect, handle: string, dx: number, dy: number): Rect {
   let { x, y, w, h } = rect
   if (handle.includes('e')) w = Math.max(MIN_BOUNDARY, rect.w + dx)
   if (handle.includes('s')) h = Math.max(MIN_BOUNDARY, rect.h + dy)
@@ -162,7 +379,7 @@ function resizeRect(rect, handle, dx, dy) {
   return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) }
 }
 
-function isLB(node) {
+function isLB(node: ManifestNode): boolean {
   return node.type === 'load_balancer'
 }
 
@@ -172,7 +389,7 @@ function isLB(node) {
 // Prometheus is deletable too, but it's a VISUAL toggle only — its Delete tab removes
 // the diagram node (+ self-scrape) via /api/prom-node; the container keeps running
 // (all metric polling and every rebuild depend on it). Re-add it from the Add menu.
-function isDeletable(node) {
+function isDeletable(node: ManifestNode): boolean {
   // A worker's token stream is a database node but never individually deletable —
   // it cascades with its worker (remove.js blocks a direct delete on streamOf).
   if (node.streamOf) return false
@@ -190,7 +407,7 @@ function isDeletable(node) {
 }
 
 // Stable identity for an endpoint row (used for selection).
-function endpointKey(e) {
+function endpointKey(e: { method: string; path: string }): string {
   return `${e.method} ${e.path}`
 }
 
@@ -199,7 +416,7 @@ function endpointKey(e) {
 // expanded group); for every other metric-bearing node it's the metrics-dropdown count
 // (collapsed = 1 header row; expanded = header + metric/"no metrics" rows). The caller
 // computes it per node via `bodyRowsOf`; the raw metric count is a defensive fallback.
-function rowCount(node, bodyRows) {
+function rowCount(node: ManifestNode, bodyRows: number | null | undefined): number {
   if (isLB(node)) return Math.max(bodyRows || 0, 1)
   return bodyRows != null ? bodyRows : (node.metrics || []).length
 }
@@ -207,19 +424,19 @@ function rowCount(node, bodyRows) {
 // Websocket relay servers are an interchangeable fleet: their whole editing surface
 // (shared methods / per-server shutdown / tier delete) lives in the tier's
 // shared-methods panel drawn below them, so the nodes themselves carry no Edit button.
-function isWsServer(node) {
+function isWsServer(node: ManifestNode): node is ManifestNode & { wsTier: string } {
   return node.origin === 'create-websockets' && node.wsRole === 'server'
 }
 
 // An instance of a per-service load-balanced cluster: interchangeable, and managed only
 // from the cluster entry's Load Balancing tab — so, like a ws server, it carries no Edit
 // button of its own (and the diagram stacks it under its entry).
-function isSvcInstance(node) {
+function isSvcInstance(node: ManifestNode): node is ManifestNode & { instanceOf: string } {
   return node.type === 'service' && !!node.instanceOf
 }
 
 // The ordinal N of a load-balanced instance id `<entry>-N`, so the stack orders 1,2,3,….
-function svcOrdinal(id) {
+function svcOrdinal(id: string): number {
   const m = /-(\d+)$/.exec(id)
   return m ? Number(m[1]) : 0
 }
@@ -230,7 +447,7 @@ function svcOrdinal(id) {
 // Edit button (the click opens its base's modal — see the Edit onClick). EVERY redis
 // node gets one regardless of origin — even a custom-type-owned stream (e.g. an LLM
 // worker's) needs its Keyspaces tab, though its Shutdown/Delete stay with the owner.
-function hasEditButton(node) {
+function hasEditButton(node: ManifestNode): boolean {
   return (isDeletable(node) || node.type === 'redis') && !isWsServer(node) && !isSvcInstance(node)
 }
 
@@ -241,13 +458,13 @@ function hasEditButton(node) {
 // the group's Edit button — a scaler-less group falls back to a bare Edit button. The
 // base container's live data is shown on a render-only virtual `<name>-1` card stacked
 // below, alongside the real `<name>-2..N` instances.
-function isGroupBase(node) {
+function isGroupBase(node: ManifestNode): boolean {
   return node.type === 'service' && !node.instanceOf && !!customTypeOf(node)?.workerGroup?.(node)
 }
 
 // Where a node's live data (nodeData / customState / outages) lives: a virtual group
 // member card reads the base container's id via stateKey; every real node reads its own.
-const dataKeyOf = (node) => node.stateKey || node.id
+const dataKeyOf = (node: RenderNode): string => node.stateKey || node.id
 
 // Height of a worker group's entry (the bare Edit button).
 const GROUP_ENTRY_H = EDIT_H
@@ -257,44 +474,58 @@ const GROUP_COL_SIZE = 3
 const GROUP_COL_GAP_X = 16
 
 // y where the metric/endpoint rows end.
-function metricsBottom(node, bodyRows) {
+function metricsBottom(node: ManifestNode, bodyRows: number | null | undefined): number {
   return HEADER_H + PAD + rowCount(node, bodyRows) * LINE_H
 }
 
 // Height of the on-node API method rows band (the service's callable methods, listed
 // below its metrics). 0 when the node lists none (LB, db, event stream, or a service
 // with no visible methods).
-function methodsBandHeight(methods) {
+function methodsBandHeight(methods: readonly NodeRow[] | null | undefined): number {
   return methods && methods.length ? METHOD_GAP + methods.length * LINE_H : 0
 }
 
 // y where the metrics + the method rows end.
-function methodsBottom(node, bodyRows, methods) {
+function methodsBottom(
+  node: ManifestNode,
+  bodyRows: number | null | undefined,
+  methods: readonly NodeRow[] | null | undefined,
+): number {
   return metricsBottom(node, bodyRows) + methodsBandHeight(methods)
 }
 
 // Height of a custom service-type body band (e.g. a Download Coordinator bitmap grid),
 // reserved below the metrics. 0 when the node's type has no custom body for this state.
-function customBandHeight(node, runtime) {
+function customBandHeight(node: ManifestNode, runtime: CustomNodeState | undefined): number {
   const m = customTypeOf(node)
   return m?.diagramHeight ? m.diagramHeight(node, runtime, NODE_W) : 0
 }
 
 // y where all content (metrics + method rows + any custom band) ends — the Edit button
 // sits a gap below.
-function contentBottom(node, bodyRows, runtime, methods) {
+function contentBottom(
+  node: ManifestNode,
+  bodyRows: number | null | undefined,
+  runtime: CustomNodeState | undefined,
+  methods: readonly NodeRow[] | null | undefined,
+): number {
   const band = customBandHeight(node, runtime)
   return methodsBottom(node, bodyRows, methods) + (band ? CUSTOM_GAP + band : 0)
 }
 
-function nodeHeight(node, bodyRows, runtime, methods) {
+function nodeHeight(
+  node: ManifestNode,
+  bodyRows: number | null | undefined,
+  runtime: CustomNodeState | undefined,
+  methods: readonly NodeRow[] | null | undefined,
+): number {
   const bottom = contentBottom(node, bodyRows, runtime, methods)
   // Reserve the edit band (gap + button + bottom pad) on controllable nodes; others
   // keep the original single trailing pad.
   return hasEditButton(node) ? bottom + EDIT_GAP + EDIT_H + PAD : bottom + PAD
 }
 
-function formatMetric(value, metric) {
+function formatMetric(value: number | null | undefined, metric: MetricSpec): string {
   if (value == null) return '—'
   let v = value * (metric.scale || 1)
   let s
@@ -309,11 +540,11 @@ function formatMetric(value, metric) {
 // this — "open" means broken. State comes from the fast in-memory read; absent live
 // state we draw CLOSED (the at-rest, healthy look).
 const BREAKER_COLOR = { closed: '#2e7d32', open: '#c62828', half_open: '#f9a825' }
-function breakerStateOf(live) {
+function breakerStateOf(live: ConnectionResilienceLive | undefined): 'closed' | 'open' | 'half_open' {
   const s = live?.circuit_breaker?.state
   return s === 'open' || s === 'half_open' ? s : 'closed'
 }
-function BreakerCircle({ cx, cy, live }) {
+function BreakerCircle({ cx, cy, live }: { cx: number; cy: number; live: ConnectionResilienceLive | undefined }) {
   const state = breakerStateOf(live)
   const color = BREAKER_COLOR[state]
   const r = 6
@@ -331,7 +562,7 @@ function BreakerCircle({ cx, cy, live }) {
 
 // Live overlay text near the connection, driven by the actual reported state. Returns
 // null when there's nothing transient to show (healthy + idle).
-function breakerLabel(live) {
+function breakerLabel(live: ConnectionResilienceLive | undefined): string | null {
   const cb = live?.circuit_breaker
   const rt = live?.retry
   if (cb?.state === 'open') return cb.open_behavior === 'fallback' ? 'breaker OPEN — serving fallback' : 'breaker OPEN — fast-failing'
@@ -349,10 +580,63 @@ function breakerLabel(live) {
 
 // Compact live pool badge from a service's /pool/state entry: "pool <active>/<max> · <idle> idle".
 // Missing counts render as a dot so a partially-reporting service still shows something.
-function poolLabel(live) {
+function poolLabel(live: ConnectionPoolLive | undefined): string | null {
   if (!live) return null
-  const dot = (v) => (typeof v === 'number' ? v : '·')
+  const dot = (v: number | undefined): number | string => (typeof v === 'number' ? v : '·')
   return `pool ${dot(live.active)}/${dot(live.max)} · ${dot(live.idle)} idle`
+}
+
+export interface SystemDiagramProps {
+  manifest: Manifest
+  // Per-node live metric/health data (App's pollSystem output), keyed by node id.
+  nodeData: Record<string, NodeLiveData>
+  endpoints?: DiscoveredEndpoint[]
+  systemId: string
+  colors?: DiagramEdgeColors
+  nodeColors?: Record<string, string>
+  dragMode?: boolean
+  onRequestEdit?: (node: ManifestNode) => void
+  onRequestConnectionResilience?: (conn: { from: string; to: string }) => void
+  // Live breaker/retry + pool state, keyed by connection `from->to`.
+  resilienceState?: Record<string, ConnectionResilienceLive>
+  poolState?: Record<string, ConnectionPoolLive>
+  // Active temporary shutdowns, keyed by node id.
+  outages?: Record<string, OutageInfo>
+  pausedConsumers?: Set<string>
+  customState?: CustomStateMap
+  methodTrace?: DiscoveredEndpoint | null
+  onSelectMethod?: (endpoint: DiscoveredEndpoint) => void
+  onClearMethodTrace?: () => void
+  clientFunctions?: Record<string, DiagramClientFunction[]>
+  wsStats?: Record<string, WsClientStats>
+  wsMethods?: Record<string, WsMethodRecord> | null
+  onRequestWsMethods?: (tier: string) => void
+  wsAlgorithm?: string
+  functionTrace?: DiagramFunctionTrace | null
+  onSelectFunction?: (fn: DiagramClientFunction, clientId: string) => void
+  onClearFunctionTrace?: () => void
+  consumerFunctions?: Record<string, DiagramConsumerFn[]>
+  consumerTrace?: ConsumerTraceState | null
+  onSelectConsumer?: (fn: DiagramConsumerFn, serviceId: string) => void
+  onClearConsumerTrace?: () => void
+  etcdKeyspaces?: Record<string, EtcdKeyspace[]>
+  keyspaceTrace?: KeyspaceTraceState | null
+  onSelectKeyspace?: (ks: EtcdKeyspace, etcdId: string) => void
+  onClearKeyspaceTrace?: () => void
+  onSelectSubscription?: (ks: EtcdKeyspace, etcdId: string, listenerId: string) => void
+  grpcContracts?: DiscoveredGrpcContract[]
+  rpcTrace?: RpcTraceState | null
+  onSelectRpc?: (rpc: { contract: string; method: string }, serviceId: string) => void
+  onClearRpcTrace?: () => void
+  redisTrace?: RedisTraceState | null
+  onSelectRedisKeyspace?: (ks: RedisKeyspace, redisId: string) => void
+  onClearRedisTrace?: () => void
+  cdcRules?: Record<string, CdcRule[]>
+  cdcTrace?: CdcTraceState | null
+  onSelectCdcRule?: (rule: CdcRule, cdcId: string) => void
+  onClearCdcTrace?: () => void
+  interview?: InterviewState | null
+  interviewTestVerdicts?: Record<string, string>
 }
 
 export default function SystemDiagram({
@@ -470,7 +754,7 @@ export default function SystemDiagram({
   // endtoend processId -> 'PASS' | 'FAIL' for the row status dots.
   interview = null,
   interviewTestVerdicts = {},
-}) {
+}: SystemDiagramProps) {
   // Live relationship-edge colors from Settings, falling back to the module defaults so the
   // diagram is unchanged until the user overrides a color. These re-tint the same edges +
   // arrowheads whose badges the --badge-* CSS vars paint, keeping row and traced line in sync.
@@ -481,50 +765,60 @@ export default function SystemDiagram({
   // The nginx LB carries no health rules, so it has always rendered in the "unknown" gray —
   // that static color is the user's to pick (see LB_COLOR's use in the node loop below).
   const LB_COLOR = nodeColors?.load_balancer ?? DEFAULT_NODE_COLORS.load_balancer
-  const [selectedKey, setSelectedKey] = useState(null)
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
   // Index of the trace hop whose description popup is open (or null). Reset whenever the active
   // trace changes so a stale index can't point at the wrong hop of a different trace.
-  const [openInfo, setOpenInfo] = useState(null)
+  const [openInfo, setOpenInfo] = useState<number | null>(null)
   // Which LB service-accordions are expanded (set of service node ids). The LB groups its
   // routable endpoints by owning service and draws each group as a collapsible accordion;
   // every group is collapsed by default, so this starts empty.
-  const [openLbServices, setOpenLbServices] = useState(() => new Set())
+  const [openLbServices, setOpenLbServices] = useState(() => new Set<string>())
   // Which nodes have their metrics dropdown expanded (set of node ids). Every metric-bearing
   // node (service/db/kafka/cdc/prometheus) draws its metrics behind a collapsible "Metrics"
   // header like the LB's accordion; collapsed by default, so this starts empty.
-  const [openNodeMetrics, setOpenNodeMetrics] = useState(() => new Set())
+  const [openNodeMetrics, setOpenNodeMetrics] = useState(() => new Set<string>())
 
   // Drag-mode layout overrides. `drag` maps nodeId -> {x,y} and `boundaryOverride` holds the
   // in-progress / just-dropped boundary rect. These win over the manifest so a freshly dropped
   // node/box doesn't flicker back to its saved spot while the POST /api/layout round-trips.
-  const [drag, setDrag] = useState({})
-  const [boundaryOverride, setBoundaryOverride] = useState(null)
+  const [drag, setDrag] = useState<Record<string, Point>>({})
+  const [boundaryOverride, setBoundaryOverride] = useState<Rect | null>(null)
   // In-progress / just-dropped interview requirement-box rects ({ frBox?, nfrBox? }),
   // winning over interview.layout like boundaryOverride does — cleared once the polled
   // interview.layout catches up with the persisted drop (the effect below).
-  const [ivOverride, setIvOverride] = useState({})
+  const [ivOverride, setIvOverride] = useState<Partial<Record<IvBoxKey, Rect>>>({})
   const ivLayoutJson = JSON.stringify(interview?.layout || null)
   useEffect(() => {
     setIvOverride({})
   }, [ivLayoutJson])
   // Snapshot of the viewBox taken at drag start; while set, the canvas is pinned to it exactly
   // (no shrink, no grow) so the view stays put and doesn't scroll toward the edge mid-drag.
-  const [frozenView, setFrozenView] = useState(null)
-  const svgRef = useRef(null)
-  const gesture = useRef(null) // active drag: { kind, nodeId?, handle?, startRect?, startPos?, ... }
+  const [frozenView, setFrozenView] = useState<{
+    originX: number
+    originY: number
+    width: number
+    height: number
+  } | null>(null)
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const gesture = useRef<ActiveGesture | null>(null) // active drag: { kind, nodeId?, handle?, startRect?, startPos?, ... }
 
   // Pan/zoom. Panning is just native scrolling of `scrollRef` (the overflow:auto wrapper). `zoom`
   // scales the SVG's pixel size only. `pendingScroll` carries a cursor-anchored scroll target that
   // must be applied AFTER the SVG has resized (see the useLayoutEffect keyed on `zoom`).
   const [zoom, setZoom] = useState(1)
-  const scrollRef = useRef(null)
-  const pendingScroll = useRef(null)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const pendingScroll = useRef<{ left: number; top: number } | null>(null)
   // Set on drop: the frozen world origin + scroll offset at release, so the layout effect can
   // re-anchor the scroll to the same world point once the bounds re-fit (keeps the view still).
-  const preDropScroll = useRef(null)
+  const preDropScroll = useRef<{
+    worldX: number
+    worldY: number
+    scrollLeft: number
+    scrollTop: number
+  } | null>(null)
 
   const nodes = manifest.nodes
-  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
+  const byId: Record<string, ManifestNode> = Object.fromEntries(nodes.map((n) => [n.id, n]))
 
   // Render-only ordinal-1 cards for worker groups: the base node draws as the compact
   // group entry, and this virtual card shows the base CONTAINER's data (stateKey) as
@@ -532,7 +826,7 @@ export default function SystemDiagram({
   // never collide with a real node. instanceOf gives it the instance behaviors for free
   // (no Edit button, no method rows, group drag via the base). NOT added to byId — edges,
   // traces and drag-entry lookups must only ever see manifest nodes.
-  const groupVirtuals = nodes.filter(isGroupBase).map((b) => ({
+  const groupVirtuals: RenderNode[] = nodes.filter(isGroupBase).map((b) => ({
     ...b,
     id: `${b.id}::1`,
     label: `${b.id}-1`,
@@ -540,10 +834,10 @@ export default function SystemDiagram({
     stateKey: b.id,
     groupVirtual: true,
   }))
-  const renderNodes = [...nodes, ...groupVirtuals]
+  const renderNodes: RenderNode[] = [...nodes, ...groupVirtuals]
 
   // Effective on-screen position of a node: a live drag override wins over the manifest.
-  const posOf = (n) => drag[n.id] || n.position
+  const posOf = (n: RenderNode): Point => drag[n.id] || n.position
 
   // Clients are callers that live outside the system; each connects to the load
   // balancer. The edges are derived (not stored on the manifest).
@@ -558,9 +852,9 @@ export default function SystemDiagram({
   // Group the LB's visible endpoints by their owning service so the LB can draw one
   // collapsible accordion per service (header = service label, body = its methods).
   // First-seen order keeps the layout stable; the count badges the header.
-  const lbGroups = []
+  const lbGroups: { serviceId: string; label: string; endpoints: DiscoveredEndpoint[] }[] = []
   {
-    const byService = new Map()
+    const byService = new Map<string, (typeof lbGroups)[number]>()
     for (const e of visibleEndpoints) {
       let g = byService.get(e.service)
       if (!g) {
@@ -586,7 +880,7 @@ export default function SystemDiagram({
   // Rows the body draws: 0 when the node has no metrics; 1 (just the header) when collapsed;
   // header + metric rows when expanded (or header + one "no metrics" row when Prometheus is
   // absent). Feeds the layout helpers so collapsing/expanding actually resizes the box.
-  const metricBodyRows = (n) => {
+  const metricBodyRows = (n: ManifestNode): number => {
     const count = (n.metrics || []).length
     if (!count) return 0
     if (!openNodeMetrics.has(n.id)) return 1
@@ -594,7 +888,7 @@ export default function SystemDiagram({
   }
   // The per-node body-row count the layout helpers want: the LB's accordion rows, or a
   // metric node's dropdown rows.
-  const bodyRowsOf = (n) => (isLB(n) ? lbRows : metricBodyRows(n))
+  const bodyRowsOf = (n: ManifestNode): number => (isLB(n) ? lbRows : metricBodyRows(n))
 
   // Each service / external service lists its OWN callable methods on its node (like the
   // LB lists endpoints), so the diagram can trace one straight from the service. Drops
@@ -602,7 +896,7 @@ export default function SystemDiagram({
   // probe — it's operational plumbing with no downstream to trace, so it's just noise on
   // the diagram (it stays listed, badged, in the Edit ▸ Endpoints/Calls tabs). Keyed by
   // node id; empty for non-endpoint-host nodes.
-  const methodsByNode = new Map()
+  const methodsByNode = new Map<string, DiscoveredEndpoint[]>()
   for (const n of nodes) {
     // A load-balanced service's cluster entry (`service-lb`) still owns its endpoints under
     // `<name>`, so it lists them like a service. Its instances (`instanceOf`) serve the same
@@ -619,20 +913,21 @@ export default function SystemDiagram({
       ),
     )
   }
-  const methodsOf = (id) => methodsByNode.get(id) || []
+  const methodsOf = (id: string): DiscoveredEndpoint[] => methodsByNode.get(id) || []
 
   // Each controllable node lists clickable rows below its metrics. A service / external service
   // lists its callable METHODS; a client lists its own FUNCTIONS. `rowsOf` is the unified, ordered
   // list used for both sizing and rendering: method rows first, then function rows, each tagged
   // with its `kind`. (Today nodes carry one kind or the other, but the unified list keeps a mixed
   // node measured and drawn correctly should that ever change.)
-  const functionsOf = (id) => clientFunctions[id] || []
+  const functionsOf = (id: string): DiagramClientFunction[] => clientFunctions[id] || []
   // A service's consumer functions, dropping any whose cluster node no longer exists (so a deleted
   // cluster can't leave a dangling CONS row that traces to nothing).
-  const consumersOf = (id) => (consumerFunctions[id] || []).filter((c) => byId[c.cluster])
+  const consumersOf = (id: string): DiagramConsumerFn[] =>
+    (consumerFunctions[id] || []).filter((c) => byId[c.cluster])
   // The ws pool client's last-run delivery stats, folded into the row list so they size
   // the node like every other row (read-only — the renderer draws them non-interactive).
-  const wsStatRowsOf = (id) => {
+  const wsStatRowsOf = (id: string): NodeRow[] => {
     const s = wsStats[id]?.results
     if (!s) return []
     const lat = s.latencyMs || {}
@@ -641,17 +936,18 @@ export default function SystemDiagram({
       { label: 'dup · err', value: `${s.duplicates} · ${s.errors}` },
       { label: 'p50/p95', value: lat.p50 != null ? `${lat.p50}/${lat.p95} ms` : '—' },
       { label: 'last run', value: wsStats[id].ts ? new Date(wsStats[id].ts).toLocaleTimeString() : '—' },
-    ].map((r) => ({ kind: 'wsstat', ...r }))
+    ].map((r) => ({ kind: 'wsstat' as const, ...r }))
   }
   // An etcd cluster's keyspaces, dropping any DISCOVERY keyspace whose registrant service no
   // longer exists (so a deleted service can't leave a dangling KEY row that traces to nothing).
   // Config keyspaces have no registrant and always render.
-  const keyspacesOf = (id) => (etcdKeyspaces[id] || []).filter((k) => k.type === 'config' || byId[k.service])
+  const keyspacesOf = (id: string): EtcdKeyspace[] =>
+    (etcdKeyspaces[id] || []).filter((k) => k.type === 'config' || byId[k.service])
   // A SERVICE's etcd subscriptions: every keyspace (across all etcd clusters) whose
   // `listeners` include this service. Each becomes a clickable SUB row on the service node
   // (the mirror image of the etcd node's KEY rows) that traces registrant → etcd → this
   // service. Returns { etcdId, ks } so the row's click knows which cluster owns the keyspace.
-  const subscriptionsOf = (id) =>
+  const subscriptionsOf = (id: string): { etcdId: string; ks: EtcdKeyspace }[] =>
     Object.entries(etcdKeyspaces).flatMap(([etcdId, kss]) =>
       (kss || [])
         .filter((ks) => (ks.listeners || []).some((l) => l.service === id))
@@ -661,8 +957,10 @@ export default function SystemDiagram({
   // row per method of that contract (method names come from the registry, not the node). Only a
   // server-role attachment produces rows — a pure client (`grpc.clients` only) serves nothing,
   // and group instances (`instanceOf`) never carry the block, so both list nothing here.
-  const grpcMethodsByContract = new Map((grpcContracts || []).map((c) => [c.name, c.methods || []]))
-  const rpcsOf = (id) => {
+  const grpcMethodsByContract = new Map<string, GrpcMethodRecord[]>(
+    (grpcContracts || []).map((c) => [c.name, c.methods || []]),
+  )
+  const rpcsOf = (id: string): { contract: string; method: string }[] => {
     const servers = byId[id]?.grpc?.servers || []
     if (!servers.length) return []
     return servers.flatMap((contract) =>
@@ -672,28 +970,28 @@ export default function SystemDiagram({
   // A CDC worker's capture rules, dropping any whose target stream node no longer exists (so a
   // deleted cluster can't leave a dangling rule row that traces to nothing) — the same guard
   // consumersOf / keyspacesOf apply.
-  const cdcRulesOf = (node) =>
-    node.type === 'cdc' ? (cdcRules[node.id] || []).filter((r) => byId[r.stream]) : []
-  const rowsOf = (node) => {
+  const cdcRulesOf = (node: RenderNode): CdcRule[] =>
+    node.type === 'cdc' ? (cdcRules[node.id] || []).filter((r) => byId[r.stream!]) : []
+  const rowsOf = (node: RenderNode | null | undefined): NodeRow[] => {
     if (!node) return []
     return [
-      ...methodsOf(node.id).map((e) => ({ kind: 'method', e })),
+      ...methodsOf(node.id).map((e) => ({ kind: 'method' as const, e })),
       // Served RPC rows sit with the HTTP endpoints — both are callable surfaces this service
       // exposes. Like CONS/SUB, a worker group serves from its base container, so the virtual
       // `<name>-1` member card renders them (stateKey = the base id that carries the grpc block).
-      ...rpcsOf(node.groupVirtual ? node.stateKey : node.id).map((r) => ({ kind: 'rpc', ...r })),
-      ...functionsOf(node.id).map((fn) => ({ kind: 'fn', fn })),
+      ...rpcsOf(node.groupVirtual ? node.stateKey! : node.id).map((r) => ({ kind: 'rpc' as const, ...r })),
+      ...functionsOf(node.id).map((fn) => ({ kind: 'fn' as const, fn })),
       // A worker group's base renders as a bare Edit button, so its CONS rows live on
       // the virtual `<name>-1` member card instead (stateKey = the base id). Real
       // instances stay row-less — one row per group, not per member.
-      ...consumersOf(node.groupVirtual ? node.stateKey : node.id).map((c) => ({ kind: 'cons', c })),
-      ...keyspacesOf(node.id).map((ks) => ({ kind: 'ks', ks })),
+      ...consumersOf(node.groupVirtual ? node.stateKey! : node.id).map((c) => ({ kind: 'cons' as const, c })),
+      ...keyspacesOf(node.id).map((ks) => ({ kind: 'ks' as const, ks })),
       // A service's etcd subscriptions (SUB rows), anchored on the real node like CONS rows.
-      ...subscriptionsOf(node.groupVirtual ? node.stateKey : node.id).map((s) => ({ kind: 'sub', ...s })),
+      ...subscriptionsOf(node.groupVirtual ? node.stateKey! : node.id).map((s) => ({ kind: 'sub' as const, ...s })),
       // A redis node's declared keyspaces (typed KEY rows), straight off the manifest node.
-      ...(node.type === 'redis' ? node.keyspaces || [] : []).map((ks) => ({ kind: 'redisks', ks })),
+      ...(node.type === 'redis' ? node.keyspaces || [] : []).map((ks) => ({ kind: 'redisks' as const, ks })),
       // A CDC worker's capture rules (one row per rule, badged with the ops that fire it).
-      ...cdcRulesOf(node).map((r) => ({ kind: 'cdcrule', r })),
+      ...cdcRulesOf(node).map((r) => ({ kind: 'cdcrule' as const, r })),
       ...wsStatRowsOf(node.id),
     ]
   }
@@ -712,7 +1010,7 @@ export default function SystemDiagram({
   // registering draws ONE arrow regardless of instance count. Nodes that no longer exist are
   // skipped (a deleted registrant/listener can't leave a dangling arrow). These are pure render
   // state — there are no matching manifest edges (see the keyspace-trace block below).
-  const etcdEdgeMap = new Map() // "from->to" -> { from, to, kind }
+  const etcdEdgeMap = new Map<string, { from: string; to: string; kind: 'register' | 'watch' }>() // "from->to" -> { from, to, kind }
   for (const [etcdId, kss] of Object.entries(etcdKeyspaces)) {
     if (!byId[etcdId]) continue
     for (const ks of kss || []) {
@@ -732,20 +1030,20 @@ export default function SystemDiagram({
   // reserves the right vertical space and edges hit the recomputed center). A group base
   // renders as the fixed-height entry button; a virtual `<name>-1` card reads the base
   // container's runtime via dataKeyOf so its live-body band is reserved too.
-  const heightOf = (n) =>
+  const heightOf = (n: RenderNode): number =>
     isGroupBase(n) ? GROUP_ENTRY_H : nodeHeight(n, bodyRowsOf(n), customState[dataKeyOf(n)], rowsOf(n))
 
   // Websocket relay servers render as ONE combined body: a rigid vertical stack (one shared
   // column x, cascaded top-to-bottom by height + STACK_GAP) instead of each server floating at
   // its own manifest y. `effPos` returns that stacked position for a ws-server and the normal
   // (drag/manifest) position for everything else — every geometry consumer below reads it.
-  const wsServersByTier = new Map() // tier id -> its server nodes, in creation order (ws-server-1,-2,…)
+  const wsServersByTier = new Map<string, ManifestNode[]>() // tier id -> its server nodes, in creation order (ws-server-1,-2,…)
   for (const n of nodes) {
     if (!isWsServer(n)) continue
     if (!wsServersByTier.has(n.wsTier)) wsServersByTier.set(n.wsTier, [])
-    wsServersByTier.get(n.wsTier).push(n)
+    wsServersByTier.get(n.wsTier)!.push(n)
   }
-  const stackPosByServerId = new Map()
+  const stackPosByServerId = new Map<string, Point>()
   for (const [, servers] of wsServersByTier) {
     const anchorX = Math.min(...servers.map((s) => posOf(s).x))
     let y = Math.min(...servers.map((s) => posOf(s).y))
@@ -760,13 +1058,13 @@ export default function SystemDiagram({
   // stack's left-middle. Positions are DERIVED from the entry's position (not each
   // instance's own y), so the group reads as one unit and drags together. The entry keeps
   // its own posOf; only the instances are placed here.
-  const svcInstancesByEntry = new Map() // entry id -> instance nodes, ordinal order
+  const svcInstancesByEntry = new Map<string, ManifestNode[]>() // entry id -> instance nodes, ordinal order
   for (const n of nodes) {
     if (!isSvcInstance(n)) continue
     if (!svcInstancesByEntry.has(n.instanceOf)) svcInstancesByEntry.set(n.instanceOf, [])
-    svcInstancesByEntry.get(n.instanceOf).push(n)
+    svcInstancesByEntry.get(n.instanceOf)!.push(n)
   }
-  const svcStackPos = new Map()
+  const svcStackPos = new Map<string, Point>()
   const SVC_STACK_GAP_X = 28 // horizontal gap between the entry sidecar and its instance column — kept tight so the instances read as sitting right next to their load balancer
   for (const [entryId, instances] of svcInstancesByEntry) {
     const entry = byId[entryId]
@@ -791,16 +1089,16 @@ export default function SystemDiagram({
   // parse as an ordinal), then the real instances in ordinal order, wrapping to a new
   // column to the right when one fills. A scaler-less group (mid-migration system)
   // falls back to the bare Edit button at the base's position.
-  const groupStackPos = new Map()
-  const groupMembersByBase = new Map() // base id -> [virtual, ...instances] in render order
-  const scalerByBase = new Map() // base id -> its scaler sidecar node (scalerOf)
-  const scalerPos = new Map()
+  const groupStackPos = new Map<string, Point>()
+  const groupMembersByBase = new Map<string, RenderNode[]>() // base id -> [virtual, ...instances] in render order
+  const scalerByBase = new Map<string, ManifestNode>() // base id -> its scaler sidecar node (scalerOf)
+  const scalerPos = new Map<string, Point>()
   for (const b of nodes.filter(isGroupBase)) {
-    const virtual = groupVirtuals.find((v) => v.stateKey === b.id)
+    const virtual = groupVirtuals.find((v) => v.stateKey === b.id)!
     const instances = (svcInstancesByEntry.get(b.id) || [])
       .slice()
       .sort((a, x) => svcOrdinal(a.id) - svcOrdinal(x.id))
-    const members = [virtual, ...instances]
+    const members: RenderNode[] = [virtual, ...instances]
     groupMembersByBase.set(b.id, members)
     const bp = posOf(b)
     const scaler = nodes.find((s) => s.scalerOf === b.id)
@@ -809,7 +1107,7 @@ export default function SystemDiagram({
       scalerPos.set(scaler.id, { x: bp.x, y: bp.y })
     }
     const topY = bp.y + (scaler ? heightOf(scaler) : GROUP_ENTRY_H) + STACK_GAP
-    const colYs = [] // per-column running y (cards differ in height when live bodies show)
+    const colYs: number[] = [] // per-column running y (cards differ in height when live bodies show)
     members.forEach((m, i) => {
       const col = Math.floor(i / GROUP_COL_SIZE)
       if (colYs[col] == null) colYs[col] = topY
@@ -818,7 +1116,7 @@ export default function SystemDiagram({
     })
   }
 
-  const effPos = (n) =>
+  const effPos = (n: RenderNode): Point =>
     stackPosByServerId.get(n.id) ||
     groupStackPos.get(n.id) ||
     scalerPos.get(n.id) ||
@@ -826,16 +1124,16 @@ export default function SystemDiagram({
     posOf(n)
   // Drag payload for a whole tier: captures every server's CURRENT stacked position so a group
   // drag shifts them all by the same delta (the stack then re-derives identically, shifted).
-  const fleetDragArg = (tier) => ({
+  const fleetDragArg = (tier: string): DragGesture => ({
     kind: 'ws-fleet',
     tier,
     startPositions: Object.fromEntries(
-      (wsServersByTier.get(tier) || []).map((s) => [s.id, stackPosByServerId.get(s.id)]),
+      (wsServersByTier.get(tier) || []).map((s) => [s.id, stackPosByServerId.get(s.id)!]),
     ),
   })
 
   // Center using the EFFECTIVE position (so edges follow a node while it's being dragged).
-  const centerOf = (id) => {
+  const centerOf = (id: string): Point => {
     const n = byId[id]
     const p = effPos(n)
     return { x: p.x + NODE_W / 2, y: p.y + heightOf(n) / 2 }
@@ -843,7 +1141,7 @@ export default function SystemDiagram({
   // End a trace line at the target node's border (+ a small gap) instead of its center, so the
   // arrowhead lands just OUTSIDE the box — visibly pointing into the node — instead of hidden
   // under it. Walks back from the target center toward the source until it crosses the box edge.
-  const borderPointToward = (fromCenter, toNode) => {
+  const borderPointToward = (fromCenter: Point, toNode: RenderNode): Point => {
     const c = centerOf(toNode.id)
     const hw = NODE_W / 2
     const hh = heightOf(toNode) / 2
@@ -869,21 +1167,21 @@ export default function SystemDiagram({
   // any of these to its center and to the border point facing the other end.
   // (rectCenter/rectBorderToward/fleetBoxByTier/workerGroupBoxByBase are declared below but
   // only read at render time, so the forward reference is fine.)
-  const traceCenter = (id) =>
+  const traceCenter = (id: string): Point =>
     isFleetId(id)
-      ? rectCenter(fleetBoxByTier.get(fleetTierOf(id)))
+      ? rectCenter(fleetBoxByTier.get(fleetTierOf(id))!)
       : workerGroupBoxByBase.has(id)
-        ? rectCenter(workerGroupBoxByBase.get(id))
+        ? rectCenter(workerGroupBoxByBase.get(id)!)
         : centerOf(id)
-  const traceBorder = (id, toward) =>
+  const traceBorder = (id: string, toward: Point): Point =>
     isFleetId(id)
-      ? rectBorderToward(fleetBoxByTier.get(fleetTierOf(id)), toward)
+      ? rectBorderToward(fleetBoxByTier.get(fleetTierOf(id))!, toward)
       : workerGroupBoxByBase.has(id)
-        ? rectBorderToward(workerGroupBoxByBase.get(id), toward)
+        ? rectBorderToward(workerGroupBoxByBase.get(id)!, toward)
         : byId[id]
           ? borderPointToward(toward, byId[id])
           : centerOf(id)
-  const traceLine = (fromId, toId) => {
+  const traceLine = (fromId: string, toId: string): { a: Point; b: Point; mid: Point } => {
     const ac = traceCenter(fromId)
     const bc = traceCenter(toId)
     const a = traceBorder(fromId, bc)
@@ -892,14 +1190,14 @@ export default function SystemDiagram({
   }
   // Friendly name for a trace endpoint in the hop popup title: the synthetic ws-fleet box
   // reads as "server fleet", every real node uses its manifest label.
-  const hopEndpointLabel = (id) => (isFleetId(id) ? 'server fleet' : byId[id]?.label || id)
+  const hopEndpointLabel = (id: string): string => (isFleetId(id) ? 'server fleet' : byId[id]?.label || id)
 
   // The rect analogue of borderPointToward: the point on an arbitrary rectangle's border
   // along the line from its center toward `towardPt`, plus a small gap so an arrowhead there
   // lands just OUTSIDE the box. Used to anchor the collapsed websocket-fleet in/out edges to
   // the fleet box border instead of to each individual server.
-  const rectCenter = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 })
-  const rectBorderToward = (rect, towardPt, gap = 6) => {
+  const rectCenter = (r: Rect): Point => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 })
+  const rectBorderToward = (rect: Rect, towardPt: Point, gap = 6): Point => {
     const c = rectCenter(rect)
     const dx = towardPt.x - c.x
     const dy = towardPt.y - c.y
@@ -915,7 +1213,7 @@ export default function SystemDiagram({
   // gRPC edges are derived from each service's manifest `grpc.clients[].targets`
   // (client → the server it dials), drawn distinct from HTTP/trace edges. A target
   // that isn't a real node is skipped so we never draw a dangling edge.
-  const grpcEdges = []
+  const grpcEdges: { from: string; to: string; contract: string }[] = []
   for (const n of nodes) {
     for (const c of n.grpc?.clients || []) {
       for (const t of c.targets || []) {
@@ -929,9 +1227,17 @@ export default function SystemDiagram({
   // `from->to`. These are drawn as persistent, clickable lines; gRPC keeps its dashed
   // style. A connection carrying a circuit-breaker policy gets a mid-line breaker
   // circle. (Replication edges are not request paths — excluded.)
-  const connByKey = new Map()
-  const addConn = (from, to, kind, contract) => {
-    if (!byId[from] || !byId[to] || from === to) return
+  const connByKey = new Map<
+    string,
+    { from: string; to: string; kind: 'dep' | 'consume' | 'grpc'; contract?: string }
+  >()
+  const addConn = (
+    from: string | undefined,
+    to: string | undefined,
+    kind: 'dep' | 'consume' | 'grpc',
+    contract?: string,
+  ) => {
+    if (!from || !to || !byId[from] || !byId[to] || from === to) return
     const key = `${from}->${to}`
     const prev = connByKey.get(key)
     if (!prev) connByKey.set(key, { from, to, kind, contract })
@@ -964,21 +1270,21 @@ export default function SystemDiagram({
   const connections = [...connByKey.values()]
 
   // Per-connection resilience policy (from the manifest edge) for the breaker circle.
-  const resByConn = new Map(
+  const resByConn = new Map<string, ResilienceBlock | undefined>(
     (manifest.edges || []).filter((e) => e.resilience).map((e) => [`${e.from}->${e.to}`, e.resilience]),
   )
 
   // Replica clusters: a primary database and the read replicas that stream from
   // it (single source of truth: each secondary's `replicaOf`). This drives both
   // the always-on double-headed arrow and the dotted cluster box.
-  const replicaEdges = []
-  const clusterMembers = new Map() // primaryId -> Set(member node ids, incl. the primary)
+  const replicaEdges: { from: string; to: string }[] = []
+  const clusterMembers = new Map<string, Set<string>>() // primaryId -> Set(member node ids, incl. the primary)
   for (const n of nodes) {
     const primaryId = n.replicaOf
     if (!primaryId || !byId[primaryId]) continue
     replicaEdges.push({ from: primaryId, to: n.id })
     if (!clusterMembers.has(primaryId)) clusterMembers.set(primaryId, new Set([primaryId]))
-    clusterMembers.get(primaryId).add(n.id)
+    clusterMembers.get(primaryId)!.add(n.id)
   }
   const CLUSTER_PAD = 14
   const clusterBoxes = [...clusterMembers.values()].map((ids) => {
@@ -999,7 +1305,7 @@ export default function SystemDiagram({
   // instance. Uses effPos (the derived stacked positions), and labels the box with the
   // service name — the group's "full service" outline. LLM groups are boxed separately
   // below (header + worker column, drawn even for a single-worker group).
-  const groupBox = (entryId, members, labelBand = 16) => {
+  const groupBox = (entryId: string, members: RenderNode[], labelBand = 16): GroupBox => {
     const minX = Math.min(...members.map((m) => effPos(m).x))
     const minY = Math.min(...members.map((m) => effPos(m).y))
     const maxX = Math.max(...members.map((m) => effPos(m).x + NODE_W))
@@ -1015,23 +1321,27 @@ export default function SystemDiagram({
   }
   const svcLbBoxes = [...svcInstancesByEntry.entries()]
     .map(([entryId, instances]) => {
-      if (isGroupBase(byId[entryId] || {})) return null
+      if (isGroupBase((byId[entryId] || {}) as ManifestNode)) return null
       const members = [byId[entryId], ...instances].filter(Boolean)
       if (members.length < 2) return null
       return groupBox(entryId, members)
     })
-    .filter(Boolean)
+    .filter((b): b is GroupBox => Boolean(b))
   // A worker-group box's label doubles as the group's TITLE (the entry is the scaler
   // header card, or a bare Edit button on a scaler-less group), so it gets a taller
   // band and the larger .llm-group-label style. The scaler sits INSIDE the box, at
   // the top of the stack.
-  const workerGroupBoxes = [...groupMembersByBase.entries()].map(([baseId, members]) => ({
-    ...groupBox(baseId, [byId[baseId], scalerByBase.get(baseId), ...members].filter(Boolean), 26),
+  const workerGroupBoxes: GroupBox[] = [...groupMembersByBase.entries()].map(([baseId, members]) => ({
+    ...groupBox(
+      baseId,
+      [byId[baseId], scalerByBase.get(baseId), ...members].filter((m): m is RenderNode => Boolean(m)),
+      26,
+    ),
     group: true,
   }))
   // Edges address a worker group by its base id; anchor them on the group's dotted box
   // (like a ws fleet) instead of the entry card inside it — see traceCenter/traceBorder.
-  const workerGroupBoxByBase = new Map(workerGroupBoxes.map((b) => [b.entryId, b]))
+  const workerGroupBoxByBase = new Map<string, GroupBox>(workerGroupBoxes.map((b) => [b.entryId, b]))
 
   // The system boundary: the dotted box the user owns. It's a PERSISTED, freely
   // movable/resizable rectangle (manifest.boundary). Until the user customizes it, it
@@ -1040,7 +1350,7 @@ export default function SystemDiagram({
   // or outside it, the user's call. A live override (mid-drag / just-dropped) wins.
   const BOUNDARY_PAD = 26
   const internalNodes = renderNodes.filter((n) => !n.external)
-  let defaultBoundary = null
+  let defaultBoundary: Rect | null = null
   if (internalNodes.length) {
     const minX = Math.min(...internalNodes.map((n) => effPos(n).x))
     const minY = Math.min(...internalNodes.map((n) => effPos(n).y))
@@ -1063,8 +1373,8 @@ export default function SystemDiagram({
   // Compute the trace: the set of nodes on the path and the directed edges
   // between them (LB -> service -> each downstream node).
   const lbNode = nodes.find(isLB)
-  let traceNodes = null // null === nothing selected (no dimming)
-  let traceEdges = []
+  let traceNodes: Set<string> | null = null // null === nothing selected (no dimming)
+  let traceEdges: TraceEdge[] = []
 
   // A client-function trace wins over everything: client → LB → each called in-system service
   // (an external service is called directly, client → external, bypassing the LB) → its
@@ -1081,7 +1391,7 @@ export default function SystemDiagram({
   // A keyspace trace highlights the discovery flow around the etcd cluster: registrant → etcd
   // (the lease-put keepalive in) and etcd → each listener (the watch push out).
   const kt = keyspaceTrace && byId[keyspaceTrace.etcd] &&
-    (keyspaceTrace.type === 'config' || byId[keyspaceTrace.service]) ? keyspaceTrace : null
+    (keyspaceTrace.type === 'config' || byId[keyspaceTrace.service!]) ? keyspaceTrace : null
   // A served-RPC trace lights the server and every caller → server gRPC edge. The server node
   // it points at must still exist. Mutually exclusive with the other traces (App nulls the rest).
   const rpct = rpcTrace && byId[rpcTrace.service] ? rpcTrace : null
@@ -1099,7 +1409,7 @@ export default function SystemDiagram({
     // there's nothing to go stale.
     const tierId = byId[ft.client]?.wsTier
     const ids = new Set([ft.client])
-    if (byId[tierId]) {
+    if (tierId && byId[tierId]) {
       ids.add(tierId)
       // Each hop carries an auto-generated description (3rd tuple element) shown in the
       // trace-hop info popup, mirroring an endpoint trace's downstreamDescriptions.
@@ -1132,7 +1442,7 @@ export default function SystemDiagram({
         // primitives. Driven by the manifest edges (server.id → sink), so nothing goes stale.
         const serverIds = new Set(servers.map((s) => s.id))
         const tierNodeIds = new Set(nodes.filter((n) => n.wsTier === tierId).map((n) => n.id))
-        const extraSinks = new Set()
+        const extraSinks = new Set<string>()
         for (const e of manifest.edges || []) {
           if (serverIds.has(e.from) && !tierNodeIds.has(e.to) && byId[e.to]) extraSinks.add(e.to)
         }
@@ -1145,13 +1455,13 @@ export default function SystemDiagram({
     traceNodes = ids
   } else if (ft) {
     const ids = new Set([ft.client])
-    const seenSvc = new Set()
+    const seenSvc = new Set<string>()
     // Draw each directed edge once — a duplicate would stack a second sequence badge on the line.
-    const seenEdge = new Set()
+    const seenEdge = new Set<string>()
     // `label` (optional) becomes the edge's info-popup text — only the service → downstream hops
     // carry one (from the endpoint's downstreamDescriptions), matching the LB / method traces where
     // the client → LB / LB → service entry hops are label-less.
-    const addEdge = (from, to, label) => {
+    const addEdge = (from: string, to: string, label?: string) => {
       const k = `${from}->${to}`
       if (from === to || seenEdge.has(k)) return
       seenEdge.add(k)
@@ -1190,8 +1500,8 @@ export default function SystemDiagram({
     traceNodes = new Set([...ids].filter((id) => byId[id]))
   } else if (methodService) {
     const ids = new Set([methodService.id])
-    const dd = methodTrace.downstreamDescriptions || {}
-    for (const d of methodTrace.downstream || []) {
+    const dd = methodTrace!.downstreamDescriptions || {}
+    for (const d of methodTrace!.downstream || []) {
       if (byId[d]) {
         ids.add(d)
         traceEdges.push([methodService.id, d, dd[d] || ''])
@@ -1220,8 +1530,8 @@ export default function SystemDiagram({
     if (kt.type === 'config') {
       traceNodes = new Set([kt.etcd, ...listeners])
     } else {
-      traceNodes = new Set([kt.service, kt.etcd, ...listeners])
-      traceEdges.push([kt.service, kt.etcd, `lease-put ${kt.prefix}<worker> · TTL keepalive`])
+      traceNodes = new Set([kt.service!, kt.etcd, ...listeners])
+      traceEdges.push([kt.service!, kt.etcd, `lease-put ${kt.prefix}<worker> · TTL keepalive`])
     }
     for (const l of listeners) traceEdges.push([kt.etcd, l, `watch ${kt.prefix} (pushed)`])
   } else if (rkt) {
@@ -1245,8 +1555,8 @@ export default function SystemDiagram({
     const ids = new Set([cdct.cdc, cdct.stream])
     // Two consumer functions on the same service and topic would otherwise stack a second
     // sequence badge on the one line they share.
-    const seenEdge = new Set()
-    const addEdge = (from, to, label) => {
+    const seenEdge = new Set<string>()
+    const addEdge = (from: string, to: string, label?: string) => {
       const k = `${from}->${to}`
       if (from === to || seenEdge.has(k)) return
       seenEdge.add(k)
@@ -1315,25 +1625,41 @@ export default function SystemDiagram({
   // the shared methods every relay runs (from ws-shared/hooks.js) plus the Edit button
   // that opens the tier's shared modal. Derived from the servers' EFFECTIVE positions,
   // so it follows them through drags.
-  const wsPanels = []
+  interface WsPanel {
+    tier: string
+    x: number
+    y: number
+    w: number
+    h: number
+    methodNames: string[]
+  }
+  const wsPanels: WsPanel[] = []
   // Dotted "fleet" box per websocket tier, wrapping ALL of that tier's relay servers plus
   // its shared-methods panel as one grouped unit (padded on every side). The relays are an
   // interchangeable fleet: callers and the redis bus/presence connect to the box AS A UNIT
   // (a single arrow in, a single arrow out — see fleetConnections) rather than to each server.
-  const wsFleetBoxes = []
-  const fleetBoxByTier = new Map()
-  const serverTier = new Map() // server node id -> its tier
+  interface WsFleetBox {
+    tier: string
+    groupLabel: string
+    x: number
+    y: number
+    w: number
+    h: number
+  }
+  const wsFleetBoxes: WsFleetBox[] = []
+  const fleetBoxByTier = new Map<string, WsFleetBox>()
+  const serverTier = new Map<string, string | undefined>() // server node id -> its tier
   const FLEET_PAD = 20
   // Extra headroom added ABOVE the padding on the fleet box so the group id label has its own
   // title band and doesn't crowd the top server card.
   const FLEET_TITLE_GAP = 22
   {
-    const byTier = new Map()
+    const byTier = new Map<string, RenderNode[]>()
     for (const n of nodes) {
       if (!isWsServer(n)) continue
       serverTier.set(n.id, n.wsTier)
-      if (!byTier.has(n.wsTier)) byTier.set(n.wsTier, [])
-      byTier.get(n.wsTier).push(n)
+      if (!byTier.has(n.wsTier!)) byTier.set(n.wsTier!, [])
+      byTier.get(n.wsTier!)!.push(n)
     }
     for (const [tier, servers] of byTier) {
       const methodNames = wsMethods ? Object.keys(wsMethods) : ['onMessage', 'onSend']
@@ -1368,8 +1694,8 @@ export default function SystemDiagram({
   // ones that don't. A fleet-touching edge is COLLAPSED onto the fleet box: every server →
   // <same target> becomes one box → target arrow, and <same source> → every server becomes
   // one source → box arrow. Edges between two servers of a fleet are internal and dropped.
-  const normalConnections = []
-  const fleetConnMap = new Map()
+  const normalConnections: typeof connections = []
+  const fleetConnMap = new Map<string, { dir: 'in' | 'out'; tier: string; ext: string }>()
   for (const conn of connections) {
     const fromTier = serverTier.get(conn.from)
     const toTier = serverTier.get(conn.to)
@@ -1391,18 +1717,18 @@ export default function SystemDiagram({
   const ivBoxes = interview?.layout
     ? [
         {
-          key: 'frBox',
+          key: 'frBox' as const,
           title: 'Functional requirements',
           reqs: interview.functionalRequirements || [],
           rect: ivOverride.frBox || interview.layout.frBox,
         },
         {
-          key: 'nfrBox',
+          key: 'nfrBox' as const,
           title: 'Non-functional requirements',
           reqs: interview.nonFunctionalRequirements || [],
           rect: ivOverride.nfrBox || interview.layout.nfrBox,
         },
-      ].filter((b) => b.rect)
+      ].filter((b): b is typeof b & { rect: Rect } => !!b.rect)
     : []
 
   // Size the canvas to the true bounding box of everything (nodes ⊕ the system
@@ -1432,10 +1758,10 @@ export default function SystemDiagram({
     yEnds.push(b.y + b.h)
   }
   for (const b of ivBoxes) {
-    xStarts.push(b.rect.x)
-    xEnds.push(b.rect.x + b.rect.w)
-    yStarts.push(b.rect.y)
-    yEnds.push(b.rect.y + b.rect.h)
+    xStarts.push(b.rect!.x)
+    xEnds.push(b.rect!.x + b.rect!.w)
+    yStarts.push(b.rect!.y)
+    yEnds.push(b.rect!.y + b.rect!.h)
   }
   let originX = Math.min(...xStarts) - MARGIN
   let originY = Math.min(...yStarts) - MARGIN
@@ -1462,7 +1788,7 @@ export default function SystemDiagram({
   const worldW = width * PAN_FACTOR
   const worldH = height * PAN_FACTOR
 
-  const dimmed = (id) => traceNodes && !traceNodes.has(id)
+  const dimmed = (id: string) => traceNodes && !traceNodes.has(id)
 
   // Node-aware dim test. A trace set only ever carries BASE ids (a service name, a cluster
   // entry) — never the member cards the group is actually drawn as: the `<base>-scaler`
@@ -1471,10 +1797,10 @@ export default function SystemDiagram({
   // every visible card of a worker group / LB cluster whenever a method that touches its
   // base is selected. Resolve a member card up to its base so selecting such a method lights
   // up the WHOLE group. See groupVirtuals, isSvcInstance, and the scaler's scalerOf.
-  const dimmedNode = (node) => {
+  const dimmedNode = (node: RenderNode) => {
     if (!traceNodes) return false
     return ![node.id, node.instanceOf, node.scalerOf, node.stateKey]
-      .filter(Boolean)
+      .filter((id): id is string => !!id)
       .some((id) => traceNodes.has(id))
   }
 
@@ -1487,9 +1813,9 @@ export default function SystemDiagram({
   // endpoint's `downstreamMethods` map (node id -> ["METHOD /path", …], service-local). Each
   // call is resolved against that node's real rows, so a service-local path, an LB-prefixed
   // path, or the function alias all match — and only methods that actually exist light up.
-  const methodSelected = new Set()
+  const methodSelected = new Set<string>()
   if (methodService) {
-    const dm = methodTrace.downstreamMethods || {}
+    const dm = methodTrace?.downstreamMethods || {}
     for (const [nodeId, calls] of Object.entries(dm)) {
       const nodeRows = methodsByNode.get(nodeId)
       if (!nodeRows) continue
@@ -1509,7 +1835,7 @@ export default function SystemDiagram({
   // The SVG renders 1 user-unit = 1 px (width/height attrs match the viewBox dims, no CSS
   // scaling), so a screen-pixel pointer delta equals a user-unit delta — no CTM math needed.
   // Pointer capture on the <svg> routes move/up here even if the cursor leaves the element.
-  const persistLayout = (payload) => {
+  const persistLayout = (payload: Record<string, unknown>) => {
     if (!systemId) return
     fetch('/api/layout', {
       method: 'POST',
@@ -1522,7 +1848,7 @@ export default function SystemDiagram({
 
   // The interview boxes' sibling of persistLayout — their rects live in interview.json,
   // not the manifest, so they go through the interview plugin (which clamps w/h).
-  const persistInterviewLayout = (box, rect) => {
+  const persistInterviewLayout = (box: IvBoxKey, rect: Rect) => {
     if (!systemId) return
     fetch('/api/interview/layout', {
       method: 'POST',
@@ -1536,7 +1862,7 @@ export default function SystemDiagram({
   // The interview boxes resize from their single SE handle; mirror the server's 120px
   // floor so the optimistic rect can't undershoot what /api/interview/layout will store.
   const IV_MIN_BOX = 120
-  const ivRectFor = (g, dx, dy) => {
+  const ivRectFor = (g: Extract<ActiveGesture, { kind: 'iv-box' | 'iv-box-resize' }>, dx: number, dy: number): Rect => {
     if (g.kind === 'iv-box') {
       return { ...g.startRect, x: Math.round(g.startRect.x + dx), y: Math.round(g.startRect.y + dy) }
     }
@@ -1544,7 +1870,7 @@ export default function SystemDiagram({
     return { ...r, w: Math.max(IV_MIN_BOX, r.w), h: Math.max(IV_MIN_BOX, r.h) }
   }
 
-  const beginDrag = (e, g) => {
+  const beginDrag = (e: ReactPointerEvent, g: DragGesture) => {
     if (!dragMode) return
     e.stopPropagation()
     try {
@@ -1557,12 +1883,12 @@ export default function SystemDiagram({
   }
 
   // The boundary rect for a given gesture + cumulative delta (shared by move + drop).
-  const rectFor = (g, dx, dy) =>
+  const rectFor = (g: Extract<ActiveGesture, { kind: 'boundary-move' | 'boundary-resize' }>, dx: number, dy: number): Rect =>
     g.kind === 'boundary-move'
       ? { ...g.startRect, x: Math.round(g.startRect.x + dx), y: Math.round(g.startRect.y + dy) }
       : resizeRect(g.startRect, g.handle, dx, dy)
 
-  const onPointerMove = (e) => {
+  const onPointerMove = (e: ReactPointerEvent) => {
     const g = gesture.current
     if (!g) return
     // Jitter gate uses raw SCREEN pixels; the layout deltas are divided by `zoom` because the SVG now
@@ -1592,7 +1918,7 @@ export default function SystemDiagram({
     }
   }
 
-  const endDrag = (e) => {
+  const endDrag = (e: ReactPointerEvent) => {
     const g = gesture.current
     if (!g) return
     gesture.current = null
@@ -1621,7 +1947,7 @@ export default function SystemDiagram({
       persistLayout({ positions: { [g.nodeId]: { x: Math.round(g.startPos.x + dx), y: Math.round(g.startPos.y + dy) } } })
     } else if (g.kind === 'ws-fleet') {
       // One POST carrying every server's new position; layout.js iterates the positions map.
-      const positions = {}
+      const positions: Record<string, Point> = {}
       for (const [id, p] of Object.entries(g.startPositions)) {
         positions[id] = { x: Math.round(p.x + dx), y: Math.round(p.y + dy) }
       }
@@ -1638,9 +1964,9 @@ export default function SystemDiagram({
   // pixel size; the scroll offset is re-anchored so the point under the cursor stays fixed. The
   // scroll range only exists after the SVG resizes, so the re-anchor is stashed in `pendingScroll`
   // and applied in the useLayoutEffect keyed on `zoom` below.
-  const clampZoom = (z) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z))
+  const clampZoom = (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z))
 
-  const applyZoom = (next, offsetX, offsetY) => {
+  const applyZoom = (next: number, offsetX: number, offsetY: number) => {
     const el = scrollRef.current
     if (!el) return
     const z = clampZoom(next)
@@ -1720,7 +2046,7 @@ export default function SystemDiagram({
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    const onWheel = (e) => {
+    const onWheel = (e: WheelEvent) => {
       // While a node/boundary drag is in progress, lock the view: swallow the wheel so neither
       // ctrl/cmd-zoom nor native scroll-pan fights the drag.
       if (gesture.current) { e.preventDefault(); return }
@@ -1736,8 +2062,8 @@ export default function SystemDiagram({
 
   // Ctrl/Cmd+0 resets the view; ignore it inside the terminal so typing isn't hijacked.
   useEffect(() => {
-    const onKey = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === '0' && !e.target?.closest?.('.terminal-panel')) {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === '0' && !(e.target as HTMLElement | null)?.closest?.('.terminal-panel')) {
         e.preventDefault()
         resetView()
       }
@@ -2391,8 +2717,8 @@ export default function SystemDiagram({
                     </text>,
                   )
                 } else if (open) {
-                  for (let i = 0; i < node.metrics.length; i++) {
-                    const m = node.metrics[i]
+                  for (let i = 0; i < (node.metrics?.length ?? 0); i++) {
+                    const m = node.metrics![i]
                     const y = HEADER_H + PAD + (i + 1) * LINE_H + 12
                     out.push(
                       <g key={m.label}>
@@ -2599,7 +2925,7 @@ export default function SystemDiagram({
                   >
                     <rect x={4} y={y - 2} width={NODE_W - 8} height={LINE_H} rx="3" className="endpoint-bg" />
                     <text x={PAD} y={y + 12} className="endpoint-row">
-                      <tspan className="endpoint-method endpoint-method-redis">{REDIS_BADGE[ks.type] || 'KEY'}</tspan> {keyspaceLabel(ks)}
+                      <tspan className="endpoint-method endpoint-method-redis">{REDIS_BADGE[ks.type ?? ''] || 'KEY'}</tspan> {keyspaceLabel(ks)}
                     </text>
                     {ks.verified === false && (
                       <text x={NODE_W - PAD} y={y + 12} className="keyspace-unverified">
@@ -2820,14 +3146,14 @@ export default function SystemDiagram({
                 containers with shard MASTERS ringed (redis_instance_info role="master");
                 sentinel mode dots are the 3 sentinels watching the primary. */}
             {node.type === 'redis' && (node.sentinel || node.redisCluster) && (() => {
-              const members = node.redisCluster?.members || node.sentinel.members || []
+              const members = node.redisCluster?.members || node.sentinel?.members || []
               const live = data?.members || {}
               const yDots = h + (inOutage ? 26 : 12)
               const dotGap = Math.min(16, members.length > 1 ? (NODE_W - 24) / (members.length - 1) : 16)
               const x0 = NODE_W / 2 - ((members.length - 1) * dotGap) / 2
               const caption = node.redisCluster
                 ? `${node.redisCluster.shards} shards · ${node.redisCluster.replicasPerShard}/shard · 16384 slots`
-                : `${node.sentinel.size} sentinels · quorum ${node.sentinel.quorum} · ${
+                : `${node.sentinel!.size} sentinels · quorum ${node.sentinel!.quorum} · ${
                     nodes.filter((n) => n.replicaOf === node.id).length} replica(s)`
               return (
                 <g style={{ pointerEvents: 'none' }}>
@@ -2902,10 +3228,10 @@ export default function SystemDiagram({
               const p = node.persistence
               const yTopo = (node.sentinel || node.redisCluster) ? h + (inOutage ? 26 : 12) + 32 : null
               const y = yTopo ?? (h + (inOutage ? 28 : 14))
-              const rdb = p.rdb.enabled
+              const rdb = p.rdb?.enabled
                 ? `RDB ${p.rdb.rules.length} rule${p.rdb.rules.length === 1 ? '' : 's'}`
                 : 'RDB off'
-              const aof = p.aof.enabled ? `AOF ${p.aof.fsync}` : 'AOF off'
+              const aof = p.aof?.enabled ? `AOF ${p.aof.fsync}` : 'AOF off'
               return (
                 <text x={NODE_W / 2} y={y} className="node-pause-label" style={{ pointerEvents: 'none' }}>
                   💾 {rdb} · {aof}

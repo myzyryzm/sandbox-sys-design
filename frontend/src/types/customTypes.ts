@@ -44,7 +44,9 @@ export interface EditTabProps {
   current?: unknown
   manifest: Manifest
   onClose: () => void
-  onLaunch?: LaunchSession
+  // Required: NodeEditModal (the one generic renderer) always passes App's
+  // enqueueSession, and several tabs (ConsumerTab, EtcdKeyspacesTab, …) rely on it.
+  onLaunch: LaunchSession
   onBusyChange?: (busy: boolean) => void
 }
 

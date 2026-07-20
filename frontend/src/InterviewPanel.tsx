@@ -47,6 +47,12 @@ export interface InterviewState {
   messages?: InterviewMessage[]
   functionalRequirements?: InterviewRequirement[]
   nonFunctionalRequirements?: InterviewRequirement[]
+  // Diagram render state for the requirement text boxes (persisted via
+  // POST /api/interview/layout, read by SystemDiagram).
+  layout?: {
+    frBox?: { x: number; y: number; w: number; h: number }
+    nfrBox?: { x: number; y: number; w: number; h: number }
+  } | null
 }
 
 // One NDJSON event of the streamed interviewer turn.
