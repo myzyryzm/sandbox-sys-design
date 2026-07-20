@@ -1,0 +1,78 @@
+/* Badge colors are user-configurable via Settings: the --badge-* vars are set on
+   :root by applyBadgeColors() (prefixColors.js) when settings load. The hardcoded
+   fallbacks below are the defaults, so an unset value renders exactly as before. */
+.endpoint-method {
+  fill: var(--badge-http, #38ffbd);
+  color: var(--badge-http, #38ffbd);
+  font-weight: 700;
+}
+
+/* Client-function "ƒ" badge keeps the original blue (the base above is the HTTP-verb default). */
+.endpoint-method-fn {
+  fill: var(--badge-fn, #6ea8fe);
+}
+
+/* A consumer-function "PULL" badge, tinted to match the amber consume edge (.consume-edge /
+   CONSUME_COLOR) it traces, so the row and its line read as the same relationship. */
+.endpoint-method-consume {
+  fill: var(--badge-consume, #e0a44f);
+}
+
+/* A served-gRPC-method "RPC" badge, tinted to match the purple gRPC edge (.grpc-edge /
+   GRPC_COLOR) its trace lights up, so the row and its caller lines read as the same thing. */
+.endpoint-method-rpc {
+  fill: var(--badge-rpc, #b18cf2);
+}
+
+/* etcd keyspace "KEY" / subscription "SUB" badges. */
+.endpoint-method-etcd {
+  fill: var(--badge-etcd, #ff9eed);
+}
+
+/* Redis keyspace TYPE badges (STR / LIST / SET / HSET / ZSET / STRM / GEO). */
+.endpoint-method-redis {
+  fill: var(--badge-redis, #ff6b5e);
+}
+
+/* CDC rule OPERATION badges. A rule row carries one badge per operation that fires it
+   (INS / UPD / DEL), each its own color so create/modify/remove reads at a glance. */
+.endpoint-method-cdc-ins {
+  fill: var(--badge-cdc-ins, #4ec9a0);
+  color: var(--badge-cdc-ins, #4ec9a0);
+}
+
+.endpoint-method-cdc-upd {
+  fill: var(--badge-cdc-upd, #d9a441);
+  color: var(--badge-cdc-upd, #d9a441);
+}
+
+.endpoint-method-cdc-del {
+  fill: var(--badge-cdc-del, #e0574f);
+  color: var(--badge-cdc-del, #e0574f);
+}
+
+.endpoint-list-method {
+  color: var(--badge-http, #38ffbd);
+  font-weight: 700;
+  min-width: 52px;
+}
+
+/* etcd listener "WATCH" badge keeps the original blue — shares the function badge color. */
+.endpoint-list-method-watch {
+  color: var(--badge-fn, #6ea8fe);
+}
+
+/* Consumer-function "PULL" badge in the list, amber to match its diagram row + consume edge. */
+.endpoint-list-method-consume {
+  color: var(--badge-consume, #e0a44f);
+}
+
+/* etcd keyspace "KEY" / subscription "SUB" badges in the list, matching their diagram rows. */
+.endpoint-list-method-etcd {
+  color: var(--badge-etcd, #ff9eed);
+}
+
+/* Redis keyspace type badges in the list (Keyspaces tab), matching their diagram rows. */
+.endpoint-list-method-redis {
+  color: var(--badge-redis, #ff6b5e);
+}

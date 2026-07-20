@@ -1,0 +1,15 @@
+/* Toggle header for a section in the resilience modal (checkbox + section title). */
+.res-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+
+.res-section-head input {
+  width: auto;
+  flex: none;
+}

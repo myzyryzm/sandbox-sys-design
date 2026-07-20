@@ -1,3 +1,4 @@
+import './llmWorker.css'
 // LLM Worker — frontend module.
 //
 // The rendering registration for the custom service type: the Edit tabs (live state +

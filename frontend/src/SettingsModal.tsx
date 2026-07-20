@@ -1,3 +1,4 @@
+import './SettingsModal.css'
 import { useState } from 'react'
 import {
   DEFAULT_PREFIX_COLORS,

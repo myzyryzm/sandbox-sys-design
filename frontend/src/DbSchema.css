@@ -1,0 +1,213 @@
+/* DB schema viewer */
+.schema-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.schema-entity {
+  background: #14171e;
+  border: 1px solid #232733;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.schema-entity-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.schema-entity-kind {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.schema-entity-name {
+  color: var(--text);
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+}
+
+.schema-fields {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.schema-field {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 3px 0;
+  border-top: 1px solid #1f232c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.schema-field-name {
+  color: var(--text);
+}
+
+.schema-field-type {
+  color: #6ea8fe;
+}
+
+/* Collapsible entity rows: the head doubles as the toggle button. */
+.schema-entity-toggle {
+  width: 100%;
+  align-items: center;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.schema-entity-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* PK / FK column badges. */
+.schema-field-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.schema-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.schema-badge-pk {
+  color: #f3c96b;
+  background: rgba(243, 201, 107, 0.12);
+  border: 1px solid rgba(243, 201, 107, 0.35);
+}
+
+.schema-badge-fk {
+  color: #6ea8fe;
+  background: rgba(110, 168, 254, 0.1);
+  border: 1px solid rgba(110, 168, 254, 0.3);
+}
+
+/* Per-column index line (postgres primaries): chips + the add control. */
+.schema-field-indexes {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0 2px 14px;
+  font-size: 11px;
+}
+
+.schema-index-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #1b2029;
+  border: 1px solid #2a3040;
+  color: var(--text);
+}
+
+.schema-index-locked {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.schema-index-x {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: #ff8a8a;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.schema-index-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.schema-index-add select,
+.schema-index-add button {
+  font-size: 11px;
+  padding: 1px 4px;
+  background: #14171e;
+  color: var(--text);
+  border: 1px solid #2a3040;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.schema-index-add button:disabled,
+.schema-index-add select:disabled,
+.schema-index-x:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Database modal: read replica management. */
+.replica-badge {
+  background: #173b37;
+  color: #8fe3d6;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 6px 10px;
+  margin: 0 0 10px;
+}
+
+.replica-panel {
+  margin-top: 12px;
+}
+
+.replica-list {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0;
+}
+
+.replica-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.replica-mode {
+  color: #8fe3d6;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.replica-add {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.replica-add select {
+  width: auto;
+  flex: none;
+}

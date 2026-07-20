@@ -1,0 +1,50 @@
+.endpoint-locked {
+  color: var(--muted);
+  font-size: 11px;
+  cursor: default;
+}
+
+/* Marks an endpoint that isn't part of the external client surface (kept off the
+   load balancer). Listed for visibility but not an outside-callable route. */
+.endpoint-internal {
+  color: #c9a227;
+  background: rgba(201, 162, 39, 0.12);
+  border: 1px solid rgba(201, 162, 39, 0.35);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: default;
+}
+
+/* Path field: a fixed, non-editable `/<service>/` prefix + the editable rest. */
+.path-input {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  background: #0b0d12;
+  border: 1px solid #2a2e37;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.path-prefix {
+  display: flex;
+  align-items: center;
+  padding: 0 6px 0 8px;
+  background: #14171e;
+  color: var(--muted);
+  border-right: 1px solid #2a2e37;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.modal-card .path-input input {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

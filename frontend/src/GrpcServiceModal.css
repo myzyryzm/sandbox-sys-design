@@ -1,0 +1,72 @@
+.grpc-instruction {
+  color: var(--text);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
+.grpc-label {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 6px;
+}
+
+/* One served/attachable method + its description editor, grouped visually. */
+.grpc-method-block {
+  margin: 6px 0 10px;
+}
+
+.grpc-method-block .desc-input {
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* Service gRPC modal: serves/calls lists + target editor. */
+.grpc-attach-list {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0;
+}
+
+.grpc-attach-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.grpc-targets {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.grpc-override-tag {
+  background: #4a3a6b;
+  color: #d9c7ff;
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.grpc-target-editor {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.grpc-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.grpc-check input {
+  width: auto;
+  flex: none;
+}

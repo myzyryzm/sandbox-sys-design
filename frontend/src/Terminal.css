@@ -1,0 +1,68 @@
+/* The terminal panel prefers 420px below the canvas, but may SHRINK when the viewport is
+   short. Without the shrink, a short window pushed the fixed-height panel below the fold and
+   the Claude TUI's bottom rows (input box / mode line) got clipped. The canvas (a much larger
+   flex-basis) gives up its space first, so on a tall window the terminal still sits at 420px. */
+.terminal-panel {
+  flex: 0 1 420px;
+  min-height: 160px;
+}
+
+.terminal-panel {
+  margin-top: 20px;
+  border: 1px solid #2a2e37;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0b0d12;
+}
+
+.terminal-wrap {
+  display: flex;
+  flex-direction: column;
+  /* Fill whatever height the (now shrinkable) .terminal-panel was given, instead of a hard
+     420px — this is what lets the panel contract on a short viewport. FitAddon re-fits xterm
+     to the resulting host size via the ResizeObserver in Terminal.jsx. */
+  height: 100%;
+}
+
+.terminal-status {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid #2a2e37;
+  background: var(--panel);
+}
+
+.terminal-status code {
+  color: var(--text);
+}
+
+.terminal-status[data-status="connected"]::before {
+  content: "● ";
+  color: #2e7d32;
+}
+
+.terminal-status[data-status="connecting"]::before {
+  content: "● ";
+  color: #f9a825;
+}
+
+.terminal-status[data-status="disconnected"]::before {
+  content: "● ";
+  color: #c62828;
+}
+
+.terminal-host {
+  flex: 1;
+  min-height: 0;
+  /* No padding here: FitAddon sizes xterm to the host's FULL box (it doesn't subtract this
+     container's own padding), so an inner pad made the last row overflow the host and get
+     clipped by the panel's overflow:hidden — the "manual mode" line was cut in half. Breathing
+     room around the screen is provided by .xterm's own 4px/8px inset below instead. */
+  padding: 0;
+}
+
+/* Small inset between the panel border and the terminal screen, applied to xterm's own root so
+   it's inside the area FitAddon measures (unlike padding on .terminal-host, which it ignores). */
+.terminal-host .xterm {
+  padding: 4px 8px;
+}

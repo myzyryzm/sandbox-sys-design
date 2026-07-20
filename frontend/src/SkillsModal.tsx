@@ -1,3 +1,4 @@
+import './SkillsModal.css'
 import { useEffect, useState } from 'react'
 
 interface Skill {

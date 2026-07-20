@@ -1,3 +1,4 @@
+import './EventStreamModal.css'
 import { useEffect, useState } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
 import { resolveModelTs } from './modelBank'

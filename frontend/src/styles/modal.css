@@ -1,0 +1,789 @@
+/* Client "Functions" tab: the ordered step list, the editor rows, and run results. */
+.scenario-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.scenario-step {
+  padding: 8px 0;
+  border-bottom: 1px solid #232733;
+}
+.scenario-step-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.scenario-step-num {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #2a2f3c;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  line-height: 18px;
+}
+.scenario-path {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.scenario-step-actions {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+/* Function rows (Functions tab): the function signature, a step-count / pending badge,
+   then the Resume/Edit/Delete actions. */
+.scenario-fn-sig {
+  flex: 1;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scenario-stepcount {
+  color: var(--muted);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+.scenario-pending {
+  color: #d8a657;
+  background: rgba(216, 166, 87, 0.12);
+  border: 1px solid rgba(216, 166, 87, 0.35);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex: 0 0 auto;
+  cursor: default;
+}
+
+.scenario-results {
+  margin-top: 12px;
+  border-top: 1px solid #232733;
+  padding-top: 8px;
+}
+.scenario-results-head {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.scenario-results ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.scenario-result {
+  border-left: 3px solid #2e7d32;
+  padding: 4px 0 4px 8px;
+  margin-bottom: 8px;
+}
+.scenario-result.fail {
+  border-left-color: #c62828;
+}
+.scenario-result-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.scenario-result-call {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.scenario-result-status {
+  font-size: 11px;
+  font-weight: 600;
+  color: #2e7d32;
+}
+.scenario-result-status.fail {
+  color: #ff8a8a;
+}
+.scenario-result-body {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: #0b0d12;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+}
+
+/* Create-database modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.modal-card {
+  background: var(--panel);
+  border: 1px solid #2a2e37;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 560px;
+  padding: 20px 22px;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.modal-head h2 {
+  font-size: 17px;
+  margin: 0;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+/* Tab strip in the node "Edit" modal — one tab per former node action. */
+.modal-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid #2a2e37;
+  margin-bottom: 16px;
+}
+
+.modal-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 12px;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+
+.modal-tab:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.modal-tab.active {
+  color: var(--text);
+  border-bottom-color: #6ea8fe;
+}
+
+.modal-tab.danger.active {
+  color: #ef9a9a;
+  border-bottom-color: #c62828;
+}
+
+.modal-tab:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.form-row > span {
+  width: 64px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.form-row input,
+.form-row select {
+  flex: 1;
+}
+
+.modal-card input,
+.modal-card select {
+  background: #0b0d12;
+  color: var(--text);
+  border: 1px solid #2a2e37;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.form-section {
+  border-top: 1px solid #2a2e37;
+  margin-top: 8px;
+  padding-top: 14px;
+}
+
+.form-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.form-section-head button,
+.modal-actions button {
+  background: #232733;
+  color: var(--text);
+  border: 1px solid #2a2e37;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.entity {
+  background: #14171e;
+  border: 1px solid #232733;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.entity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.entity-row input {
+  flex: 1;
+}
+
+.fields {
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid #232733;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.field-row input {
+  flex: 1;
+}
+
+.link,
+.link-danger {
+  background: none !important;
+  border: none !important;
+  padding: 2px 4px !important;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.link {
+  color: #6ea8fe;
+}
+
+.link-danger {
+  color: #ff8a8a;
+}
+
+.modal-error {
+  color: #ff8a8a;
+  font-size: 13px;
+  white-space: pre-wrap;
+  /* protoc diagnostics can be several lines — keep them readable but capped. */
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Endpoints modal: existing-endpoint list + JSON/description inputs. */
+.endpoint-list {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+}
+
+.endpoint-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  border-bottom: 1px solid #232733;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.endpoint-list-path {
+  flex: 1;
+  color: var(--text);
+}
+
+.endpoint-list-proto {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.endpoint-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.endpoint-confirm {
+  color: #ff8a8a;
+  font-size: 12px;
+}
+
+/* An endpoint's optional function-name alias, shown as a chip in the list row. */
+.endpoint-alias {
+  color: #9d8cff;
+  background: rgba(124, 108, 255, 0.12);
+  border: 1px solid rgba(124, 108, 255, 0.35);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  cursor: default;
+}
+
+/* Read-only trail of an endpoint's saved specs (one row per create/update),
+   shown above the editable form in the Edit view. */
+.endpoint-history {
+  margin: 4px 0 12px;
+  border: 1px solid #232733;
+  border-radius: 6px;
+  background: #0b0d12;
+  padding: 8px 10px;
+}
+
+.endpoint-history-head {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+
+.endpoint-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.endpoint-history-row {
+  border-top: 1px solid #1c1f28;
+  padding-top: 8px;
+  font-size: 12px;
+}
+.endpoint-history-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.endpoint-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.endpoint-history-num {
+  color: #6ea8fe;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.endpoint-history-alias {
+  color: #9d8cff;
+  font-size: 11px;
+}
+
+.endpoint-history-at {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.endpoint-history-desc {
+  color: var(--text);
+  margin: 4px 0 2px;
+  white-space: pre-wrap;
+}
+
+.endpoint-history-schemas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+/* Changelog diff rows: only the fields that changed in an edit are shown. */
+.endpoint-history-initial {
+  color: #6ea8fe;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid #2a3550;
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.endpoint-history-change {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-top: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.endpoint-history-field {
+  color: var(--muted);
+}
+
+.endpoint-history-arrow {
+  color: var(--muted);
+}
+
+.endpoint-history-empty {
+  color: var(--muted);
+  font-style: italic;
+  margin-top: 3px;
+}
+
+/* Read-only current description shown above the "Add to description" field when
+   editing an endpoint (new text is appended to this, not a replacement). */
+.endpoint-current-desc {
+  flex: 1;
+  margin: 0;
+  background: #0b0d12;
+  border: 1px solid #232733;
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+/* Read-only list of an endpoint's per-downstream connection descriptions, with the
+   "Update descriptions" button below it (edit panel only). */
+.endpoint-conn {
+  flex: 1;
+  background: #0b0d12;
+  border: 1px solid #232733;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.endpoint-conn-list {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.endpoint-conn-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.endpoint-conn-node {
+  color: #6ea8fe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.endpoint-conn-text {
+  color: var(--text);
+}
+
+/* Field-level hint / inline validation under a form input. */
+.form-hint {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin: -4px 0 4px;
+}
+.field-error {
+  display: block;
+  color: #ff8a8a;
+  font-size: 11px;
+  margin: -4px 0 4px;
+}
+
+/* A checkbox row in a modal form (e.g. "Internal" in the endpoint editor): the box sits
+   next to its label with a wrapping hint below it, rather than the full-width text inputs
+   the other form rows use. */
+.form-row-check {
+  align-items: flex-start;
+}
+.form-row-check .check-field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.form-row-check input[type="checkbox"] {
+  flex: none;
+  align-self: flex-start;
+}
+.form-row-check .form-hint {
+  margin: 0;
+}
+
+.modal-card textarea.json-input,
+.modal-card textarea.desc-input {
+  flex: 1;
+  background: #0b0d12;
+  color: var(--text);
+  border: 1px solid #2a2e37;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.modal-card textarea.json-input,
+.modal-card textarea.proto-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Upload-a-.proto editor: same look as json-input but taller / monospace. */
+.modal-card textarea.proto-input {
+  flex: 1;
+  background: #0b0d12;
+  color: var(--text);
+  border: 1px solid #2a2e37;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  resize: vertical;
+}
+
+/* A form row whose control stacks below a top-aligned label (model dropdown +
+   inline schema / preview, or the TS editor). */
+.form-row-stack {
+  align-items: flex-start;
+}
+
+/* Request/response field: model dropdown stacked over the inline schema or preview. */
+.schema-field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.model-select {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+/* Read-only TypeScript of the referenced model, shown in place of the inline box. */
+.model-preview {
+  margin: 0;
+  background: #0b0d12;
+  border: 1px solid #2a2e37;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow: auto;
+}
+
+/* Inline checkbox + label (e.g. "enforce schema in producer/consumer code"). */
+.form-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.form-check input {
+  margin-top: 2px;
+}
+
+/* Topic message-schema contract badge: documented (muted) vs enforced (green). */
+.schema-badge {
+  margin-left: 8px;
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0.04em;
+  border: 1px solid #2a2e37;
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--muted);
+}
+
+.schema-badge.enforced {
+  color: #7ee0a8;
+  border-color: #2f5a44;
+}
+
+/* Impact-review panel: which services / databases a batch of edits affects. */
+.impact-group {
+  margin: 8px 0;
+}
+.impact-group-head {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.impact-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.impact-list li {
+  padding: 4px 6px;
+  border: 1px solid #232733;
+  border-radius: 6px;
+  background: #0b0d12;
+}
+.impact-field {
+  color: var(--muted);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.modal-actions .primary {
+  background: #2e7d32;
+  border-color: #2e7d32;
+  color: #fff;
+}
+
+.modal-actions .danger {
+  background: #c62828;
+  border-color: #c62828;
+  color: #fff;
+}
+
+.modal-actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Shared modal helpers — a status pill (used by the End-to-End modal) and the
+   muted description paragraph reused across many modals. */
+.sim-status {
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.sim-status.on {
+  color: #6ddf6d;
+}
+
+.sim-status.off {
+  color: var(--muted);
+}
+
+.sim-desc {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 8px 0 12px;
+}
+
+.grpc-method {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin: 2px 0;
+}
+
+.grpc-sig {
+  color: var(--muted);
+  margin-left: 6px;
+}
+
+.grpc-optional {
+  color: var(--muted);
+  font-style: normal;
+  font-size: 11px;
+}
+
+/* ── Model bank picker (Add database "From model bank" + Schema-from-models panel) ── */
+.model-pick-list {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.model-pick-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 2px;
+  border-bottom: 1px solid #232733;
+}
+.model-pick-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.model-pick-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.model-pick-refs {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #6ea8fe;
+}
+.model-pick-applied {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #3fb6a8;
+}
+.schema-models-panel {
+  border-top: 1px solid #2a2e37;
+  margin-top: 12px;
+  padding-top: 8px;
+}

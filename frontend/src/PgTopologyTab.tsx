@@ -1,3 +1,4 @@
+import './PgTopologyTab.css'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { queryVector } from './prometheus'
 import { buildPgTopologyRetrofitPrompt } from './pgTopologyPrompts'

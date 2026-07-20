@@ -1,0 +1,592 @@
+.diagram {
+  display: block;
+  background: transparent;
+  border: none;
+}
+
+/* Drag mode: nodes show a move cursor; the normal row "pointer" cursors are suppressed so
+   the whole node reads as draggable. Resize handles set their own cursor inline. */
+.diagram.drag-mode .draggable,
+.diagram.drag-mode .draggable * {
+  cursor: move;
+}
+
+.boundary-move-target {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke; /* only the border is a hit target; interior stays click-through */
+  cursor: move;
+}
+
+.boundary-handle {
+  fill: #6ea8fe;
+  stroke: #0f1115;
+  stroke-width: 1.5;
+  pointer-events: all;
+}
+
+.edge {
+  stroke: #5b6270;
+  stroke-width: 2;
+}
+
+/* Highlighted lifecycle trace (LB -> service -> downstream) drawn over the base
+   edges when an endpoint is selected. */
+.trace-edge {
+  stroke: #6ea8fe;
+  stroke-width: 3;
+  fill: none;
+}
+
+/* A trace hop's sequence number + optional info button, sitting at the line midpoint (rendered
+   as HTML inside a foreignObject). The row wrapper is click-through; only the button takes hits. */
+.trace-badge-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 100%;
+  pointer-events: none;
+}
+
+.trace-seq-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #6ea8fe;
+  color: #0f1115;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.trace-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #6ea8fe;
+  background: var(--panel);
+  color: #6ea8fe;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.trace-info-btn:hover,
+.trace-info-btn.active {
+  background: #6ea8fe;
+  color: #0f1115;
+}
+
+/* Popup showing a hop's full description. Sized to fit inside its foreignObject (no clipping);
+   long text wraps and scrolls. Only the panel takes pointer events so the surrounding
+   foreignObject area stays click-through. */
+.trace-info-popup {
+  width: 230px;
+  max-height: 214px;
+  overflow-y: auto;
+  pointer-events: auto;
+  background: var(--panel);
+  border: 1px solid #34405a;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.trace-info-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #2a3346;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+.trace-info-title {
+  flex: 1;
+  color: #6ea8fe;
+  font-weight: 700;
+  font-size: 10px;
+  word-break: break-word;
+}
+
+.trace-info-close {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.trace-info-close:hover {
+  color: var(--text);
+}
+
+.trace-info-body {
+  padding: 8px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Nodes / base edges not on the selected trace fade back so the path stands out. */
+.dim {
+  opacity: 0.22;
+  transition: opacity 0.15s ease;
+}
+
+/* A connection (outbound dependency) is clickable to attach/edit a resilience
+   policy. A fat transparent line over the thin visible one makes it easy to hit. */
+.connection-hit {
+  cursor: pointer;
+}
+
+.connection-hitline {
+  stroke: transparent;
+  stroke-width: 14;
+  fill: none;
+}
+
+.connection-hit:hover .edge,
+.connection-hit:hover .grpc-edge {
+  stroke: #6ea8fe;
+}
+
+/* Breaker circle on a connection: filled=CLOSED, hollow=OPEN, half=HALF-OPEN. The
+   ring is filled with the panel color so the connection line never shows through a
+   hollow (OPEN) circle. State colors are set inline from the live state. */
+.breaker-ring {
+  fill: var(--panel);
+  stroke-width: 2;
+}
+
+.breaker-label {
+  fill: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+
+/* Live connection-pool badge on a connection (active/idle/max) — sits below the line,
+   dimmer than the breaker label so it reads as secondary. */
+.pool-label {
+  fill: var(--text);
+  opacity: 0.72;
+  font-size: 9px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+
+.node-box {
+  fill: #232733;
+  stroke-width: 2;
+}
+
+.node-label {
+  fill: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  dominant-baseline: middle;
+}
+
+.node-type {
+  fill: rgba(255, 255, 255, 0.8);
+  font-size: 10px;
+  text-anchor: end;
+  dominant-baseline: middle;
+}
+
+/* External services live outside the system boundary: a dashed box and a dimmer
+   body so they read as "not ours / not monitored". The stroke color still comes
+   from the inline health color (neutral gray, since they aren't scraped). */
+.node-box.external {
+  fill: #1c1f27;
+  stroke-dasharray: 6 4;
+}
+
+/* The system boundary box: everything inside is our system; external services sit
+   outside it. A soft, light fill so it reads as a faint "light gray box". */
+.system-boundary {
+  fill: rgba(255, 255, 255, 0.04);
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 5;
+}
+
+.system-boundary-label {
+  fill: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  dominant-baseline: middle;
+}
+
+/* A client is a caller outside the system (drawn to the left). Tinted apart from an
+   external service (a callee, on the right) so the two read differently. */
+.node-box.client {
+  fill: #1b2230;
+}
+
+/* Websocket relay servers: interchangeable workers behind the tier's L4 lb, rendered as
+   stacked cards of one combined fleet body — SOLID green outline (2px stroke, green inline
+   color) so each card reads as part of that body. The dotted wrapper is .ws-fleet-box.
+   Body fill stays the internal one; health lives on the header strip. */
+.node-box.ws-server {
+  stroke: #2e7d32;
+}
+
+/* Dotted box wrapping a websocket tier's whole server fleet + its shared-methods panel,
+   so the interchangeable relays (and the methods they all run) read as one grouped unit.
+   Drawn behind those nodes; a single arrow enters and single arrows leave it. */
+.ws-fleet-box {
+  fill: rgba(158, 158, 158, 0.05);
+  stroke: #9e9e9e;
+  stroke-width: 1.5;
+  stroke-dasharray: 2 6;
+  stroke-linecap: round;
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+/* The per-tier "shared methods" panel: the bottom card of the combined fleet body — same
+   SOLID gray outline as the server cards above it so the stack reads as one unit. */
+.ws-shared-panel {
+  fill: #1e222c;
+  stroke: #9e9e9e;
+  stroke-width: 2;
+}
+
+/* Group id (server base name, e.g. "ws-server") in the upper-left of the dotted fleet box. */
+.ws-fleet-label {
+  fill: #9e9e9e;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  dominant-baseline: middle;
+}
+
+/* A worker group's scaler sidecar (consumer groups + LLM workers): amber accent
+   (matches the consume-edge palette) so it reads as the group's control loop, sitting
+   at the top of the group's stack and carrying the group's Edit button. */
+.node-box.scaler {
+  stroke: #e0a44f;
+  stroke-dasharray: 4 3;
+}
+
+/* An LLM worker group's box label — larger than the generic fleet label because it
+   doubles as the group's TITLE (the entry renders as the scaler header card, or a
+   bare Edit button on a scaler-less group). */
+
+.llm-group-label {
+  fill: #c9cdd6;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  dominant-baseline: middle;
+}
+
+/* Drag-mode move target spanning a fleet box: transparent but fully hittable, so a drag
+   anywhere inside the combined body (cards, panel, or the gaps between them) moves the whole
+   tier stack. Unlike .boundary-move-target this catches the interior too (pointer-events: all). */
+.ws-fleet-move-target {
+  fill: transparent;
+  pointer-events: all;
+  cursor: move;
+}
+.ws-shared-title {
+  fill: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+/* Amber "pending" marker on a method row whose latest description entry hasn't been
+   authored into ws-shared/hooks.js yet (registry implemented:false). */
+.ws-shared-pending {
+  fill: #d8a657;
+  font-size: 10px;
+  text-anchor: end;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Bottom "Edit" button on controllable nodes — opens the tabbed edit modal. */
+.node-edit {
+  cursor: pointer;
+}
+
+.node-edit-btn {
+  fill: #2a2f3c;
+  stroke: rgba(255, 255, 255, 0.18);
+  stroke-width: 1;
+}
+
+.node-edit:hover .node-edit-btn {
+  fill: #343b4a;
+  stroke: rgba(255, 255, 255, 0.32);
+}
+
+.node-edit-label {
+  fill: #e6e6e6;
+  font-size: 12px;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+
+.metric-label {
+  fill: var(--muted);
+  font-size: 12px;
+}
+
+/* Each endpoint row in the LB node is a clickable hit target that traces the
+   endpoint's lifecycle on the diagram. */
+.endpoint-hit {
+  cursor: pointer;
+}
+
+.endpoint-bg {
+  fill: transparent;
+}
+
+.endpoint-hit:hover .endpoint-bg {
+  fill: rgba(110, 168, 254, 0.12);
+}
+
+.endpoint-hit.selected .endpoint-bg {
+  fill: rgba(110, 168, 254, 0.22);
+  stroke: #6ea8fe;
+  stroke-width: 1;
+}
+
+.endpoint-row {
+  fill: var(--text);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Right-aligned amber marker on a scan-discovered redis keyspace row the user hasn't
+   confirmed yet (the Verify button itself lives in the node's Keyspaces tab). */
+.keyspace-unverified {
+  fill: #d8a657;
+  font-size: 10px;
+  text-anchor: end;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.endpoint-empty {
+  fill: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+}
+
+/* LB service-accordion header row: the collapsible title naming a service, whose body
+   is that service's method rows. */
+.lb-group-row {
+  fill: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.lb-group-caret {
+  fill: var(--muted);
+}
+
+.lb-group-count {
+  fill: var(--muted);
+  font-weight: 400;
+}
+
+.metric-value {
+  fill: var(--text);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-anchor: end;
+}
+
+/* ===== gRPC ===== */
+
+/* gRPC edges (client -> server), dashed + purple, distinct from HTTP/trace edges. */
+.grpc-edge {
+  stroke: #b18cf2;
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  fill: none;
+}
+
+/* A Kafka consume edge (consumer service -> the cluster it reads from). Solid amber so it's
+   distinct from a solid-gray producer/dep edge that points the same way (color, not dash). */
+.consume-edge {
+  stroke: #e0a44f;
+  stroke-width: 2;
+  fill: none;
+}
+
+/* Countdown shown under a node while it's temporarily shut down (orange). */
+.node-outage-label {
+  fill: #fb8c00;
+  font-size: 11px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+/* Badge under a Kafka node while its consumers are paused (amber, like outages). */
+.node-pause-label {
+  fill: #fb8c00;
+  font-size: 11px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+/* Replication: always-on double-headed arrow between a primary and a replica. */
+.replica-edge {
+  stroke: #3fb6a8;
+  stroke-width: 2;
+  fill: none;
+}
+
+/* Dotted box around a primary + its read replicas (drawn behind the nodes). */
+.db-cluster-box {
+  fill: none;
+  stroke: #3fb6a8;
+  stroke-width: 1.5;
+  stroke-dasharray: 2 6;
+  stroke-linecap: round;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* Live chunk-source edges on the diagram (star → mesh). */
+.custom-edge {
+  stroke: #6ea8fe;
+  stroke-width: 1.5;
+  stroke-dasharray: 3 3;
+  opacity: 0.7;
+}
+/* Always-on etcd discovery wiring (registrant → etcd → listeners), derived live from
+   etcd.json. Faint + dashed so it stays subordinate to the bright click-trace that lights
+   the same relationship (see the keyspace-trace block in SystemDiagram.jsx). */
+.etcd-edge {
+  stroke: #5aa0c0;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  fill: none;
+  opacity: 0.6;
+}
+/* Per-node bitmap grid drawn inside the node box (SVG). */
+.dc-node-cell {
+  fill: #2a2f3c;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 0.5;
+}
+.dc-node-cell.held {
+  fill: #2e7d32;
+  stroke: #2e7d32;
+}
+.dc-node-label {
+  fill: #9aa0aa;
+  font-size: 10px;
+  text-anchor: middle;
+}
+.dc-node-hint {
+  fill: #9aa0aa;
+  font-size: 10px;
+  font-style: italic;
+  text-anchor: middle;
+}
+
+/* ===== Interview requirement boxes on the diagram ===== */
+
+/* foreignObject-hosted "whiteboard" text boxes (FR / NFR). Fixed-size with inner
+   scroll — auto-grow would fight the diagram's bounds math every poll. */
+.iv-req-box {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: rgba(26, 29, 36, 0.92);
+  border: 2px dashed #4a5160;
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.iv-req-box-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 6px 10px 4px;
+  border-bottom: 1px dashed #3a4150;
+  flex: none;
+  cursor: default;
+}
+
+.iv-req-box-body {
+  overflow-y: auto;
+  padding: 4px 10px 8px;
+  flex: 1;
+}
+
+.iv-req-box .iv-req-row {
+  align-items: flex-start;
+}
+
+.iv-req-box .iv-req-dot {
+  margin-top: 4px;
+}
+
+.iv-req-box .iv-req-text {
+  white-space: normal;
+  overflow: visible;
+  line-height: 1.35;
+}
+
+.iv-req-box-empty {
+  color: var(--muted);
+  font-style: italic;
+  padding: 2px 0;
+}
+
+/* Drag-mode affordances for the boxes (mirrors the boundary handles). The HTML box
+   goes pointer-inert while dragging, but the browser would still sweep a native text
+   SELECTION under the moving cursor — suppress it. */
+.iv-box-drag .iv-req-box {
+  user-select: none;
+}
+
+.iv-box-drag .iv-req-box-title {
+  cursor: grab;
+}
+
+.iv-box-handle {
+  fill: #6ea8fe;
+  stroke: #0f1115;
+  stroke-width: 1;
+  cursor: nwse-resize;
+}

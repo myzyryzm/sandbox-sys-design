@@ -1,3 +1,4 @@
+import './downloadCoordinator.css'
 // Download Coordinator — frontend module (owns both service_types).
 //
 // The rendering registration for the custom service type: the Edit tabs it injects, its

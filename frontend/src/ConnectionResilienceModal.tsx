@@ -1,3 +1,4 @@
+import './ConnectionResilienceModal.css'
 import { useState, type ChangeEvent } from 'react'
 import type {
   CircuitBreakerConfig,

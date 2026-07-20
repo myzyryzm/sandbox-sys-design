@@ -1,3 +1,4 @@
+import './InterviewPanel.css'
 import { useEffect, useRef, useState } from 'react'
 
 // The Interview-mode chat panel: a right-side drawer where a headless `claude -p`

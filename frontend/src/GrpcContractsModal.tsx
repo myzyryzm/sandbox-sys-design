@@ -1,3 +1,4 @@
+import './GrpcContractsModal.css'
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react'
 import { buildGrpcUpdatePrompt, methodSig, type GrpcApplyEntry, type GrpcImpact } from './grpcBank'
 import type { DiscoveredGrpcContract, GrpcMethodRecord } from './types/registries'

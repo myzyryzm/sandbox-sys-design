@@ -1,3 +1,4 @@
+import './ConsumerTab.css'
 import { useCallback, useEffect, useState } from 'react'
 import type { ChangeEvent, KeyboardEvent } from 'react'
 import { nodeNameError, NODE_NAME_HINT } from './nodeName'

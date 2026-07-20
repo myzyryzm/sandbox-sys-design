@@ -1,0 +1,48 @@
+/* Contracts modal: a contract row + its expanded methods/instruction. */
+.grpc-contract {
+  display: block;
+}
+
+.grpc-contract-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.grpc-contract-meta {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.grpc-contract-body {
+  padding: 4px 0 8px 18px;
+}
+
+/* Authoring tabs: build a method via the form, or upload a whole .proto. */
+.grpc-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #2a2e37;
+}
+
+.grpc-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.grpc-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent, #5aa8ff);
+}
+
+.grpc-tab:disabled {
+  cursor: default;
+  opacity: 0.6;
+}

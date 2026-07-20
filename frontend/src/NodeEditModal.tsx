@@ -1,3 +1,4 @@
+import './NodeEditModal.css'
 import { useState } from 'react'
 import EndpointsModal from './EndpointsModal'
 import GrpcServiceModal from './GrpcServiceModal'

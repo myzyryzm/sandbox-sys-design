@@ -1,0 +1,46 @@
+/* --- Postgres Topology tab -------------------------------------------------- */
+/* The generic `.form-row > span` is a 64px label column, which is right for "Replicas"
+   but crushes a cluster-member row ("ledger-db · PRIMARY · lag 0.0s" + its buttons).
+   These rows carry the content on the LEFT and the actions on the right instead. */
+.pg-ha-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.pg-ha-row > .pg-ha-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.pg-ha-role {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pg-ha-lag {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.pg-ha-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* A form row whose label is a sentence rather than a word (e.g. "Declare the primary
+   dead after"), so it needs more than the default 64px. */
+.form-row.form-row-wide > span:first-child {
+  width: 210px;
+}

@@ -1,0 +1,267 @@
+/* ===== Interview mode ===== */
+
+/* Right-side chat drawer. Fixed so it coexists with the column layout (canvas +
+   terminal panel) without restructuring it; the diagram stays visible beside it. */
+.interview-panel {
+  position: fixed;
+  top: 64px;
+  right: 12px;
+  bottom: 12px;
+  width: 420px;
+  max-width: calc(100vw - 24px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid #2a2e37;
+  border-radius: 12px;
+  padding: 14px 16px;
+  z-index: 60; /* above the diagram, below .modal-overlay (100) */
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+
+.iv-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  border-bottom: 1px solid #2a2e37;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.iv-head h2 {
+  font-size: 16px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.iv-question {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.iv-question a {
+  color: var(--muted);
+  text-decoration: underline;
+}
+
+.iv-phase {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid #2a2e37;
+  border-radius: 999px;
+  padding: 1px 8px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.iv-phase-design {
+  color: #6ddf6d;
+  border-color: #2e7d32;
+}
+
+.iv-banner {
+  background: #3a2c14;
+  border: 1px solid #7a5a1e;
+  color: #f7cd91;
+  border-radius: 8px;
+  font-size: 12px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
+.iv-idle {
+  padding: 8px 0 12px;
+}
+
+.iv-confirm p {
+  font-size: 13px;
+  color: var(--text);
+  background: #34161a;
+  border: 1px solid #7a2e38;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.iv-confirm button {
+  margin-right: 8px;
+}
+
+.iv-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 2px;
+  min-height: 120px;
+}
+
+.iv-msg {
+  max-width: 88%;
+  border-radius: 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.iv-msg code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.iv-msg-user {
+  align-self: flex-end;
+  background: #24354d;
+  border: 1px solid #33507a;
+}
+
+.iv-msg-assistant {
+  align-self: flex-start;
+  background: #232733;
+  border: 1px solid #2a2e37;
+}
+
+.iv-msg-status {
+  align-self: center;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  max-width: 95%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.iv-thinking {
+  animation: iv-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes iv-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+/* Requirements block between the chat and the input. */
+.iv-reqs {
+  border-top: 1px solid #2a2e37;
+  margin-top: 8px;
+  padding-top: 8px;
+  max-height: 32%;
+  overflow-y: auto;
+}
+
+.iv-reqs-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 6px 0 4px;
+}
+
+.iv-req-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 0;
+}
+
+.iv-req-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: #555b66;
+}
+
+.iv-req-dot.ready { background: #6ea8fe; }
+.iv-req-dot.pass  { background: #2e7d32; }
+.iv-req-dot.fail  { background: #c62828; }
+
+.iv-req-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+  flex: none;
+}
+
+.iv-req-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.iv-req-btn {
+  flex: none;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.iv-error {
+  color: #ff8a80;
+  font-size: 12px;
+  background: #34161a;
+  border: 1px solid #7a2e38;
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-top: 8px;
+}
+
+.iv-input-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: flex-end;
+}
+
+.iv-input-row textarea {
+  flex: 1;
+  min-height: 54px;
+  max-height: 140px;
+  resize: vertical;
+  background: #12151c;
+  color: var(--text);
+  border: 1px solid #2a2e37;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.iv-input-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.iv-stop {
+  font-size: 11px;
+  color: #ff8a80;
+  background: none;
+  border: 1px solid #7a2e38;
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.iv-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid #2a2e37;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.iv-foot .sim-desc {
+  margin: 0;
+}

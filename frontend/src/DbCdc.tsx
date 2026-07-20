@@ -1,3 +1,4 @@
+import './DbCdc.css'
 import { useEffect, useState } from 'react'
 import { CDC_OPS as OPS } from './cdcMeta'
 import type { Manifest, ManifestNode } from './types/manifest'

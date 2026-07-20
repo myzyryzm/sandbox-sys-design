@@ -1,3 +1,4 @@
+import './DbSchema.css'
 import { useEffect, useState } from 'react'
 import { referencedModels, buildDbSchemaPrompt } from './modelBank'
 import type { Manifest, ManifestNode } from './types/manifest'

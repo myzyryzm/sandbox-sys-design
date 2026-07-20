@@ -1,3 +1,4 @@
+import './EditQueuePanel.css'
 /**
  * The edit queue panel — a top-left card (under the header/actions bar) listing the
  * Claude edit sessions waiting to run. Sessions run one at a time; the queue

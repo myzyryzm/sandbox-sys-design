@@ -1,3 +1,4 @@
+import './EndpointsModal.css'
 import { useCallback, useEffect, useState } from 'react'
 import type { ChangeEvent, KeyboardEvent, ReactElement } from 'react'
 import { endpointPolicy } from './endpointPolicy'

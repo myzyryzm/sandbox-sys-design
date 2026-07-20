@@ -1,3 +1,4 @@
+import './ServiceCallsTab.css'
 import { useEffect, useState } from 'react'
 import { endpointPolicy, localPathOf } from './endpointPolicy'
 import type { ManifestNode } from './types/manifest'

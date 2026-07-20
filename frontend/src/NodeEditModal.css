@@ -1,0 +1,55 @@
+/* Node "Edit" modal: tabs live in a vertical, independently-scrollable side
+   menu instead of a top strip. Scoped classes so the shared .modal-tabs /
+   .modal-tab rules (also used by WsSharedMethodsModal) stay a top strip. */
+.modal-card.node-edit-modal {
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 96px); /* 96px = overlay's 48px top+bottom padding */
+}
+
+.node-edit-modal .modal-head {
+  flex-shrink: 0;
+}
+
+.modal-body-split {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-height: 0; /* let children shrink so overflow works */
+  overflow: hidden;
+}
+
+.modal-tabs-side {
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: none;
+  border-right: 1px solid #2a2e37;
+  margin-bottom: 0;
+  padding-right: 8px;
+  overflow-y: auto;
+  flex-shrink: 0;
+  min-width: 132px;
+}
+
+.modal-tabs-side .modal-tab {
+  text-align: left;
+  border-bottom: none;
+  border-left: 2px solid transparent;
+  margin-bottom: 0;
+  white-space: nowrap;
+}
+
+.modal-tabs-side .modal-tab.active {
+  border-left-color: #6ea8fe;
+}
+
+.modal-tabs-side .modal-tab.danger.active {
+  border-left-color: #c62828;
+}
+
+.modal-tab-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}

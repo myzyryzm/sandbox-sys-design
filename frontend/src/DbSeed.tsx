@@ -1,3 +1,4 @@
+import './DbSeed.css'
 import { useEffect, useState } from 'react'
 import type { ManifestNode } from './types/manifest'
 

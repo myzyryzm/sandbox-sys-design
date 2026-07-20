@@ -1,3 +1,4 @@
+import './ConfirmDelete.css'
 import { useEffect, useState } from 'react'
 import type { Manifest, ManifestNode } from './types/manifest'
 

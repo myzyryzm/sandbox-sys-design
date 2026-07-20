@@ -1,3 +1,4 @@
+import './GrpcServiceModal.css'
 import { useCallback, useEffect, useState } from 'react'
 import {
   buildGrpcAttachPrompt,

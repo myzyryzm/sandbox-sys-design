@@ -1,3 +1,4 @@
+import './ModelsModal.css'
 import { useCallback, useEffect, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { modelImpact, buildModelUpdatePrompt } from './modelBank'

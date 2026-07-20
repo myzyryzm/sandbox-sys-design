@@ -1,3 +1,4 @@
+import './SystemDiagram.css'
 /**
  * Generic, manifest-driven diagram renderer.
  *
