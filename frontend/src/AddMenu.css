@@ -1,0 +1,49 @@
+/* "＋ Add ▾" header dropdown: the trigger uses .header-btn; the panel drops below it. */
+.add-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.add-menu-panel {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 6px;
+  min-width: 200px;
+  background: #232733;
+  border: 1px solid #2a2e37;
+  border-radius: 8px;
+  padding: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 60;
+}
+
+.add-menu-group-label {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 6px 10px 4px;
+}
+
+.add-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.add-menu-item:hover {
+  background: #2a2f3c;
+}
+
+.add-menu-divider {
+  border-top: 1px solid #2a2e37;
+  margin: 6px 4px;
+}

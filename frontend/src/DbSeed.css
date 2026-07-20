@@ -1,0 +1,88 @@
+/* Database "Seed" tab: per-field entry form + persisted seed entries list. */
+.seed-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.seed-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.seed-field-label {
+  width: 140px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.seed-field-name {
+  color: var(--text);
+}
+
+.seed-field-type {
+  color: #6ea8fe;
+  font-size: 11px;
+}
+
+.seed-field input {
+  flex: 1;
+}
+
+.seed-kv {
+  display: flex;
+  gap: 8px;
+}
+
+.seed-kv input {
+  flex: 1;
+}
+
+.seed-group {
+  margin-bottom: 10px;
+}
+
+.seed-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.seed-group-head code {
+  color: #6ea8fe;
+  font-size: 12px;
+}
+
+.seed-count {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.seed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.seed-entry {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  border-top: 1px solid #1f232c;
+}
+
+.seed-entry-vals {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  word-break: break-word;
+}

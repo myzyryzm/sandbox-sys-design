@@ -32,8 +32,9 @@ const PROM_ID = 'prometheus'
 const PROM_PORT = 9090
 
 // The single source of truth for the on-diagram Prometheus node. The seed data in the
-// existing systems' manifests mirrors this shape.
-function prometheusNode(manifest) {
+// existing systems' manifests mirrors this shape. Exported for the interview reset
+// (interviewReset.js), which seeds the emptied system with this exact node.
+export function prometheusNode(manifest) {
   return {
     id: PROM_ID,
     label: 'Prometheus',

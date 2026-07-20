@@ -36,6 +36,7 @@ import redisTopology from './server/redisTopology.js'
 import redisPersistence from './server/redisPersistence.js'
 import postgresTopology from './server/postgresTopology.js'
 import settings from './server/settings.js'
+import interview from './server/interview.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -75,7 +76,7 @@ function serveSystems() {
 }
 
 export default defineConfig({
-  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), dbIndexes(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin(), redisKeyspaces(), redisTopology(), redisPersistence(), postgresTopology(), settings()],
+  plugins: [react(), serveSystems(), claudeTerminal(), createDatabase(), createService(), externalServices(), clients(), scenarios(), consumers(), customServices(), removeComponent(), endpoints(), models(), dbSchema(), dbSeed(), dbIndexes(), skills(), eventStreams(), grpc(), createReplica(), cdc(), resilience(), connectionPool(), outage(), layout(), endtoend(), websockets(), serviceLb(), prometheusNodePlugin(), etcdPlugin(), redisKeyspaces(), redisTopology(), redisPersistence(), postgresTopology(), settings(), interview()],
   server: {
     proxy: {
       // Browser -> /api/prometheus/api/v1/query?...  proxied to Prometheus.

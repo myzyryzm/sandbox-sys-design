@@ -1,0 +1,37 @@
+/* CDC tab: operation checkboxes + one row per rule. */
+.cdc-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.cdc-op {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.cdc-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid #1f232c;
+}
+
+.cdc-rule-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.cdc-rule-arrow {
+  color: var(--muted);
+}
+
+.cdc-rule-main .link-danger {
+  margin-left: auto;
+}

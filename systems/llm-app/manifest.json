@@ -355,7 +355,7 @@
       "id": "llm-worker-stream",
       "label": "llm-worker-stream",
       "type": "redis",
-      "origin": "create-custom-service",
+      "origin": "create-database",
       "streamOf": "llm-worker",
       "position": {
         "x": 105,

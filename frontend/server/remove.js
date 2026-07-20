@@ -115,8 +115,10 @@ function ownedServices(id, kind, node) {
   if (kind === 'websocket') {
     return node?.wsRole === 'bus' || node?.wsRole === 'presence' ? [id, `${id}-exporter`] : [id]
   }
-  // A linked token stream (streamOf) is a redis with an exporter, no init sidecar.
-  if (node?.streamOf) return [id, `${id}-exporter`]
+  // A linked token stream (streamOf) that predates the create-database stamp is a
+  // bare redis + exporter. A stamped stream is kind 'database' and falls through so
+  // a Topology reshape (sentinel/cluster) enumerates its full container set.
+  if (node?.streamOf && kind !== 'database') return [id, `${id}-exporter`]
   // An etcd cluster is one node owning N member containers (<id>-1..N, no exporter —
   // etcd serves /metrics natively).
   if (kind === 'etcd') return node?.etcd?.members?.length ? [...node.etcd.members] : [id]
@@ -363,11 +365,16 @@ function cascadeChildIds(manifest, id, kind, node) {
   // A service's linked token stream (e.g. an LLM worker's redis) carries
   // `streamOf: <id>` and is torn down alongside it.
   const streamIds = manifest.nodes.filter((n) => n.streamOf === id).map((n) => n.id)
+  // A stream is a full database node (Topology tab), so it can carry read replicas of
+  // its own — they cascade with the worker too, torn down before their primary.
+  const streamReplicaIds = manifest.nodes
+    .filter((n) => n.replicaOf && streamIds.includes(n.replicaOf))
+    .map((n) => n.id)
   // A consumer group's scaler sidecar carries `scalerOf: <id>` and is torn down
   // alongside it (its folder is its node id, so the generic loop removes it; the
   // group's scaler.json lives in the base's folder and goes with the base).
   const scalerIds = manifest.nodes.filter((n) => n.scalerOf === id).map((n) => n.id)
-  return { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, scalerIds }
+  return { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, streamReplicaIds, scalerIds }
 }
 
 // Reverse-dependency lookup: which OTHER nodes still call/use `id`, so deleting it
@@ -504,6 +511,13 @@ function findDependents(system, manifest, id, kind, cascadeIds = new Set()) {
     }
   }
 
+  // Token stream — the owning worker XADDs its announcements + per-run token streams
+  // here, so the stream can only go via the worker's own delete cascade (validate()
+  // also hard-blocks a direct delete; this powers the Delete tab's proactive warning).
+  if (target?.streamOf && !skip(target.streamOf)) {
+    deps.push({ node: target.streamOf, label: labelOf(target.streamOf), via: 'stream', detail: 'writes its token stream here', calls: [] })
+  }
+
   return deps
 }
 
@@ -572,12 +586,12 @@ export async function handleDelete(body) {
   // primary, a database's CDC worker, a websocket lb's whole tier, a load-balanced
   // service's instances, a consumer group's scaler) — excluded from the dependency
   // guard below.
-  const { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, scalerIds } = cascadeChildIds(manifest, id, kind, node)
+  const { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, streamReplicaIds, scalerIds } = cascadeChildIds(manifest, id, kind, node)
 
   // Block the delete while another node still depends on `id` — an endpoint's HTTP
   // downstream, a gRPC client target, a Kafka producer/consumer, or a client function
   // step. The user must remove those calls first; cascaded children don't count.
-  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds]))
+  const dependents = findDependents(system, manifest, id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...instanceIds, ...streamReplicaIds, ...streamIds, ...scalerIds]))
   if (dependents.length) {
     const err = bad(`Cannot delete "${id}" — ${dependents.length} node(s) still depend on it; remove those calls first.`)
     err.dependents = dependents
@@ -593,8 +607,8 @@ export async function handleDelete(body) {
 
   // Remove the children first (workers, secondaries, a ws lb's tier, a load-balanced
   // service's instances, a consumer group's scaler), then the target, in one manifest write.
-  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds, id])
-  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds, id]) {
+  const removedIds = new Set([...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamReplicaIds, ...streamIds, ...scalerIds, id])
+  for (const rid of [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamReplicaIds, ...streamIds, ...scalerIds, id]) {
     const rnode = manifest.nodes.find((n) => n.id === rid)
     const rkind = kindOf(rnode)
     removeComposeServices(system, ownedServices(rid, rkind, rnode))
@@ -612,8 +626,12 @@ export async function handleDelete(body) {
       removeClientScript(system, rid)
     }
     removeScrapeJob(system, rid)
-    // A sentinel-replicated redis also owns the shared `<id>-sentinel` scrape job.
-    if (rnode?.sentinel) removeScrapeJob(system, `${rid}-sentinel`)
+    // A sentinel-replicated redis also owns the shared `<id>-sentinel` scrape job +
+    // config folder — per-child, so a cascaded (streamOf) redis is covered too.
+    if (rnode?.sentinel) {
+      removeScrapeJob(system, `${rid}-sentinel`)
+      fs.rmSync(path.join(systemDir(system), `${rid}-sentinel`), { recursive: true, force: true })
+    }
     // A replicated postgres also owns its failover watcher's scrape job + build folder
     // (the watcher is a container, not a node — like the redis sentinels).
     if (rnode?.postgresHa) {
@@ -633,10 +651,6 @@ export async function handleDelete(body) {
   if (node?.type === 'service-lb') {
     fs.rmSync(path.join(systemDir(system), `${id}-lb`), { recursive: true, force: true })
   }
-  // A deleted sentinel-replicated redis also owns its sentinel config folder.
-  if (node?.sentinel) {
-    fs.rmSync(path.join(systemDir(system), `${id}-sentinel`), { recursive: true, force: true })
-  }
   // A deleted etcd cluster also owns the top-level discovery registry (etcd.json —
   // fixed name, one cluster per system; the node has no folder of its own).
   if (kind === 'etcd') {
@@ -653,14 +667,14 @@ export async function handleDelete(body) {
   writeManifest(system, manifest)
 
   const log = await rebuild(system, kind)
-  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds], log }
+  return { ok: true, removed: id, kind, cascaded: [...cdcWorkerIds, ...secondaryIds, ...wsChildIds, ...instanceIds, ...streamReplicaIds, ...streamIds, ...scalerIds], log }
 }
 
 // What still depends on `id`, for the GET probe and a fresh-manifest computation.
 function dependentsFor(system, manifest, node) {
   const kind = kindOf(node)
-  const { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, scalerIds } = cascadeChildIds(manifest, node.id, kind, node)
-  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...instanceIds, ...streamIds, ...scalerIds]))
+  const { secondaryIds, cdcWorkerIds, wsChildIds, instanceIds, streamIds, streamReplicaIds, scalerIds } = cascadeChildIds(manifest, node.id, kind, node)
+  return findDependents(system, manifest, node.id, kind, new Set([...secondaryIds, ...cdcWorkerIds, ...wsChildIds, ...instanceIds, ...streamReplicaIds, ...streamIds, ...scalerIds]))
 }
 
 export default function removeComponent() {

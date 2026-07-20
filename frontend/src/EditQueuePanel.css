@@ -1,0 +1,143 @@
+/* Edit queue panel: a top-left overlay listing the Claude edit sessions waiting to run. */
+.edit-queue-panel {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 20;
+  width: 340px;
+  max-height: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid #34405a;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.edit-queue-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #2a3346;
+}
+
+.edit-queue-title {
+  color: #6ea8fe;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.edit-queue-count {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.edit-queue-close {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.edit-queue-close:hover {
+  color: var(--text);
+}
+
+.edit-queue-body {
+  overflow-y: auto;
+}
+
+.edit-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #232733;
+}
+
+.edit-queue-row:last-child {
+  border-bottom: none;
+}
+
+.edit-queue-row.status-running {
+  background: rgba(110, 168, 254, 0.08);
+}
+
+.edit-queue-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5b6270;
+}
+
+.edit-queue-dot.running {
+  background: #6ea8fe;
+  box-shadow: 0 0 0 3px rgba(110, 168, 254, 0.25);
+}
+
+.edit-queue-dot.done {
+  background: #2e7d32;
+}
+
+.edit-queue-kind {
+  flex: 0 0 auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  background: #232733;
+  border: 1px solid #2a2e37;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.edit-queue-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.edit-queue-target {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #6ea8fe;
+}
+
+.edit-queue-titletext {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.edit-queue-action {
+  flex: 0 0 auto;
+  background: #232733;
+  color: var(--text);
+  border: 1px solid #2a2e37;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.edit-queue-action:hover {
+  background: #2a2f3c;
+}
+
+.edit-queue-action.primary {
+  border-color: #35507e;
+  color: #6ea8fe;
+}

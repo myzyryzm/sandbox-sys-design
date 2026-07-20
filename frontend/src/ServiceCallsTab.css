@@ -1,0 +1,49 @@
+/* ── Service "Calls" tab: list of a service's API methods (Edit ▸ Calls) ───────── */
+.calls-list {
+  list-style: none;
+  margin: 8px 0 4px;
+  padding: 0;
+}
+.calls-row {
+  padding: 8px 8px;
+  border: 1px solid #232733;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+.calls-row:hover {
+  background: rgba(110, 168, 254, 0.1);
+  border-color: #6ea8fe;
+}
+.calls-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.calls-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.calls-route {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+.calls-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.calls-schemas {
+  display: flex;
+  gap: 10px;
+}
+.calls-schemas code {
+  color: #6ea8fe;
+}

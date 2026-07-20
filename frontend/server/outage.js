@@ -131,6 +131,16 @@ function clearEntry(system, node) {
   }
 }
 
+// For the interview reset (interview.js): forget every tracked outage for a system
+// WITHOUT firing the restart — the reset is about to remove those containers anyway,
+// and a timer firing later would try to `compose start` services that no longer exist.
+export function clearOutages(system) {
+  const m = outages.get(system)
+  if (!m) return
+  for (const e of m.values()) clearTimeout(e.timer)
+  outages.delete(system)
+}
+
 async function startOutage(body) {
   const { system, node } = body
   if (!isValidSystem(system)) throw bad(`unknown system "${system}"`)

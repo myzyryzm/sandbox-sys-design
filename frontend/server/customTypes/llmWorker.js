@@ -276,11 +276,15 @@ async function onAdd({ system, name, manifest }) {
     createdAt: ksNow,
     updatedAt: ksNow,
   })
+  // The stream is a REAL "Add database" redis — origin create-database gives it the
+  // full database treatment (Topology/Persistence/Shutdown tabs, outage control) —
+  // while streamOf keeps it owned by the worker: never individually deletable, torn
+  // down by the worker's delete cascade.
   addManifestNode(system, manifest, {
     id: streamName,
     label: streamName,
     type: 'redis',
-    origin: 'create-custom-service',
+    origin: 'create-database',
     streamOf: name,
     position: { x: position.x + 300, y: position.y },
     metrics: redisMetrics(streamName),
